@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# env
+.env
+
+# vas_ws
+/vas_ws
+/tmp
+/bak
+/logs
+
+# others
+references/
+!src/miner/skills/ast-grep/references/
+!src/miner/skills/ast-grep/references/experience.md
+bakup/
+.agent/
+.vscode/
+.claude/

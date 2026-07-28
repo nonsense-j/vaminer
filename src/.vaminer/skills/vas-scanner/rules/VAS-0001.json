@@ -1,0 +1,54 @@
+{
+  "vas_id": "VAS-0001",
+  "category": "SECURITY",
+  "language": "c",
+  "sources": [
+    {
+      "issue_id": "CVE-2019-3822",
+      "repo_url": "https://github.com/curl/curl",
+      "buggy_commit": "b780b30d1377adb10bbe774835f49e9b237fb9bb",
+      "fixed_commit": "50c9484278c63b958655a717844f0721263939cc",
+      "root_cause_summary": "Unsigned integer subtraction wrap in NTLM type-3 message size check"
+    }
+  ],
+  "summary": "When performing bounds checks on stack buffer writes, code must not use unsigned subtraction of an untrusted length from a buffer capacity constant to compute remaining space, because unsigned integer wrap defeats the guard when the length exceeds the capacity.",
+  "scenarios": {
+    "unsafe": [
+      "A fixed-size stack buffer is declared. An unsigned variable holds a data length derived from an untrusted source. A bounds check uses unsigned subtraction of that length from the buffer-size constant to compute remaining capacity as `buffer_size - data_length`. If `data_length > buffer_size`, the subtraction wraps to a large positive value, making the comparison pass unconditionally, and a subsequent copy operation overflows the buffer."
+    ],
+    "safe": [
+      "The bounds check uses addition instead of subtraction: `data_length + current_offset > buffer_size` correctly rejects oversized payloads without unsigned wrap.",
+      "The data length is explicitly validated to be less than or equal to the buffer capacity before the subtraction-based check (e.g., `if(data_length > BUFFER_SIZE) return error`).",
+      "The data length variable uses a signed type whose negative values are rejected before the subtraction."
+    ]
+  },
+  "anchors": [
+    {
+      "id": "stack-buffer-declaration",
+      "behavior_weight": 3,
+      "query_weight": 3,
+      "type": "pattern",
+      "query": "unsigned char $NAME[$SIZE];",
+      "behavior": "A local unsigned char array with a compile-time constant size is declared on the stack, serving as the target buffer for subsequent copy operations.",
+      "inspect_hint": "Trace all memcpy/memmove calls targeting this buffer and verify that their length arguments are bounded against actual remaining capacity using addition-based or pre-validated checks, not unsigned subtraction that can wrap."
+    },
+    {
+      "id": "unsigned-subtraction-bounds-check",
+      "behavior_weight": 5,
+      "query_weight": 3,
+      "type": "rule",
+      "query": "rule:\n  all:\n    - pattern: $A < ($B - $C)\n    - inside:\n        kind: if_statement\n        stopBy: end",
+      "behavior": "An if-condition compares a current offset or written-count variable against the result of subtracting a potentially untrusted unsigned length variable from a buffer-size constant, using unsigned arithmetic.",
+      "inspect_hint": "Check whether the subtracted length variable can exceed the buffer-size constant; if so, unsigned wrap produces a huge positive value causing the condition to evaluate true when it should be false, defeating the bounds guard."
+    },
+    {
+      "id": "unchecked-length-memcpy",
+      "behavior_weight": 4,
+      "query_weight": 4,
+      "type": "rule",
+      "query": "rule:\n  all:\n    - any:\n        - pattern: memcpy($BUF + $OFFSET, $SRC, $LEN)\n        - pattern: memcpy(&$BUF[$OFFSET], $SRC, $LEN)\n    - inside:\n        pattern: if($A < ($B - $LEN)) { $$$ }\n        stopBy: end",
+      "behavior": "A memcpy call copies data into a stack buffer using a length argument that was compared in a preceding unsigned-subtraction bounds check rather than independently validated against remaining buffer capacity.",
+      "inspect_hint": "Examine whether the memcpy length argument can exceed remaining buffer capacity; if the preceding guard relied on unsigned subtraction, it may have been silently bypassed via wrap-around, leading to an overflow."
+    }
+  ]
+}
