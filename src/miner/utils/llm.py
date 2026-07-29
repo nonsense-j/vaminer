@@ -9,7 +9,13 @@ from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.deepseek import DeepSeekProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 
-from ..configs import DEEPSEEK_API_KEY, LLM_MODEL, LLM_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL
+from ..configs import (
+    DEEPSEEK_API_KEY,
+    LLM_MODEL,
+    LLM_PROVIDER,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+)
 
 
 @cache

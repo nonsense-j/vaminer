@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from io import StringIO
-import os
 from pathlib import Path
 
 from git import Actor, Repo

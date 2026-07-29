@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+from contextlib import suppress
 from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
@@ -13,16 +15,39 @@ from ..core.validation import (
     validate_root_cause_analysis,
 )
 from .logger import logger
-from .models import IssueCollectionInfo, RootCauseAnalysis, VASCoreInfo
+from .models import (
+    AnalysisSubject,
+    IssueCollectionInfo,
+    RootCauseAnalysis,
+    VASCoreInfo,
+)
 
 
 class AgentCache:
     """Workspace-local cache for one typed agent result."""
 
-    def __init__(self, agent_name: str, cache_dir: Path, suffix: str = "json"):
-        self.agent_name = agent_name.lower().replace(" ", "_")
+    def __init__(
+        self,
+        agent_name: str,
+        cache_dir: Path,
+        suffix: str = "json",
+        *,
+        runtime: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        self.agent_name = self._part(agent_name)
+        identity = [self.agent_name]
+        if runtime is not None:
+            identity.append(self._part(runtime))
+        if model is not None:
+            identity.append(self._part(model))
         cache_dir.mkdir(parents=True, exist_ok=True)
-        self.path = cache_dir / f"{self.agent_name}.{suffix}"
+        self.path = cache_dir / f"{'.'.join(identity)}.{suffix}"
+
+    @staticmethod
+    def _part(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9._-]+", "_", value.strip().lower())
+        return normalized.strip("._-") or "unknown"
 
     def get(self) -> str | None:
         return self.path.read_text(encoding="utf-8") if self.path.exists() else None
@@ -33,10 +58,8 @@ class AgentCache:
         else:
             text = str(result)
             if self.path.suffix == ".json":
-                try:
+                with suppress(json.JSONDecodeError):
                     text = json.dumps(json.loads(text), indent=2)
-                except json.JSONDecodeError:
-                    pass
         self.path.write_text(text, encoding="utf-8")
 
 
@@ -64,7 +87,7 @@ def load_collection_cache(
 def load_root_cause_cache(
     cache: AgentCache,
     *,
-    repo_path: Path,
+    source_root: Path,
     cases_dir: Path,
 ) -> RootCauseAnalysis | None:
     """Load root cause data only when its cases and source evidence remain valid."""
@@ -78,7 +101,7 @@ def load_root_cause_cache(
         return None
     errors = validate_root_cause_analysis(
         analysis,
-        repo_path=repo_path,
+        source_root=source_root,
         cases_dir=cases_dir,
     )
     if errors:
@@ -90,9 +113,11 @@ def load_root_cause_cache(
 def load_rule_cache(
     cache: AgentCache,
     *,
-    repo_path: Path,
+    repo_path: Path | None = None,
+    source_root: Path | None = None,
     cases_dir: Path,
     root_cause: RootCauseAnalysis,
+    analysis_subject: AnalysisSubject,
 ) -> VASCoreInfo | None:
     """Load a generated rule only when its anchors still pass validation."""
     raw = cache.get()
@@ -106,8 +131,10 @@ def load_rule_cache(
     errors = validate_anchors(
         core,
         repo_path=repo_path,
+        source_root=source_root,
         cases_dir=cases_dir,
         root_cause=root_cause,
+        analysis_subject=analysis_subject,
     )
     if errors:
         logger.warning("Rule cache failed anchor validation: %s", "; ".join(errors))

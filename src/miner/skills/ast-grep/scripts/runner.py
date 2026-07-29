@@ -199,16 +199,20 @@ def main() -> None:
     parser.add_argument("--sample-size", type=int, default=20)
     parser.add_argument("--timeout-seconds", type=int, default=60)
     args = parser.parse_args()
-    result = run_ast_grep(
-        args.target_dir,
-        language=args.language,
-        query_type=args.query_type,
-        query=args.query,
-        output=args.output,
-        sample_size=args.sample_size,
-        timeout_seconds=args.timeout_seconds,
+    print(
+        json.dumps(
+            run_ast_grep(
+                args.target_dir,
+                language=args.language,
+                query_type=args.query_type,
+                query=args.query,
+                output=args.output,
+                sample_size=args.sample_size,
+                timeout_seconds=args.timeout_seconds,
+            ),
+            indent=2,
+        )
     )
-    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

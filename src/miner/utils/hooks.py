@@ -67,7 +67,7 @@ def _safe_value(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, BaseModel):
         try:
             dumped = value.model_dump(mode="json")
-        except Exception:  # noqa: BLE001 - fall back to Python-mode diagnostics.
+        except Exception:  # noqa: BLE001 - diagnostics fall back to Python-mode data.
             dumped = value.model_dump()
         return _safe_value(dumped, depth=depth + 1)
     if isinstance(value, BaseException):
@@ -162,7 +162,7 @@ class _CliLogSink:
             )
             file_console.print(renderable)
             log_renderable(buffer.getvalue())
-        except Exception:  # noqa: BLE001 - diagnostics cannot break the miner.
+        except Exception:
             logger.debug("Failed to emit agent CLI diagnostics", exc_info=True)
 
 

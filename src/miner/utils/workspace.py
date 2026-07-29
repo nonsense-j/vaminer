@@ -1,17 +1,48 @@
 """Workspace manager — one workspace per vas rule (VAS-XXXX)."""
 
+from __future__ import annotations
+
 import json
+import os
+import re
 import shutil
+import tempfile
 from pathlib import Path
+from typing import Any
 
 from ..configs import VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .logger import logger
+from .models import VASFull
 
 
-def _next_vas_id(registry: "SourceRegistry") -> str:
-    ids = registry._load().keys()
-    last_num = max((int(v.split("-")[1]) for v in ids), default=0)
+def _next_vas_id(registry: SourceRegistry) -> str:
+    ids = set(registry._load()) | {
+        path.name
+        for path in registry.path.parent.glob("VAS-*")
+        if path.is_dir()
+    }
+    last_num = max(
+        (int(v.split("-")[1]) for v in ids if re.fullmatch(r"VAS-\d{4,}", v)),
+        default=0,
+    )
     return f"VAS-{last_num + 1:04d}"
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    """Durably replace one generated JSON file without exposing a partial write."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
 class SourceRegistry:
@@ -20,14 +51,14 @@ class SourceRegistry:
     Stored as `source_registry.json` at the vas_ws root.
     """
 
-    def __init__(self, base_dir: Path | None = None):
+    def __init__(self, base_dir: Path | None = None) -> None:
         self.path = (base_dir or VAS_WORKSPACE_DIR) / "source_registry.json"
 
     def _load(self) -> dict[str, list[str]]:
         return json.loads(self.path.read_text()) if self.path.exists() else {}
 
     def _save(self, data: dict[str, list[str]]) -> None:
-        self.path.write_text(json.dumps(data, indent=2))
+        atomic_write_json(self.path, data)
 
     def lookup(self, source: str) -> str | None:
         for vas_id, sources in self._load().items():
@@ -40,6 +71,30 @@ class SourceRegistry:
         data.setdefault(vas_id, [])
         if source not in data[vas_id]:
             data[vas_id].append(source)
+        self._save(data)
+
+
+class ExampleSuiteRegistry:
+    """Maps example-suite keys to VAS IDs and immutable content digests."""
+
+    def __init__(self, base_dir: Path | None = None) -> None:
+        self.path = (base_dir or VAS_WORKSPACE_DIR) / "example_suite_registry.json"
+
+    def _load(self) -> dict[str, dict[str, str]]:
+        return json.loads(self.path.read_text()) if self.path.exists() else {}
+
+    def _save(self, data: dict[str, dict[str, str]]) -> None:
+        atomic_write_json(self.path, data)
+
+    def lookup(self, registry_key: str) -> dict[str, str] | None:
+        return self._load().get(registry_key)
+
+    def register(self, registry_key: str, *, vas_id: str, content_digest: str) -> None:
+        data = self._load()
+        data[registry_key] = {
+            "vas_id": vas_id,
+            "content_digest": content_digest,
+        }
         self._save(data)
 
 
@@ -59,9 +114,10 @@ class Workspace:
             VAS-XXXX.json                    # Final VAS specification
     """
 
-    def __init__(self, root: Path, vas_id: str):
+    def __init__(self, root: Path, vas_id: str, *, rules_dir: Path | None = None) -> None:
         self.root = root
         self.vas_id = vas_id
+        self.rules_dir = (rules_dir or VAS_RULES_DIR).resolve()
 
     @classmethod
     def get_vas_id(cls, source: str, base_dir: Path | None = None) -> str:
@@ -76,6 +132,71 @@ class Workspace:
         return ws.vas_id
 
     @classmethod
+    def prepare_example_suite_vas_id(
+        cls,
+        registry_key: str,
+        *,
+        content_digest: str,
+        base_dir: Path | None = None,
+    ) -> str:
+        """Resolve a suite workspace without publishing registry state.
+
+        The caller publishes and verifies the snapshot first, then calls
+        :meth:`register_example_suite`. This ordering lets an interrupted copy
+        be retried without leaving a newly registered partial snapshot.
+        """
+
+        base_dir = base_dir or VAS_WORKSPACE_DIR
+        source_registry = SourceRegistry(base_dir)
+        suite_registry = ExampleSuiteRegistry(base_dir)
+        existing = suite_registry.lookup(registry_key)
+        if existing is not None:
+            existing_digest = existing.get("content_digest")
+            if existing_digest != content_digest:
+                raise ValueError(
+                    f"example suite {registry_key!r} is already registered with a different digest: "
+                    f"{existing_digest} != {content_digest}"
+                )
+            vas_id = existing["vas_id"]
+            logger.info("Example suite '%s' already registered as %s", registry_key, vas_id)
+            return vas_id
+
+        # Recover the authoritative workspace id if one registry write from an
+        # earlier run completed and the other did not.
+        source_vas_id = source_registry.lookup(registry_key)
+        if source_vas_id is not None:
+            return source_vas_id
+        return _next_vas_id(source_registry)
+
+    @classmethod
+    def register_example_suite(
+        cls,
+        registry_key: str,
+        *,
+        vas_id: str,
+        content_digest: str,
+        base_dir: Path | None = None,
+    ) -> None:
+        """Atomically replace both generated registry files after publication."""
+
+        base_dir = base_dir or VAS_WORKSPACE_DIR
+        workspace = cls.from_id(vas_id, base_dir=base_dir)
+        if not workspace.example_suite_snapshot_dir.is_dir():
+            raise ValueError("cannot register an example suite before its snapshot is published")
+        suite_registry = ExampleSuiteRegistry(base_dir)
+        existing = suite_registry.lookup(registry_key)
+        if existing is not None and existing.get("content_digest") != content_digest:
+            raise ValueError(
+                f"example suite {registry_key!r} is already registered with a different digest"
+            )
+        SourceRegistry(base_dir).register(vas_id, registry_key)
+        suite_registry.register(
+            registry_key,
+            vas_id=vas_id,
+            content_digest=content_digest,
+        )
+
+    @classmethod
     def _ensure_structure(cls, root: Path) -> None:
         root.mkdir(parents=True, exist_ok=True)
         (root / "cache").mkdir(exist_ok=True)
@@ -83,24 +204,36 @@ class Workspace:
         (root / "src").mkdir(exist_ok=True)
 
     @classmethod
-    def _create_new(cls, base_dir: Path, registry: SourceRegistry | None = None) -> "Workspace":
+    def _create_new(
+        cls,
+        base_dir: Path,
+        registry: SourceRegistry | None = None,
+        *,
+        rules_dir: Path | None = None,
+    ) -> Workspace:
         if registry is None:
             registry = SourceRegistry(base_dir)
         vas_id = _next_vas_id(registry)
         root = base_dir / vas_id
         cls._ensure_structure(root)
-        return cls(root, vas_id)
+        return cls(root, vas_id, rules_dir=rules_dir)
 
     @classmethod
-    def from_id(cls, vas_id: str, base_dir: Path | None = None) -> "Workspace":
+    def from_id(
+        cls,
+        vas_id: str,
+        base_dir: Path | None = None,
+        *,
+        rules_dir: Path | None = None,
+    ) -> Workspace:
         base_dir = base_dir or VAS_WORKSPACE_DIR
         root = base_dir / vas_id
         cls._ensure_structure(root)
-        return cls(root, vas_id)
+        return cls(root, vas_id, rules_dir=rules_dir)
 
     @property
     def rule_path(self) -> Path:
-        return VAS_RULES_DIR / f"{self.vas_id}.json"
+        return self.rules_dir / f"{self.vas_id}.json"
 
     @property
     def analysis_path(self) -> Path:
@@ -118,7 +251,15 @@ class Workspace:
     def anchor_review_path(self) -> Path:
         return self.root / "anchor_review.md"
 
-    def save_rule(self, vas) -> Path:
+    @property
+    def example_suite_snapshot_dir(self) -> Path:
+        return self.root / "input_snapshot"
+
+    @property
+    def example_suite_metadata_path(self) -> Path:
+        return self.root / "example_suite.json"
+
+    def save_rule(self, vas: VASFull) -> Path:
         self.rule_path.parent.mkdir(parents=True, exist_ok=True)
         self.rule_path.write_text(vas.model_dump_json(indent=2, by_alias=True))
         return self.rule_path

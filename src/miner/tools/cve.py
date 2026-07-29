@@ -78,7 +78,7 @@ def _fetch_from_nvd(cve_id: str) -> tuple[str, list[str]] | None:
         )
         refs = [r["url"] for r in cve_data.get("references", [])]
         return desc, refs
-    except Exception:  # noqa: BLE001 - this source is best-effort and has fallbacks.
+    except Exception:  # noqa: BLE001 - source failure falls through to other providers.
         return None
 
 
@@ -126,7 +126,7 @@ def _fetch_from_gh_advisory(cve_id: str) -> tuple[str, list[str]] | None:
             return None
         advisory = nodes[0]
         return advisory.get("description", ""), [r["url"] for r in advisory.get("references", [])]
-    except Exception:  # noqa: BLE001 - this source is best-effort and has fallbacks.
+    except Exception:  # noqa: BLE001 - source failure falls through to other providers.
         return None
 
 
@@ -146,5 +146,5 @@ def _fetch_from_cve_search(cve_id: str) -> tuple[str, list[str]] | None:
             desc = d if d else desc
             refs.update(r["url"] for r in item.get("references", []))
         return desc, list(refs)
-    except Exception:  # noqa: BLE001 - this source is best-effort and has fallbacks.
+    except Exception:  # noqa: BLE001 - source failure falls through to other providers.
         return None

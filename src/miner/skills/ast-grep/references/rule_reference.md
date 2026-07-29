@@ -26,6 +26,10 @@ A node matches a rule if it satisfies all fields defined within that rule object
 
 For rules using metavariables that depend on prior matching, explicit `all` composite rules are recommended to guarantee execution order.
 
+Each string-form `pattern` must parse to exactly one AST node. Sequential statements cannot be placed in one pattern string; match one statement and use a relational rule, or place independent single-node alternatives under `any`.
+
+The keys in the table below belong to a Rule Object. RuleConfig-level fields such as `constraints` are siblings of the top-level `rule:` field and are invalid inside nested Rule Objects such as entries under `any`.
+
 ### Rule Object Properties
 
 | Property | Type | Category | Purpose | Example |

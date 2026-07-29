@@ -10,8 +10,9 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.profiles import ModelProfile
 
-from src.miner.core.agents import make_issue_collector
 from src.miner.core.context import MinerContext
+from src.miner.core.tasks import make_issue_collection_task
+from src.miner.runtime.pydantic_ai import PydanticAIRuntime
 from src.miner.tools import github
 from src.miner.tools.ast_grep import _load_runner, _resolve_target
 
@@ -75,9 +76,10 @@ def test_commit_search_tools_follow_prefix_and_time_contracts(monkeypatch: pytes
     )
     monkeypatch.setattr(github.httpx, "Client", lambda *, timeout: tag_client)
 
-    tags = github.search_commit_by_tag("curl", "curl", "curl-7_64")
-
-    assert [commit.cur_sha for commit in tags] == ["older", "newer"]
+    assert [commit.cur_sha for commit in github.search_commit_by_tag("curl", "curl", "curl-7_64")] == [
+        "older",
+        "newer",
+    ]
     assert [url for url, _ in tag_client.calls] == [matching_url, newer_url, older_url]
     assert "must be non-empty" in github.search_commit_by_tag("curl", "curl", " ")
 
@@ -103,15 +105,13 @@ def test_commit_search_tools_follow_prefix_and_time_contracts(monkeypatch: pytes
         "2019-02-01T00:00:00Z",
         "2019-03-02T00:00:00Z",
     )
-    saturated = github.search_commit_by_time(
+    assert [commit.cur_sha for commit in commits] == ["older", "newer"]
+    assert "narrow the time range" in github.search_commit_by_time(
         "curl",
         "curl",
         "2019-01-01T00:00:00Z",
         "2019-04-01T00:00:00Z",
     )
-
-    assert [commit.cur_sha for commit in commits] == ["older", "newer"]
-    assert "narrow the time range" in saturated
 
 
 async def test_commit_history_capability_hides_tools_until_loaded(tmp_path: Path):
@@ -139,7 +139,8 @@ async def test_commit_history_capability_hides_tools_until_loaded(tmp_path: Path
             supported_native_tools=frozenset(),
         ),
     )
-    agent = make_issue_collector(model=model)
+    task = make_issue_collection_task("CVE-2099-0001", workspace_root=tmp_path)
+    agent = PydanticAIRuntime(model=model).build_agent(task, model=model)
 
     with pytest.raises(ProbeComplete):
         await agent.run(
@@ -177,7 +178,8 @@ async def test_issue_collector_web_capabilities_are_deferred(tmp_path: Path):
             supported_native_tools=frozenset(),
         ),
     )
-    agent = make_issue_collector(model=model)
+    task = make_issue_collection_task("CVE-2099-0001", workspace_root=tmp_path)
+    agent = PydanticAIRuntime(model=model).build_agent(task, model=model)
 
     with pytest.raises(ProbeComplete):
         await agent.run(

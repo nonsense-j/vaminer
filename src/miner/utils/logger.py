@@ -20,6 +20,10 @@ class _ConsoleFilter(logging.Filter):
         return not getattr(record, _FILE_ONLY_RECORD_ATTRIBUTE, False)
 
 
+class _ConsoleHandler(logging.StreamHandler):
+    """Marker type preventing duplicate console handlers."""
+
+
 class _RunFormatter(logging.Formatter):
     """Keep Rich panels intact while formatting ordinary miner records."""
 
@@ -36,9 +40,8 @@ logger = logging.getLogger("MINER")
 logger.setLevel(LOG_LEVEL)
 logger.propagate = False
 
-if not any(getattr(handler, "_miner_console_handler", False) for handler in logger.handlers):
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler._miner_console_handler = True  # type: ignore[attr-defined]
+if not any(isinstance(handler, _ConsoleHandler) for handler in logger.handlers):
+    console_handler = _ConsoleHandler(sys.stdout)
     console_handler.setLevel(LOG_LEVEL)
     console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
     console_handler.addFilter(_ConsoleFilter())

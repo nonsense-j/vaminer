@@ -1,4 +1,4 @@
-"""Workspace-confined adapter for the generic ast-grep skill runner."""
+"""Workspace-confined ast-grep operations for SDK and CLI runtimes."""
 
 from __future__ import annotations
 
@@ -25,6 +25,10 @@ _RUNNER_MODULE_NAME = "_vaminer_ast_grep_skill_runner"
 _RUNNER_LOAD_LOCK = Lock()
 
 
+class AstGrepToolError(RuntimeError):
+    """Raised when the shared ast-grep runner cannot execute a valid query."""
+
+
 def _load_runner() -> ModuleType:
     with _RUNNER_LOAD_LOCK:
         existing = sys.modules.get(_RUNNER_MODULE_NAME)
@@ -45,19 +49,73 @@ def _load_runner() -> ModuleType:
         return module
 
 
-def _resolve_target(workspace_root: Path, target_dir: str) -> Path:
+def resolve_workspace_target(workspace_root: Path, target_dir: str) -> Path:
+    """Resolve an existing target directory without escaping ``workspace_root``."""
     if not target_dir.strip():
-        raise ToolFailed("target_dir must be a non-empty directory path")
+        raise ValueError("target_dir must be a non-empty directory path")
     root = workspace_root.resolve()
     candidate = Path(target_dir)
     resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise ToolFailed(f"target_dir must stay inside the active workspace: {target_dir}") from exc
+        raise ValueError(f"target_dir must stay inside the active workspace: {target_dir}") from exc
     if not resolved.is_dir():
-        raise ToolFailed(f"target_dir is not an existing directory: {target_dir}")
+        raise ValueError(f"target_dir is not an existing directory: {target_dir}")
     return resolved
+
+
+def _resolve_target(workspace_root: Path, target_dir: str) -> Path:
+    """Backward-compatible Pydantic tool path resolver."""
+    try:
+        return resolve_workspace_target(workspace_root, target_dir)
+    except ValueError as exc:
+        raise ToolFailed(str(exc)) from exc
+
+
+def run_ast_grep_query(
+    workspace_root: Path,
+    target_dir: str,
+    *,
+    language: str,
+    query_type: str,
+    query: str,
+    output: Literal["count", "sample", "full"] = "sample",
+    sample_size: int | None = None,
+    default_sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
+    max_sample_size: int = MINER_AST_GREP_MAX_SAMPLE_SIZE,
+    timeout_seconds: int = MINER_AST_GREP_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Run one ast-grep query using only explicit, runtime-neutral inputs."""
+    resolved = resolve_workspace_target(workspace_root, target_dir)
+    if not language.strip():
+        raise ValueError("language must be non-empty")
+    if query_type not in {"pattern", "rule"}:
+        raise ValueError(f"unsupported query_type: {query_type!r}")
+    if output not in {"count", "sample", "full"}:
+        raise ValueError(f"unsupported output mode: {output!r}")
+
+    resolved_sample_size = default_sample_size
+    if output == "sample" and sample_size is not None:
+        resolved_sample_size = sample_size
+    if output == "sample" and not 1 <= resolved_sample_size <= max_sample_size:
+        raise ValueError(
+            f"sample_size must be between 1 and {max_sample_size}; received {resolved_sample_size}."
+        )
+
+    runner = _load_runner()
+    try:
+        return runner.run_ast_grep(
+            resolved,
+            language=language,
+            query_type=query_type,
+            query=query,
+            output=output,
+            sample_size=resolved_sample_size,
+            timeout_seconds=timeout_seconds,
+        )
+    except runner.AstGrepRunnerError as exc:
+        raise AstGrepToolError(str(exc)) from exc
 
 
 def run_ast_grep(
@@ -80,28 +138,28 @@ def run_ast_grep(
     root_cause = ctx.deps.root_cause
     if root_cause is None:
         raise ToolFailed("root_cause is required to select the ast-grep language")
-    resolved = _resolve_target(ctx.deps.workspace_root, target_dir)
-    resolved_sample_size = MINER_AST_GREP_SAMPLE_SIZE
-    if output == "sample" and sample_size is not None:
-        resolved_sample_size = sample_size
-    if output == "sample" and not 1 <= resolved_sample_size <= MINER_AST_GREP_MAX_SAMPLE_SIZE:
-        raise ModelRetry(
-            f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}; " f"received {resolved_sample_size}."
-        )
-
-    runner = _load_runner()
     try:
-        return runner.run_ast_grep(
-            resolved,
+        return run_ast_grep_query(
+            ctx.deps.workspace_root,
+            target_dir,
             language=root_cause.language.value,
             query_type=query_type.value,
             query=query,
             output=output,
-            sample_size=resolved_sample_size,
-            timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+            sample_size=sample_size,
         )
-    except runner.AstGrepRunnerError as exc:
+    except ValueError as exc:
+        if str(exc).startswith("sample_size must be between"):
+            raise ModelRetry(str(exc)) from exc
+        raise ToolFailed(str(exc)) from exc
+    except AstGrepToolError as exc:
         raise ToolFailed(str(exc)) from exc
 
 
-__all__ = ["RUNNER_PATH", "run_ast_grep"]
+__all__ = [
+    "RUNNER_PATH",
+    "AstGrepToolError",
+    "resolve_workspace_target",
+    "run_ast_grep",
+    "run_ast_grep_query",
+]

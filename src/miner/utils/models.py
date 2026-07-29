@@ -1,11 +1,12 @@
 """Pydantic models for the miner pipeline (VAS + intermediate models)."""
 
-from enum import Enum
+from enum import StrEnum
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-class IssueCategory(str, Enum):
+class IssueCategory(StrEnum):
     SECURITY = "SECURITY"
     CORRECTNESS = "CORRECTNESS"
     PERFORMANCE = "PERFORMANCE"
@@ -52,7 +53,10 @@ class RepoCheckout(BaseModel):
 # =============================================================================
 
 
-class VASSource(BaseModel):
+class IssueVASSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["issue"] = Field(default="issue", description="Source is a researched issue and repository pair")
     issue_id: str = Field(..., description="CVE ID or GitHub issue URL")
     repo_url: str = Field(..., description="GitHub repository URL")
     buggy_commit: str = Field(..., description="Commit SHA of the buggy version")
@@ -60,12 +64,41 @@ class VASSource(BaseModel):
     root_cause_summary: str = Field(..., description="Concise summary of the code-level root cause pattern")
 
 
-class QueryType(str, Enum):
+class ExampleSuiteFileMetadata(BaseModel):
+    """Portable metadata for one file accepted into an example-suite snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(..., description="Path relative to the example-suite snapshot")
+    size: int = Field(..., ge=0, description="File size in bytes")
+    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$", description="Content digest")
+    source: bool = Field(..., description="Whether this file belongs to the suite's source language")
+
+
+class ExampleSuiteVASSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["example_suite"] = Field(
+        default="example_suite",
+        description="Source is a copied directory of related good and bad examples",
+    )
+    registry_key: str = Field(..., description="Stable portable registry key")
+    suite_name: str = Field(..., description="Original example-suite directory basename")
+    content_digest: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    snapshot_ref: str = Field(..., description="Path to the snapshot relative to the VAS workspace")
+    files: list[ExampleSuiteFileMetadata] = Field(..., min_length=1)
+    root_cause_summary: str = Field(..., description="Concise summary of the inferred code-level root cause pattern")
+
+
+VASSource = IssueVASSource | ExampleSuiteVASSource
+
+
+class QueryType(StrEnum):
     PATTERN = "pattern"
     RULE = "rule"
 
 
-class AstGrepLanguage(str, Enum):
+class AstGrepLanguage(StrEnum):
     C = "c"
     CPP = "cpp"
     CSHARP = "csharp"
@@ -124,6 +157,28 @@ class RootCauseAnalysis(BaseModel):
             "never prefix them with cases/"
         ),
     )
+
+
+class AnalysisSubject(BaseModel):
+    """Source-neutral handoff from RCA into rule generation and anchor synthesis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["issue", "example_suite"] = Field(..., description="Source family for grounding policy")
+    source_root: str = Field(..., description="Workspace-contained source root used by downstream phases")
+    cases_dir: str = Field(..., description="Workspace-contained generated cases directory")
+    grounding_policy: Literal["repo_evidence", "bad_span_coverage"] = Field(
+        ...,
+        description="Deterministic anchor grounding policy for this source",
+    )
+    provenance: dict[str, Any] = Field(default_factory=dict, description="Source-specific workflow provenance")
+
+    @model_validator(mode="after")
+    def validate_grounding_policy(self) -> "AnalysisSubject":
+        expected = "repo_evidence" if self.type == "issue" else "bad_span_coverage"
+        if self.grounding_policy != expected:
+            raise ValueError(f"{self.type} subjects require {expected}")
+        return self
 
 
 class Anchor(BaseModel):
@@ -297,9 +352,11 @@ class AnchorSynthesisResult(BaseModel):
         description="Exact case-to-anchor coverage produced by validation",
     )
     repo_evidence: list[RepoEvidence] = Field(
-        ...,
-        min_length=1,
-        description="At least one actual RCA-declared buggy-repository site match for every anchor",
+        default_factory=list,
+        description=(
+            "Actual RCA-declared buggy-repository site matches for issue-backed rules; "
+            "empty for example-suite sources validated by bad-span coverage"
+        ),
     )
     adjustments: list[str] = Field(
         ...,
@@ -315,7 +372,7 @@ class VASFull(BaseModel):
     vas_id: str = Field(default="VAS-XXXX", description="VAS identifier placeholder")
     category: IssueCategory = Field(..., description="Issue category")
     language: AstGrepLanguage = Field(..., description="Single ast-grep language id selected from the enum")
-    sources: list[VASSource] = Field(default_factory=list, description="Issue sources")
+    sources: list[VASSource] = Field(default_factory=list, description="Issue or example-suite sources")
     summary: str = Field(
         ...,
         description=(

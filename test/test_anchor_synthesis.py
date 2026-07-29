@@ -6,16 +6,13 @@ import shutil
 from pathlib import Path
 
 import pytest
-from pydantic_ai.messages import ModelResponse, ToolCallPart
-from pydantic_ai.models.function import FunctionModel
 
-from src.miner.core import agents as agent_module
-from src.miner.core.context import MinerContext
 from src.miner.core.validation import (
     aggregate_anchor_synthesis_runs,
     validate_anchor_synthesis_run,
 )
 from src.miner.utils.models import (
+    AnalysisSubject,
     AnchorSynthesisRequest,
     AnchorSynthesisRunRequest,
     AnchorSynthesisRunResult,
@@ -130,6 +127,75 @@ def _run_result(anchor_id: str) -> AnchorSynthesisRunResult:
     )
 
 
+def _run_result_with_query(
+    anchor_id: str,
+    query: str,
+    *,
+    query_type: str = "pattern",
+) -> AnchorSynthesisRunResult:
+    payload = _run_result(anchor_id).model_dump(mode="json", by_alias=True)
+    payload["anchor"]["type"] = query_type
+    payload["anchor"]["query"] = query
+    return AnchorSynthesisRunResult.model_validate(payload)
+
+
+def _issue_subject(source_root: Path, cases_dir: Path) -> AnalysisSubject:
+    return AnalysisSubject(
+        type="issue",
+        source_root=source_root.as_posix(),
+        cases_dir=cases_dir.as_posix(),
+        grounding_policy="repo_evidence",
+    )
+
+
+def _example_subject(source_root: Path, cases_dir: Path) -> AnalysisSubject:
+    return AnalysisSubject(
+        type="example_suite",
+        source_root=source_root.as_posix(),
+        cases_dir=cases_dir.as_posix(),
+        grounding_policy="bad_span_coverage",
+    )
+
+
+def _example_suite_root_cause() -> RootCauseAnalysis:
+    return RootCauseAnalysis.model_validate(
+        {
+            "language": "c",
+            "root_cause_summary": "A dangerous operation executes without its required guard.",
+            "analysis": "The example suite demonstrates the dangerous operation without a preceding guard.",
+            "buggy_components": [
+                {
+                    "file": "bad.c",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "role": "Executes the dangerous operation without the required guard.",
+                    "snippet": "void trigger(void) { danger(1); }",
+                }
+            ],
+            "fixing_pattern": "Observed good examples establish the required guard.",
+            "extracted_case_files": ["case1.c"],
+        }
+    )
+
+
+def _example_suite_request(root_cause: RootCauseAnalysis) -> AnchorSynthesisRequest:
+    return AnchorSynthesisRequest.model_validate(
+        {
+            "root_cause": root_cause.model_dump(mode="json"),
+            "summary": "Dangerous operations must run only after the required guard is established.",
+            "anchor_intents": [
+                {
+                    "id": "danger-call",
+                    "behavior_weight": 5,
+                    "behavior": DANGER_BEHAVIOR,
+                    "inspect_hint": DANGER_HINT,
+                    "required_cases": ["case1.c"],
+                }
+            ],
+        }
+    )
+
+
 @pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
 def test_per_anchor_validation_ignores_other_intents_case_contract(tmp_path: Path):
     repo_path, cases_dir, root_cause = _prepare_sources(tmp_path)
@@ -140,15 +206,131 @@ def test_per_anchor_validation_ignores_other_intents_case_contract(tmp_path: Pat
         anchor_intent=request.anchor_intents[1],
     )
 
+    assert (
+        validate_anchor_synthesis_run(
+            _run_result("audit-call"),
+            repo_path=repo_path,
+            cases_dir=cases_dir,
+            root_cause=root_cause,
+            run_request=audit_request,
+            analysis_subject=_issue_subject(repo_path, cases_dir),
+        )
+        == []
+    )
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+def test_anchor_validation_reports_partial_case_matches_and_missing_source(tmp_path: Path):
+    repo_path, cases_dir, root_cause = _prepare_sources(tmp_path)
+    request = _request(root_cause)
+    run_request = AnchorSynthesisRunRequest(
+        root_cause=root_cause,
+        summary=request.summary,
+        anchor_intent=request.anchor_intents[0],
+    )
+
     errors = validate_anchor_synthesis_run(
-        _run_result("audit-call"),
+        _run_result_with_query("danger-call", "audit($ARG);"),
         repo_path=repo_path,
         cases_dir=cases_dir,
         root_cause=root_cause,
-        run_request=audit_request,
+        run_request=run_request,
+        analysis_subject=_issue_subject(repo_path, cases_dir),
     )
 
-    assert errors == []
+    rendered = "\n".join(errors)
+    assert "does not match required cases: case2.c" in rendered
+    assert "candidate query case matches (1 total across 1 file(s)): case1.c:1" in rendered
+    assert "missing required case source evidence:\n[case2.c]" in rendered
+    assert "danger(2)" in rendered
+    assert "has no RCA-declared repository-site match" not in rendered
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+def test_anchor_validation_distinguishes_zero_matches_and_lists_rca_targets(tmp_path: Path):
+    repo_path, cases_dir, root_cause = _prepare_sources(tmp_path)
+    request = _request(root_cause)
+    run_request = AnchorSynthesisRunRequest(
+        root_cause=root_cause,
+        summary=request.summary,
+        anchor_intent=request.anchor_intents[0],
+    )
+
+    errors = validate_anchor_synthesis_run(
+        _run_result_with_query("danger-call", "missing($ARG);"),
+        repo_path=repo_path,
+        cases_dir=cases_dir,
+        root_cause=root_cause,
+        run_request=run_request,
+        analysis_subject=_issue_subject(repo_path, cases_dir),
+    )
+
+    rendered = "\n".join(errors)
+    assert "candidate query produced zero case matches" in rendered
+    assert "candidate query produced zero repository matches" in rendered
+    assert "accepted RCA repository target sites" in rendered
+    assert "[bug.c:1-1] Executes the dangerous operation." in rendered
+    assert "void trigger(void) { danger(1); }" in rendered
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+def test_anchor_validation_reports_unrelated_repository_match_locations(tmp_path: Path):
+    repo_path, cases_dir, root_cause = _prepare_sources(tmp_path)
+    (repo_path / "bug.c").write_text(
+        "void trigger(void) { harmless(1); }\n"
+        "void record(void) { audit(1); }\n"
+        "void unrelated(void) { danger(3); }\n",
+        encoding="utf-8",
+    )
+    payload = root_cause.model_dump(mode="json")
+    payload["buggy_components"][0]["snippet"] = "void trigger(void) { harmless(1); }"
+    root_cause = RootCauseAnalysis.model_validate(payload)
+    request = _request(root_cause)
+    run_request = AnchorSynthesisRunRequest(
+        root_cause=root_cause,
+        summary=request.summary,
+        anchor_intent=request.anchor_intents[0],
+    )
+
+    errors = validate_anchor_synthesis_run(
+        _run_result("danger-call"),
+        repo_path=repo_path,
+        cases_dir=cases_dir,
+        root_cause=root_cause,
+        run_request=run_request,
+        analysis_subject=_issue_subject(repo_path, cases_dir),
+    )
+
+    rendered = "\n".join(errors)
+    assert "has no RCA-declared repository-site match" in rendered
+    assert "candidate query repository matches (1 total across 1 file(s)): bug.c:3" in rendered
+    assert "accepted RCA repository target sites" in rendered
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+def test_anchor_validation_reports_parse_failure_with_repair_evidence(tmp_path: Path):
+    repo_path, cases_dir, root_cause = _prepare_sources(tmp_path)
+    request = _request(root_cause)
+    run_request = AnchorSynthesisRunRequest(
+        root_cause=root_cause,
+        summary=request.summary,
+        anchor_intent=request.anchor_intents[0],
+    )
+
+    errors = validate_anchor_synthesis_run(
+        _run_result_with_query("danger-call", "danger($ARG); audit($ARG);"),
+        repo_path=repo_path,
+        cases_dir=cases_dir,
+        root_cause=root_cause,
+        run_request=run_request,
+        analysis_subject=_issue_subject(repo_path, cases_dir),
+    )
+
+    rendered = "\n".join(errors)
+    assert "could not be parsed or executed against required cases" in rendered
+    assert "required case files: case1.c, case2.c" in rendered
+    assert "missing required case source evidence" in rendered
+    assert "accepted RCA repository target sites" in rendered
 
 
 @pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
@@ -162,6 +344,7 @@ def test_batch_aggregation_restores_request_order_and_derives_metadata(tmp_path:
         repo_path=repo_path,
         cases_dir=cases_dir,
         root_cause=root_cause,
+        analysis_subject=_issue_subject(repo_path, cases_dir),
     )
 
     assert [anchor.id for anchor in result.anchors] == ["danger-call", "audit-call"]
@@ -179,96 +362,62 @@ def test_batch_aggregation_restores_request_order_and_derives_metadata(tmp_path:
 
 
 @pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-async def test_rule_generator_runs_each_anchor_with_an_isolated_context(tmp_path: Path):
-    repo_path, cases_dir, root_cause = _prepare_sources(tmp_path)
-    request = _request(root_cause)
-    model_requests = {"danger-call": 0, "audit-call": 0}
+def test_example_suite_aggregation_uses_bad_span_coverage_without_repo_evidence(tmp_path: Path):
+    source_root = tmp_path / "snapshot"
+    cases_dir = tmp_path / "cases"
+    source_root.mkdir()
+    cases_dir.mkdir()
+    (source_root / "bad.c").write_text("void trigger(void) { danger(1); }\n", encoding="utf-8")
+    (cases_dir / "case1.c").write_text("void sample(void) { danger(1); }\n", encoding="utf-8")
+    root_cause = _example_suite_root_cause()
+    request = _example_suite_request(root_cause)
 
-    async def synthesis_model(messages, info):
-        rendered = repr(messages)
-        anchor_id = "danger-call" if "danger-call" in rendered else "audit-call"
-        other_id = "audit-call" if anchor_id == "danger-call" else "danger-call"
-        assert other_id not in rendered
-        model_requests[anchor_id] += 1
-        run = _run_result(anchor_id)
-        if "'match_count':" not in rendered:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "run_ast_grep",
-                        {
-                            "target_dir": cases_dir.as_posix(),
-                            "query_type": "pattern",
-                            "query": run.anchor.query,
-                            "output": "count",
-                        },
-                    )
-                ]
-            )
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    info.output_tools[0].name,
-                    run.model_dump(mode="json", by_alias=True),
-                )
-            ]
-        )
-
-    parent_requests = 0
-
-    async def rule_model(_messages, info):
-        nonlocal parent_requests
-        parent_requests += 1
-        if parent_requests == 1:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "synthesize_ast_grep_anchors",
-                        {"request": request.model_dump(mode="json")},
-                    )
-                ]
-            )
-        assert deps.anchor_synthesis is not None
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    info.output_tools[0].name,
-                    {
-                        "category": "SECURITY",
-                        "language": "c",
-                        "root_cause_summary": root_cause.root_cause_summary,
-                        "summary": request.summary,
-                        "scenarios": {
-                            "unsafe": ["The dangerous operation executes without its required guard."],
-                            "safe": ["The required guard is established before the dangerous operation."],
-                        },
-                        "anchors": [
-                            anchor.model_dump(mode="json", by_alias=True) for anchor in deps.anchor_synthesis.anchors
-                        ],
-                    },
-                )
-            ]
-        )
-
-    synthesizer = agent_module.make_ast_grep_synthesizer(
-        repo_path,
-        cases_dir,
-        model=FunctionModel(synthesis_model),
-    )
-    generator = agent_module.make_rule_generator(
-        cases_dir,
-        synthesizer,
-        model=FunctionModel(rule_model),
-    )
-    deps = MinerContext(
-        workspace_root=tmp_path,
-        repo_path=repo_path,
+    result = aggregate_anchor_synthesis_runs(
+        request,
+        [_run_result("danger-call")],
+        source_root=source_root,
         cases_dir=cases_dir,
         root_cause=root_cause,
+        analysis_subject=_example_subject(source_root, cases_dir),
     )
 
-    result = await generator.run("Generate the fixture rule.", deps=deps)
+    assert [anchor.id for anchor in result.anchors] == ["danger-call"]
+    assert [item.model_dump() for item in result.case_coverage] == [
+        {"path": "case1.c", "anchor_ids": ["danger-call"]},
+    ]
+    assert result.repo_evidence == []
 
-    assert model_requests == {"danger-call": 2, "audit-call": 2}
-    assert [anchor.id for anchor in result.output.anchors] == ["danger-call", "audit-call"]
-    assert result.usage.requests == 6
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+def test_example_suite_aggregation_requires_each_bad_span_to_be_covered(tmp_path: Path):
+    source_root = tmp_path / "snapshot"
+    cases_dir = tmp_path / "cases"
+    source_root.mkdir()
+    cases_dir.mkdir()
+    (source_root / "bad.c").write_text("void trigger(void) { unsafe(1); }\n", encoding="utf-8")
+    (cases_dir / "case1.c").write_text("void sample(void) { danger(1); }\n", encoding="utf-8")
+    root_cause = RootCauseAnalysis.model_validate(
+        {
+            **_example_suite_root_cause().model_dump(mode="json"),
+            "buggy_components": [
+                {
+                    "file": "bad.c",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "role": "Executes the dangerous operation without the required guard.",
+                    "snippet": "void trigger(void) { unsafe(1); }",
+                }
+            ],
+        }
+    )
+    request = _example_suite_request(root_cause)
+
+    with pytest.raises(ValueError, match="inferred bad spans are not covered"):
+        aggregate_anchor_synthesis_runs(
+            request,
+            [_run_result("danger-call")],
+            source_root=source_root,
+            cases_dir=cases_dir,
+            root_cause=root_cause,
+            analysis_subject=_example_subject(source_root, cases_dir),
+        )

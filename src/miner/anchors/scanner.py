@@ -34,6 +34,7 @@ def _load_engine() -> ModuleType:
 
 _engine = _load_engine()
 
+AnchorMatch = _engine.AnchorMatch
 AnchorRunResult = _engine.AnchorRunResult
 AnchorScanError = _engine.AnchorScanError
 AnchorScanResult = _engine.AnchorScanResult
@@ -41,6 +42,7 @@ scan_anchors = _engine.scan_anchors
 
 __all__ = [
     "ENGINE_PATH",
+    "AnchorMatch",
     "AnchorRunResult",
     "AnchorScanError",
     "AnchorScanResult",

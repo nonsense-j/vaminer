@@ -1,4 +1,4 @@
-"""End-to-end deterministic test for the RCA → synthesis → rule agent path."""
+"""End-to-end deterministic test for the Pydantic adapter and unified rule phase."""
 
 from __future__ import annotations
 
@@ -10,20 +10,16 @@ from git import Actor, Repo
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
-from src.miner.core.agents import (
-    make_ast_grep_synthesizer,
-    make_root_cause_analyzer,
-    make_rule_generator,
-)
-from src.miner.core.context import MinerContext
-from src.miner.utils.models import AnchorSynthesisRequest
+from src.miner.core.tasks import make_root_cause_task, make_rule_generation_task
+from src.miner.runtime.pydantic_ai import PydanticAIRuntime
+from src.miner.utils.models import AnalysisSubject, IssueCollectionInfo
 
 CASE_SOURCE = "/* missing guard */\nvoid trigger(void) { danger(1); }\n"
 BEHAVIOR = "Calls the dangerous operation with one argument."
 INSPECT_HINT = "Inspect whether the required guard applies before the matched call."
 
 
-def root_cause_payload() -> dict:
+def _root_cause_payload() -> dict:
     return {
         "language": "c",
         "root_cause_summary": "A dangerous operation executes without its required guard.",
@@ -34,7 +30,7 @@ def root_cause_payload() -> dict:
                 "start_line": 1,
                 "end_line": 2,
                 "role": "Executes the dangerous operation without the required guard.",
-                "snippet": "void trigger(void) { danger(1); }",
+                "snippet": CASE_SOURCE.rstrip(),
             }
         ],
         "fixing_pattern": "Establish the guard before invoking danger.",
@@ -42,9 +38,9 @@ def root_cause_payload() -> dict:
     }
 
 
-def synthesis_request_payload() -> dict:
+def _request_payload() -> dict:
     return {
-        "root_cause": root_cause_payload(),
+        "root_cause": _root_cause_payload(),
         "summary": "Dangerous operations must run only after the required guard is established.",
         "anchor_intents": [
             {
@@ -58,173 +54,134 @@ def synthesis_request_payload() -> dict:
     }
 
 
-def synthesis_payload() -> dict:
-    return {
-        "anchors": [
-            {
-                "id": "danger-call",
-                "behavior_weight": 5,
-                "query_weight": 5,
-                "type": "pattern",
-                "query": "danger($ARG);",
-                "behavior": BEHAVIOR,
-                "inspect_hint": INSPECT_HINT,
-            }
-        ],
-        "case_coverage": [{"path": "case1.c", "anchor_ids": ["danger-call"]}],
-        "repo_evidence": [{"anchor_id": "danger-call", "file": "bug.c", "line": 2}],
-        "adjustments": [],
-    }
-
-
-def synthesis_run_payload() -> dict:
-    return {
-        "anchor": synthesis_payload()["anchors"][0],
-        "adjustments": [],
-    }
-
-
-def core_payload() -> dict:
+def _core_payload() -> dict:
     return {
         "category": "SECURITY",
         "language": "c",
-        "root_cause_summary": root_cause_payload()["root_cause_summary"],
-        "summary": synthesis_request_payload()["summary"],
+        "root_cause_summary": _root_cause_payload()["root_cause_summary"],
+        "summary": _request_payload()["summary"],
         "scenarios": {
             "unsafe": ["A dangerous operation executes before its required guard is established."],
             "safe": ["The required guard is established before the dangerous operation executes."],
         },
-        "anchors": synthesis_payload()["anchors"],
+        "anchors": [_run_payload()["anchor"]],
     }
 
 
-def prepare_repository(repo_path: Path) -> None:
+def _run_payload() -> dict:
+    return {
+        "anchor": {
+            "id": "danger-call",
+            "behavior_weight": 5,
+            "query_weight": 5,
+            "type": "pattern",
+            "query": "danger($ARG);",
+            "behavior": BEHAVIOR,
+            "inspect_hint": INSPECT_HINT,
+        },
+        "adjustments": [],
+    }
+
+
+def _prepare_repository(repo_path: Path) -> tuple[str, str]:
     repo_path.mkdir()
     (repo_path / "bug.c").write_text(CASE_SOURCE, encoding="utf-8")
     repo = Repo.init(repo_path)
     actor = Actor("VAS Test", "vas-test@example.com")
     repo.index.add(["bug.c"])
     buggy = repo.index.commit("buggy", author=actor, committer=actor)
-    repo.create_head("buggy", buggy)
-
     (repo_path / "bug.c").write_text(
         "void trigger(void) { guard(1); danger(1); }\n",
         encoding="utf-8",
     )
     repo.index.add(["bug.c"])
     fixed = repo.index.commit("fixed", author=actor, committer=actor)
+    repo.create_head("buggy", buggy)
     repo.create_head("fixed", fixed)
     repo.heads.buggy.checkout()
+    return buggy.hexsha, fixed.hexsha
 
 
-async def test_miner_agents_execute_real_tools_and_complete_the_rule(tmp_path: Path):
-    if shutil.which("ast-grep") is None:
-        pytest.skip("ast-grep is required")
-
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+async def test_pydantic_runtime_executes_rca_tools_and_unified_parent_child_rule_generation(
+    tmp_path: Path,
+):
     repo_path = tmp_path / "repo"
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()
-    prepare_repository(repo_path)
-
+    buggy_sha, fixed_sha = _prepare_repository(repo_path)
+    collection = IssueCollectionInfo(
+        issue_id="CVE-2099-0001",
+        issue_summary="Fixture issue",
+        issue_details="A dangerous call lacks its guard.",
+        repo_url="https://github.com/example/project",
+        repo_path=repo_path.as_posix(),
+        buggy_commit=buggy_sha,
+        fixed_commit=fixed_sha,
+    )
     rca_step = 0
 
     async def rca_model(messages, info):
         nonlocal rca_step
         rca_step += 1
         if rca_step == 1:
+            assert "read_fixed_diff" in {tool.name for tool in info.function_tools}
             return ModelResponse(parts=[ToolCallPart("read_fixed_diff", {})])
         if rca_step == 2:
             assert "guard(1)" in repr(messages)
             return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "cases_write_file",
-                        {"path": "case1.c", "content": CASE_SOURCE},
-                    )
-                ]
+                parts=[ToolCallPart("cases_write_file", {"path": "case1.c", "content": CASE_SOURCE})]
             )
-        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, root_cause_payload())])
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, _root_cause_payload())])
 
-    rca_agent = make_root_cause_analyzer(
-        repo_path,
-        cases_dir,
-        model=FunctionModel(rca_model),
+    root_task = make_root_cause_task(
+        collection,
+        workspace_root=tmp_path,
+        repo_path=repo_path,
+        cases_dir=cases_dir,
     )
-    rca_result = await rca_agent.run(
-        "Analyze the fixture.",
-        deps=MinerContext(
-            workspace_root=tmp_path,
-            repo_path=repo_path,
-            cases_dir=cases_dir,
-        ),
-    )
-    root_cause = rca_result.output
-
-    scanned_directories: list[str] = []
-    synthesis_step = 0
-
-    async def synthesis_model(messages, info):
-        nonlocal synthesis_step
-        synthesis_step += 1
-        if synthesis_step <= 2:
-            target_dir = cases_dir if synthesis_step == 1 else repo_path
-            scanned_directories.append(target_dir.as_posix())
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "run_ast_grep",
-                        {
-                            "target_dir": target_dir.as_posix(),
-                            "query_type": "pattern",
-                            "query": "danger($ARG);",
-                            "output": "sample",
-                        },
-                    )
-                ]
-            )
-        assert "'match_count': 1" in repr(messages)
-        assert "anchor_intent" in repr(messages)
-        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, synthesis_run_payload())])
-
+    root_result = await PydanticAIRuntime(model=FunctionModel(rca_model)).run(root_task)
+    root_cause = root_result.output
     parent_step = 0
 
-    async def rule_model(messages, info):
+    async def unified_rule_model(messages, info):
         nonlocal parent_step
+        tools = {tool.name for tool in info.function_tools}
+        if "synthesize_ast_grep_anchors" not in tools:
+            return ModelResponse(
+                parts=[ToolCallPart(info.output_tools[0].name, _run_payload())]
+            )
         parent_step += 1
         if parent_step == 1:
             return ModelResponse(
                 parts=[
                     ToolCallPart(
                         "synthesize_ast_grep_anchors",
-                        {"request": synthesis_request_payload()},
+                        {"request": _request_payload()},
                     )
                 ]
             )
-        assert "danger-call" in repr(messages)
-        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, core_payload())])
+        assert "repo_evidence" in repr(messages)
+        return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, _core_payload())])
 
-    synthesizer = make_ast_grep_synthesizer(
-        repo_path,
-        cases_dir,
-        model=FunctionModel(synthesis_model),
+    subject = AnalysisSubject(
+        type="issue",
+        source_root=repo_path.resolve().as_posix(),
+        cases_dir=cases_dir.resolve().as_posix(),
+        grounding_policy="repo_evidence",
     )
-    generator = make_rule_generator(
-        cases_dir,
-        synthesizer,
-        model=FunctionModel(rule_model),
-    )
-    deps = MinerContext(
+    rule_task = make_rule_generation_task(
+        root_cause,
         workspace_root=tmp_path,
+        source_root=repo_path,
         repo_path=repo_path,
         cases_dir=cases_dir,
-        root_cause=root_cause,
-        anchor_synthesis_request=AnchorSynthesisRequest.model_validate(synthesis_request_payload()),
+        analysis_subject=subject,
     )
-
-    rule_result = await generator.run("Generate the fixture rule.", deps=deps)
+    rule_result = await PydanticAIRuntime(model=FunctionModel(unified_rule_model)).run(rule_task)
 
     assert (cases_dir / "case1.c").read_text(encoding="utf-8") == CASE_SOURCE
-    assert scanned_directories == [cases_dir.as_posix(), repo_path.as_posix()]
     assert rule_result.output.anchors[0].id == "danger-call"
-    assert deps.anchor_synthesis is not None
-    assert rule_result.usage.requests == 5
+    assert root_result.usage is not None and root_result.usage.requests == 3
+    assert rule_result.usage is not None and rule_result.usage.requests == 3
+    assert rule_result.metadata["subagent_events"][0]["intent_id"] == "danger-call"

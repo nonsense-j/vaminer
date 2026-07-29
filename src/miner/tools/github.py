@@ -55,7 +55,7 @@ def _fetch_commit_info(
             timestamp=data["commit"]["committer"]["date"][:16],
             msg=data["commit"]["message"],
         )
-    except Exception as exc:  # noqa: BLE001 - return a structured tool error to the agent.
+    except Exception as exc:  # noqa: BLE001 - external failures are returned to the agent.
         return CommitRawInfo(commit_url=None, cur_sha=revision, parent_sha="", timestamp="", msg=f"Error: {exc}")
     finally:
         if owned_client:

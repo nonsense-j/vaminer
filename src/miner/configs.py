@@ -10,8 +10,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 from langfuse import Langfuse, get_client
-from pydantic_ai import Agent
-from pydantic_ai.usage import UsageLimits
 
 # =============================================================================
 # Project paths
@@ -19,17 +17,21 @@ from pydantic_ai.usage import UsageLimits
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
+load_dotenv(ENV_FILE)
+
 BASE_SRC_DIR = PROJECT_ROOT / "src"
 MINER_SRC_DIR = BASE_SRC_DIR / "miner"
 VAMINER_DIR = BASE_SRC_DIR / ".vaminer"
-VAS_RULES_DIR = VAMINER_DIR / "skills" / "vas-scanner" / "rules"
+VAS_RULES_DIR = Path(
+    os.getenv("VAMINER_RULES_DIR") or VAMINER_DIR / "skills" / "vas-scanner" / "rules"
+).expanduser().resolve()
 VAS_RULES_DIR.mkdir(parents=True, exist_ok=True)
 MINER_LOG_DIR = PROJECT_ROOT / "logs"
 MINER_LOG_DIR.mkdir(parents=True, exist_ok=True)
-VAS_WORKSPACE_DIR = PROJECT_ROOT.parent / "vas_ws" / "miner"
+VAS_WORKSPACE_DIR = Path(
+    os.getenv("VAMINER_WORKSPACE_DIR") or PROJECT_ROOT.parent / "vas_ws" / "miner"
+).expanduser().resolve()
 VAS_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-
-load_dotenv(ENV_FILE)
 
 
 def _configure_ddgs_proxy(*, http_proxy: str | None, https_proxy: str | None) -> None:
@@ -57,13 +59,35 @@ LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL")
 
+# Agent Runtime selection. Per-phase routing is supplied by the CLI; this is
+# the process-wide default used when no phase override exists.
+MINER_AGENT_RUNTIME = (os.getenv("MINER_AGENT_RUNTIME") or "pydantic-ai").strip().lower()
+
+# Claude Code CLI adapter. Authentication secrets stay in Claude settings or
+# the process environment and are never copied into Miner configuration.
+CLAUDE_CODE_COMMAND = (os.getenv("CLAUDE_CODE_COMMAND") or "claude").strip()
+CLAUDE_CODE_MODEL = (os.getenv("CLAUDE_CODE_MODEL") or "").strip() or None
+CLAUDE_CODE_SETTINGS = (os.getenv("CLAUDE_CODE_SETTINGS") or "").strip() or None
+CLAUDE_CODE_SETTING_SOURCES = (os.getenv("CLAUDE_CODE_SETTING_SOURCES") or "none").strip()
+CLAUDE_CODE_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_CODE_TIMEOUT_SECONDS") or "1800")
+CLAUDE_CODE_MAX_BUDGET_USD = float(os.getenv("CLAUDE_CODE_MAX_BUDGET_USD") or "5")
+CLAUDE_CODE_MAX_OUTPUT_BYTES = int(os.getenv("CLAUDE_CODE_MAX_OUTPUT_BYTES") or str(16 * 1024 * 1024))
+
 _configure_ddgs_proxy(http_proxy=HTTP_PROXY, https_proxy=HTTPS_PROXY)
 
 # =============================================================================
 # Miner behavior
 # =============================================================================
 
-MINER_MAX_REQUESTS_PER_AGENT = 100
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    value = default if raw is None or not raw.strip() else int(raw)
+    if value < 1:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+MINER_MAX_REQUESTS_PER_AGENT = _positive_int_env("MINER_MAX_REQUESTS_PER_AGENT", 100)
 
 MINER_FS_MAX_READ_LINES = 200
 MINER_FS_MAX_SEARCH_RESULTS = 200
@@ -85,17 +109,10 @@ MINER_AST_GREP_MAX_SAMPLE_SIZE = 100
 
 # ast-grep runner parallelism limits
 MINER_AST_GREP_MAX_PARALLEL_RUNS = 5
-MINER_AST_GREP_MAX_REQUESTS_PER_ANCHOR = 32
-
-
-def make_agent_usage_limits() -> UsageLimits:
-    """Create the request budget applied to one Agent run."""
-    return UsageLimits(request_limit=MINER_MAX_REQUESTS_PER_AGENT)
-
-
-def make_anchor_synthesis_usage_limits() -> UsageLimits:
-    """Create the exploration budget applied independently to one anchor run."""
-    return UsageLimits(request_limit=MINER_AST_GREP_MAX_REQUESTS_PER_ANCHOR)
+MINER_AST_GREP_MAX_REQUESTS_PER_ANCHOR = _positive_int_env(
+    "MINER_AST_GREP_MAX_REQUESTS_PER_ANCHOR",
+    32,
+)
 
 
 _TRACING_CONFIGURED = False
@@ -112,6 +129,8 @@ def configure_tracing() -> Langfuse | None:
         return None
     _TRACING_ATTEMPTED = True
     try:
+        from pydantic_ai import Agent
+
         langfuse = get_client()
         if not langfuse.auth_check():
             return None
@@ -119,7 +138,7 @@ def configure_tracing() -> Langfuse | None:
         _TRACING_CLIENT = langfuse
         _TRACING_CONFIGURED = True
         return langfuse
-    except Exception:  # noqa: BLE001 - optional telemetry cannot block mining.
+    except Exception:  # noqa: BLE001 - optional tracing must not block mining.
         # Tracing is optional and must never prevent local mining or tests.
         return None
 
@@ -151,5 +170,5 @@ def flush_tracing() -> None:
         return
     try:
         _TRACING_CLIENT.flush()
-    except Exception:  # noqa: BLE001 - optional telemetry cannot block mining.
+    except Exception:  # noqa: BLE001 - optional tracing must not block shutdown.
         return

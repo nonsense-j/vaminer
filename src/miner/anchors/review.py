@@ -18,6 +18,7 @@ def review_anchors(
     output_path: Path | None = None,
     max_repo_files: int | None = None,
     context_lines: int = 1,
+    source_label: str = "Repository",
 ) -> str:
     """Scan cases and repository, render their anchor results, and optionally save the report."""
     anchors = [anchor.model_dump(mode="json", by_alias=True) for anchor in core.anchors]
@@ -55,11 +56,11 @@ def review_anchors(
                 "",
                 render_scan_result(case_scan, anchor_labels, label_prefix="F", is_case=True),
                 "",
-                "## Repository Matches",
+                f"## {source_label} Matches",
                 "",
                 render_scan_result(repo_scan, anchor_labels, label_prefix="R"),
                 "",
-                "## Repository Hotspots",
+                f"## {source_label} Hotspots",
                 "",
                 hotspot_view,
             ]
@@ -111,7 +112,6 @@ def render_root_cause_analysis(analysis: RootCauseAnalysis) -> str:
         ]
     )
     return "\n".join(lines)
-
 
 def render_hotspot_annotated_view(
     scan: AnchorScanResult,
@@ -261,7 +261,10 @@ def render_hotspot_file(
         for location in hint["locations"]:
             lines.extend(
                 [
-                    f"- `{hint['anchor_id']}` line {location['start_line']} " f"query weight {hint['query_weight']}",
+                    (
+                        f"- `{hint['anchor_id']}` line {location['start_line']} "
+                        f"query weight {hint['query_weight']}"
+                    ),
                     "",
                     "```",
                     render_source_excerpt(
