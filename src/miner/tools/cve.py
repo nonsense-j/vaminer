@@ -4,7 +4,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..utils.models import CommitRawInfo, IssueRawInfo
+from ..models.issue import CommitRawInfo, IssueRawInfo
 from .github import _fetch_commit_info, _headers
 
 

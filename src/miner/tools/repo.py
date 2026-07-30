@@ -11,11 +11,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from git import GitCommandError, Repo
-from pydantic_ai import RunContext
-
-from ..configs import GITHUB_MIRROR_ENABLED
-from ..core.context import MinerContext
-from ..utils.models import RepoCheckout
+from ..utils.config import GITHUB_MIRROR_ENABLED
+from ..models.issue import RepoCheckout
 
 GITHUB_URL = "https://github.com/"
 GHFAST_GITHUB_URL = "https://ghfast.top/https://github.com/"
@@ -125,7 +122,7 @@ def clone_repository(
     )
 
 
-def read_fixed_diff_from_repo(
+def read_patch_diff_from_repo(
     repo_path: Path,
     path: str | None = None,
     *,
@@ -297,50 +294,13 @@ def search_repository_files(
     }
 
 
-def clone_repo(
-    context: RunContext[MinerContext],
-    repo_url: str,
-    buggy_sha: str,
-    fixed_sha: str | None = None,
-) -> RepoCheckout:
-    """Clone the selected revisions into the active task workspace.
-
-    Args:
-        repo_url: Repository URL (e.g., https://github.com/owner/repo).
-        buggy_sha: SHA of the buggy commit.
-        fixed_sha: SHA of the fixed commit, when available.
-    """
-    return clone_repository(
-        context.deps.workspace_root,
-        repo_url,
-        buggy_sha,
-        fixed_sha,
-    )
-
-
-def read_fixed_diff(
-    context: RunContext[MinerContext],
-    path: str | None = None,
-) -> str:
-    """Read the buggy-to-fixed diff, optionally limited to one repository-relative path.
-
-    Args:
-        path: Optional repository-relative path used to limit the diff.
-    """
-    if context.deps.repo_path is None:
-        raise RuntimeError("repo_path is missing from agent dependencies")
-    return read_fixed_diff_from_repo(context.deps.repo_path, path)
-
-
 __all__ = [
     "MAX_REPO_READ_BYTES",
     "MAX_REPO_READ_LINES",
     "MAX_REPO_SEARCH_BYTES",
     "MAX_REPO_SEARCH_RESULTS",
-    "clone_repo",
     "clone_repository",
-    "read_fixed_diff",
-    "read_fixed_diff_from_repo",
+    "read_patch_diff_from_repo",
     "read_repository_file",
     "search_repository_files",
 ]

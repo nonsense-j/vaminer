@@ -1,19 +1,52 @@
 ---
 name: ast-grep
-description: ast-grep pattern and rule syntax, metavariables, relational constraints, and query debugging guidance.
+description: Build and test ast-grep patterns and YAML rules with the packaged deterministic runner. Use for structural query construction, metavariables, relational constraints, bounded scans, and query debugging.
 ---
 
 # ast-grep Query Mechanics
 
 Use this skill to implement an already-approved structural search intent. It defines query mechanics only; the calling agent owns the rule semantics and allowed intent.
 
-Some runtimes provide a workspace-confined ast-grep execution capability in their operational bindings. When available, give it a directory inside the active workspace, a raw pattern or YAML rule body, and one output mode; when unavailable, submit the candidate and rely on deterministic validator repair feedback:
+## Run a Query
+
+Use the packaged runner at `scripts/runner.py`, relative to this `SKILL.md`. The operational binding supplies the Python executable and absolute skill root:
+
+```text
+"<python-executable>" "<skill-root>/scripts/runner.py" <target-dir> \
+  --language <language> \
+  --query-type pattern|rule \
+  --query <query> \
+  --output count|sample|full \
+  [--sample-size N]
+```
+
+Scan only the source or case directories supplied by the task. The runner accepts:
 
 - `count` returns match and matched-file counts.
 - `sample` returns counts and representative normalized code sites.
 - `full` returns every normalized site and metavariable capture; use it only when the complete result is needed.
 
-The helper reports observed syntax and matches. It does not decide which directory to scan, whether a result satisfies an intent, or how a query should change.
+Quote patterns so the shell does not expand ast-grep metavariables:
+
+```bash
+"<python-executable>" "<skill-root>/scripts/runner.py" "<case-dir>" \
+  --language c --query-type pattern --query '$OBJ->$FIELD' --output sample
+```
+
+Pass a YAML rule as one quoted multiline argument:
+
+```bash
+"<python-executable>" "<skill-root>/scripts/runner.py" "<source-dir>" \
+  --language c --query-type rule --output count \
+  --query 'rule:
+  all:
+    - pattern: $CALL($ARG)
+    - inside:
+        kind: function_definition
+        stopBy: end'
+```
+
+The runner reports observed syntax and matches. It does not decide whether a result satisfies the intent or how the query should change.
 
 ## Choose the Smallest Query Form
 
@@ -35,10 +68,12 @@ The helper reports observed syntax and matches. It does not decide which directo
 
 ## Diagnose and Refine
 
-- When syntax details are uncertain, use the active runtime's skill-reference reading capability to read only the relevant section of `references/rule_reference.md`.
+- When syntax details are uncertain, read only the relevant section of `references/rule_reference.md` packaged with this skill.
 - Run the query on the directories that matter to the calling task. Start with `count` or `sample`; request `full` only when the smaller result cannot answer the question.
-- Prefer one aggregate scan of a case directory over separate scans of every file when the returned normalized sites identify all required files. The caller's deterministic validator will repeat final coverage and repository scans after submission.
+- Prefer one aggregate scan of a case directory over separate scans of every file when the returned normalized sites identify all required files. The final VAS validator will perform fresh coverage and repository scans after parent assembly.
 - Treat zero matches as evidence about the query, not as an execution failure. Correct explicit runner failures before drawing conclusions.
-- Treat each query, immutable behavior, inspection hint, `behavior_weight`, and `query_weight` as one aligned configuration. A query change must preserve the approved intent and every required match.
+- Treat the immutable `behavior` as the semantic core of the query. The inspection hint guides post-match analysis rather than defining a full query.
+- When the complete anchor plan is available, prefer the smallest target node that naturally distinguishes the target behavior from sibling behaviors. One precision pass may add local, defect-relevant structural context, such as requiring the target node to be inside an `if_statement`, when every required case and the RCA site support it.
+- Do not add project identifiers, incidental enclosing scopes, exact expressions, or another anchor's complete behavior. Do not refine merely to remove unrelated repository matches.
 - Repository precision work is limited to one optional refinement pass. If extra matches remain, keep the recall-preserving query and lower `query_weight`; do not iteratively eliminate unrelated matches.
 - Stop querying and submit as soon as aggregate case recall and the required repository grounding are established; repeated confirmation or a second precision pass spends the caller's bounded request budget without adding required evidence.

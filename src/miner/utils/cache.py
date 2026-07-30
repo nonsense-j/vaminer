@@ -9,18 +9,12 @@ from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
-from ..core.validation import (
-    validate_anchors,
-    validate_issue_checkout,
-    validate_root_cause_analysis,
-)
-from .logger import logger
-from .models import (
-    AnalysisSubject,
-    IssueCollectionInfo,
-    RootCauseAnalysis,
-    VASCoreInfo,
-)
+from ..models.analysis import AnalysisSubject, RootCauseAnalysis
+from ..models.issue import IssueCollectionInfo
+from ..models.vas import VASCoreInfo
+from .log import logger
+from ..mining.validation.analysis import validate_issue_checkout, validate_root_cause_analysis
+from ..mining.validation.anchors import validate_anchors
 
 
 class AgentCache:

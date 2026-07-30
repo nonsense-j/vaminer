@@ -1,7 +1,8 @@
-"""Workspace manager — one workspace per vas rule (VAS-XXXX)."""
+"""Workspace persistence — one workspace per VAS rule."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -10,9 +11,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from ..configs import VAS_RULES_DIR, VAS_WORKSPACE_DIR
-from .logger import logger
-from .models import VASFull
+from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
+from ..models.vas import VASFull
+from .log import logger
 
 
 def _next_vas_id(registry: SourceRegistry) -> str:
@@ -43,6 +44,20 @@ def atomic_write_json(path: Path, value: Any) -> None:
         os.replace(temporary_path, path)
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def safe_input_id(source_id: str) -> str:
+    """Return a readable, collision-resistant directory name for one source id."""
+
+    source_id = source_id.strip()
+    if not source_id:
+        raise ValueError("source id must be non-empty")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_id).strip("-.")
+    if safe == source_id and len(safe) <= 120:
+        return safe
+    digest = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
+    prefix = (safe or "input")[:96].rstrip("-.")
+    return f"{prefix}--{digest}"
 
 
 class SourceRegistry:
@@ -105,18 +120,31 @@ class Workspace:
         vas_ws/
             source_registry.json
             VAS-XXXX/
-                cache/                       # Agent output cache files
                 cases/                       # Extracted root-cause cases and simple variants
-                src/                         # Cloned repo (buggy + fixed branches)
-                analysis.md                  # Root cause analysis for the mined issue
-                anchor_review.md             # Anchor case coverage and repository matches
+                src/                         # Cloned repo or example-suite snapshot
+        output/
+            miner/VAS-XXXX/<input-id>/       # Caches and review output
+            logs/miner/VAS-XXXX/<input-id>/  # Per-trace workflow logs
+            artifacts/<runtime>/<input-id>/  # Per-trace runtime diagnostics
         src/.vaminer/skills/vas-scanner/rules/
             VAS-XXXX.json                    # Final VAS specification
     """
 
-    def __init__(self, root: Path, vas_id: str, *, rules_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path,
+        vas_id: str,
+        *,
+        input_id: str | None = None,
+        output_root: Path | None = None,
+        trace_id: str | None = None,
+        rules_dir: Path | None = None,
+    ) -> None:
         self.root = root
         self.vas_id = vas_id
+        self.input_id = safe_input_id(input_id or vas_id)
+        self.output_root = (output_root or MINER_OUTPUT_DIR).expanduser().resolve()
+        self.trace_id = trace_id
         self.rules_dir = (rules_dir or VAS_RULES_DIR).resolve()
 
     @classmethod
@@ -199,7 +227,13 @@ class Workspace:
     @classmethod
     def _ensure_structure(cls, root: Path) -> None:
         root.mkdir(parents=True, exist_ok=True)
-        (root / "cache").mkdir(exist_ok=True)
+        for path in root.iterdir():
+            if path.name in {"cases", "src"}:
+                continue
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
         (root / "cases").mkdir(exist_ok=True)
         (root / "src").mkdir(exist_ok=True)
 
@@ -224,24 +258,34 @@ class Workspace:
         vas_id: str,
         base_dir: Path | None = None,
         *,
+        input_id: str | None = None,
+        output_root: Path | None = None,
+        trace_id: str | None = None,
         rules_dir: Path | None = None,
     ) -> Workspace:
         base_dir = base_dir or VAS_WORKSPACE_DIR
         root = base_dir / vas_id
         cls._ensure_structure(root)
-        return cls(root, vas_id, rules_dir=rules_dir)
+        return cls(
+            root,
+            vas_id,
+            input_id=input_id,
+            output_root=output_root,
+            trace_id=trace_id,
+            rules_dir=rules_dir,
+        )
 
     @property
     def rule_path(self) -> Path:
         return self.rules_dir / f"{self.vas_id}.json"
 
     @property
-    def analysis_path(self) -> Path:
-        return self.root / "analysis.md"
+    def run_output_dir(self) -> Path:
+        return self.output_root / "miner" / self.vas_id / self.input_id
 
     @property
     def cache_dir(self) -> Path:
-        return self.root / "cache"
+        return self.run_output_dir / "caches"
 
     @property
     def cases_dir(self) -> Path:
@@ -249,24 +293,21 @@ class Workspace:
 
     @property
     def anchor_review_path(self) -> Path:
-        return self.root / "anchor_review.md"
+        self.run_output_dir.mkdir(parents=True, exist_ok=True)
+        return self.run_output_dir / "anchor_review.md"
+
+    @property
+    def artifact_root(self) -> Path:
+        return self.output_root / "artifacts"
 
     @property
     def example_suite_snapshot_dir(self) -> Path:
-        return self.root / "input_snapshot"
-
-    @property
-    def example_suite_metadata_path(self) -> Path:
-        return self.root / "example_suite.json"
+        return self.root / "src" / "input_snapshot"
 
     def save_rule(self, vas: VASFull) -> Path:
         self.rule_path.parent.mkdir(parents=True, exist_ok=True)
         self.rule_path.write_text(vas.model_dump_json(indent=2, by_alias=True))
         return self.rule_path
-
-    def save_analysis(self, analysis: str) -> Path:
-        self.analysis_path.write_text(analysis)
-        return self.analysis_path
 
     def clear_cases(self) -> None:
         """Reset the generated cases directory before a fresh RCA run."""

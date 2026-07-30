@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,10 +13,26 @@ from typing import Any, Literal
 
 QueryType = Literal["pattern", "rule"]
 OutputMode = Literal["count", "sample", "full"]
+_ALLOWED_ROOTS_ENV = "VAMINER_AST_GREP_ALLOWED_ROOTS"
 
 
 class AstGrepRunnerError(RuntimeError):
     """Raised when ast-grep cannot produce a trustworthy JSON result."""
+
+
+def _enforce_allowed_root(root: Path) -> None:
+    raw = os.getenv(_ALLOWED_ROOTS_ENV)
+    if raw is None:
+        return
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AstGrepRunnerError("configured ast-grep roots are invalid") from exc
+    if not isinstance(decoded, list) or any(not isinstance(item, str) for item in decoded):
+        raise AstGrepRunnerError("configured ast-grep roots are invalid")
+    allowed = tuple(Path(item).expanduser().resolve() for item in decoded)
+    if not any(root == candidate or candidate in root.parents for candidate in allowed):
+        raise AstGrepRunnerError("target directory is outside the configured source and cases roots")
 
 
 def _find_ast_grep(executable: str | None = None) -> str:
@@ -111,6 +128,7 @@ def run_ast_grep(
     root = Path(target_dir).resolve()
     if not root.is_dir():
         raise AstGrepRunnerError(f"target directory does not exist: {root}")
+    _enforce_allowed_root(root)
     if query_type not in {"pattern", "rule"}:
         raise AstGrepRunnerError(f"unsupported query type: {query_type!r}")
     if output not in {"count", "sample", "full"}:

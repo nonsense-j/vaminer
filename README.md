@@ -23,7 +23,8 @@ This repository generates VAS rules. It does **not** provide a standalone end-us
 - `uv`
 - Git
 - The `ast-grep` or `sg` executable available on `PATH`
-- An API key for a supported LLM provider
+- For Pydantic AI, an API key for a supported LLM provider
+- For Claude CLI, an installed `claude` command with an authenticated user session
 
 ### Install and configure
 
@@ -66,7 +67,30 @@ The final rule is written to:
 src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 ```
 
-Supporting analysis, cases, cache data, and anchor reports are written under `../vas_ws/miner/VAS-XXXX/`. Run logs are written under `logs/`.
+The model workspace contains only source and generated cases:
+
+```text
+../vas_ws/miner/VAS-XXXX/
+├── src/
+└── cases/
+```
+
+Caches and diagnostics are kept outside the model workspace:
+
+```text
+output/
+├── miner/VAS-XXXX/<input-id>/
+│   ├── caches/                         # Issue Collection, RCA, and Rule Generation caches
+│   └── anchor_review.md
+├── logs/miner/VAS-XXXX/<input-id>/
+│   └── <trace-id>__<runtime>.log
+└── artifacts/claude-code/<input-id>/<trace-id>/
+    ├── issue-collection/
+    ├── root-cause/
+    └── rule-generation/
+```
+
+`<trace-id>` is the overall Langfuse workflow trace id when tracing is enabled. Without Langfuse, VAMINER generates a local id with the same format. Set `VAMINER_OUTPUT_DIR` or pass `--output-dir` to relocate the complete `output/` tree.
 
 ## Run a Generated Rule on Another Project
 
@@ -104,29 +128,30 @@ The miner runs a deterministic sequence:
 
 1. **Issue Collection** gathers issue text, repository provenance, and buggy/fixed commits.
 2. **Root Cause Analysis** identifies the concrete defect behavior and fixing pattern, then extracts minimal original and variant cases.
-3. **Rule Generation** produces the rule summary, independent unsafe/safe scenarios, and one queryless anchor intent for each distinct rule-sensitive causal-chain site.
-4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context, then deterministically aggregates and re-scans the anchor batch against all cases and the buggy repository.
-5. **Assembly** accepts the validated anchors atomically and emits the VAS rule.
+3. **Rule Generation** produces the rule summary, independent unsafe/safe scenarios, and one queryless anchor intent for each distinct, local, rule-sensitive causal-chain site.
+4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context. Every run sees the complete read-only anchor plan plus one target id, and returns one structurally typed result for that target.
+5. **Assembly and Validation** builds the complete VAS, then one shared semantic gate scans every non-empty anchor against the cases and source root.
 6. **Post-generation Anchor Report** independently renders case coverage and repository hotspot results.
 
-The Rule Generator never loads the ast-grep skill or edits a validated anchor. The AST-Grep Synthesizer exclusively owns query syntax, query/behavior alignment, and query validation.
+The Rule Generator never loads the ast-grep skill or authors query text. The AST-Grep Synthesizer exclusively owns query syntax and query/behavior alignment. If no trustworthy query can be produced, `query: ""` marks that anchor as disabled; it is skipped during scanning and ranking and is reported prominently in the anchor review and run log.
 
-The Agent runtime is Pydantic AI over OpenAI-compatible Chat Completions. The three main Agents remain Issue Collector, Root Cause Analyzer, and Rule Generator; the Rule Generator fans the typed synthesis request into one AST-Grep Synthesizer run per intent. Each run sees only its own immutable intent and has an independent dependency context and exploration budget. Deterministic orchestration restores request order, derives exact case coverage and canonical repository evidence from fresh scans, and accepts the batch atomically.
+Runtime-neutral tasks can be executed by either the Pydantic AI adapter or the isolated Claude Code CLI adapter, with explicit per-phase routing and no runtime fallback. The Pydantic AI child uses its native typed output contract. The Claude child receives a runtime-injected JSON input/output contract and returns prompt-contracted JSON to its parent. Neither runtime uses a synthesis receipt or per-child semantic gate; semantic acceptance belongs to the final `VASCoreInfo` task.
 
 ### Miner module responsibilities
 
-- `src/miner/main.py` orchestrates pipeline stages, cache acceptance, assembly, and persistence.
-- `src/miner/core/agents.py` constructs Agents and wires the Synthesizer handoff.
-- `src/miner/core/capabilities.py` defines reusable capability bundles and local Skill loading.
-- `src/miner/core/context.py` carries parent workflow state and isolated per-anchor run state.
-- `src/miner/core/validation.py` defines deterministic acceptance checks reused by live outputs and cached outputs.
-- `src/miner/anchors/review.py` renders post-generation anchor reviews; it does not own pipeline validation.
-- `src/miner/tools/` contains external evidence, repository, and Pydantic output adapters.
-- `src/miner/anchors/scanner.py` loads the scanner engine directly from the deployable `vas-scanner` skill.
+- `src/miner/agent/` defines runtime-neutral task contracts and phase routing.
+- `src/miner/models/` contains issue, root-cause, anchor, and VAS models.
+- `src/miner/mining/` owns task construction, workflows, example-suite intake, and deterministic acceptance.
+- `src/miner/utils/` owns general configuration, workspace layout, typed cache persistence, logging, and telemetry.
+- `src/miner/tools/` contains runtime-neutral evidence, repository, case, skill, and ast-grep operations.
+- `src/miner/runtimes/pydantic/` contains the Pydantic AI implementation, capabilities, LLM construction, hooks, and tool adapters.
+- `src/miner/runtimes/claude/` contains the Claude CLI implementation, policy compiler, subprocess control, protocol decoder, artifacts, MCP tools, and invocation-scoped plugin.
+- `src/miner/anchors/` contains generated-rule scanning and post-generation review.
+- `src/miner/main.py` is the CLI composition root for runtime selection, workflow execution, assembly, and persistence.
 
 ### LLM configuration
 
-All Agents reuse one process-wide Pydantic AI model returned by `get_llm()`.
+The Pydantic AI adapter keeps the existing explicit provider configuration and reuses one process-wide model returned by `get_llm()`.
 
 Native DeepSeek:
 
@@ -155,6 +180,15 @@ OPENAI_BASE_URL=https://your-endpoint/v1
 
 `OPENAI_BASE_URL` is required only for a compatible endpoint. `LLM_PROVIDER` and `LLM_MODEL` are required.
 
+The Claude CLI adapter has a separate, intentionally narrower configuration:
+
+```dotenv
+MINER_AGENT_RUNTIME=claude-code
+CLAUDE_CODE_MODEL=claude-sonnet-4-6
+```
+
+You can also pass `--claude-model claude-sonnet-4-6`. VAMINER always invokes Claude with the `user` setting source and an explicit model name. Authentication and provider selection come directly from the existing Claude CLI user session. VAMINER does not accept Claude API keys, base URLs, Bedrock/Vertex/Foundry switches, custom auth settings files, or alternate setting sources.
+
 External evidence and optional tracing are configured in the same ignored repository-root `.env`:
 
 ```dotenv
@@ -169,15 +203,20 @@ LANGFUSE_BASE_URL=...
 
 The Issue Collector's deferred `web-search` and `web-fetch` capabilities use local fallbacks and require no search-service API key. Specialized CVE and GitHub tools remain the preferred evidence sources.
 
-#### Agent request budget
+#### Agent turn budget
 
-Each Agent run allows at most 100 model requests by default. Override the limit in the repository-root `.env` when needed:
+Each phase has its own model-turn budget. Override the limits in the repository-root `.env` when needed:
 
 ```dotenv
-MINER_MAX_REQUESTS_PER_AGENT=100
+MINER_MAX_TURNS_ISSUE_COLLECTION=40
+MINER_MAX_TURNS_ROOT_CAUSE=40
+MINER_MAX_TURNS_RULE_GENERATION=100
+MINER_MAX_TURNS_PER_ANCHOR=30
 ```
 
-The Issue Collector and Root Cause Analyzer each have an independent budget. The Rule Generator reports accumulated usage from its child runs and remains subject to this overall budget when it resumes. Each per-anchor Synthesizer run additionally has code-owned limits of 32 model requests and 64 total tool calls. At most four anchor runs execute concurrently, and one synthesis request contains at most eight intents.
+The Issue Collector and Root Cause Analyzer each have an independent budget of 40 turns. The Rule Generator has a total budget of 100 turns, including usage accumulated from its child runs, and remains subject to this overall budget when it resumes. Each per-anchor Synthesizer run additionally has its own 30-turn limit and a code-owned limit of 64 total tool calls. At most four anchor runs execute concurrently, and one synthesis request contains at most eight intents.
+
+Both runtimes treat these model-turn ceilings as request limits rather than a dollar budget. VAMINER does not calculate, collect, or report monetary cost estimates. Provider-reported cost fields are ignored; only request and token usage are retained.
 
 #### Proxy access
 
@@ -191,11 +230,15 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 No additional proxy configuration is required. VAMINER loads these variables before constructing its HTTP clients and bridges the HTTPS proxy (falling back to the HTTP proxy) to the local web-search client. `NO_PROXY` keeps loopback traffic direct. These variables are process-wide, so model-provider, GitHub, web-search, and web-fetch requests may all use the configured proxy.
 
-Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable optional tracing. `LANGFUSE_BASE_URL` is needed only for a custom Langfuse server; otherwise the SDK default is used. Other Miner behavior limits—filesystem reads, overflowing tool output, compaction, and ast-grep execution—are code-owned constants in `src/miner/configs.py`, not environment variables.
+Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable optional tracing. `LANGFUSE_BASE_URL` is needed only for a custom Langfuse server; otherwise the SDK default is used. General Miner limits live in `src/miner/utils/config.py`; Pydantic-specific filesystem, overflow, and compaction limits live in `src/miner/runtimes/pydantic/config.py`.
+
+Langfuse workflow traces are named with their routed runtime, for example `VAS-0001 Miner Workflow @pydantic-ai` or `VAS-0001 Miner Workflow @claude-code`. Mixed workflows list both runtime IDs. Claude CLI tasks add one aggregate generation observation per phase and export completed model-response, tool-call, tool-result, and terminal child observations while the phase is still running. Event payloads are redacted and bounded; final structured output, attempts, token usage, and duration remain on the aggregate generation.
+
+Claude `Read`, `Grep`, and `Glob` calls may inspect the complete per-VAS workspace. Writes remain limited to top-level files under `cases/`. Final RCA validation keeps the declared, valid case files and deletes every undeclared file left by earlier attempts.
 
 ### Tests
 
-Run the behavior and end-to-end suite with:
+Run the focused behavior suite with:
 
 ```bash
 uv run pytest
@@ -239,14 +282,19 @@ uv run pytest
 
 `behavior_weight` records the rule importance of the intended inspection behavior. `query_weight` may be lower when the recall-preserving query is a weaker or broader proxy, and it is the only weight used for ranking. File priority sums the query weights of distinct matched anchors; repeated matches from the same anchor add navigation locations but do not multiply the score. Per-intent `required_cases` exists only in the synthesis request and is not part of synthesized anchors or the final VAS schema.
 
+An empty `query` is the disabled-anchor sentinel. Disabled anchors remain in the VAS so their intended inspection behavior is visible, but they are never executed and add no ranking weight. Enabled anchors remain strictly validated. When disabled anchors exist, collective coverage gaps are published as warnings instead of blocking the degraded VAS.
+
 ## Anchor Quality
 
-A valid anchor set is recall-complete and behavior-distinct:
+A complete anchor set is recall-oriented and behavior-distinct:
 
-- Every anchor covers its required original cases and transformation variants.
-- Every anchor matches its corresponding RCA-declared site in the buggy repository.
+- Every enabled anchor matches at least one generated case and, for issue inputs, an RCA-declared site in the buggy repository.
+- When no anchor is disabled, the enabled set covers every generated case and every required example-suite source span.
 - Each anchor represents one distinct observable behavior in the causal chain, even when case coverage overlaps.
+- `behavior` describes only the local operation matched by that anchor; cross-site relationships, exploit conditions, and review questions belong in `inspect_hint`.
+- Each per-anchor query is centered on its target `behavior`. To reduce overlap with sibling anchors, one precision pass may add local defect-relevant structure supported by every required case and the RCA site, such as requiring the target operation to appear inside an `if` statement. Project-specific or full-chain constraints remain out of bounds.
+- A Synthesizer normally returns an empty `plan_suggestion`. It may briefly suggest deleting, merging, or revising intents only when observed repository precision is materially poor and required-case recall can be preserved; the Rule Generator decides whether one bounded plan refinement is worthwhile.
 - Generic calls, assignments, definitions, and conditions are rejected unless structural or API constraints make them rule-sensitive.
-- Repository matches guide recall-preserving precision refinement; extra matches do not justify narrowing away required evidence.
+- Precision refinement is for reducing overlap between sibling anchors. Unrelated repository matches do not justify narrowing the query; keep recall and lower `query_weight` when needed.
 
 See [the vas-scanner skill](src/.vaminer/skills/vas-scanner/SKILL.md) for its internal rule-execution and reporting workflow.

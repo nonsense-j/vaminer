@@ -19,6 +19,7 @@ wheels/
 /tmp
 /bak
 /logs
+/output
 
 # agents
 .agents/

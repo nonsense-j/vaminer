@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..utils.models import RootCauseAnalysis, VASCoreInfo
+from ..models.analysis import AnalysisSubject, RootCauseAnalysis
+from ..models.vas import VASCoreInfo
+from ..mining.validation.anchors import disabled_anchor_warnings
+from ..mining.validation.analysis import root_cause_source_spans
+from ..utils.log import logger
 from .scanner import AnchorRunResult, AnchorScanResult, scan_anchors
 
 
@@ -19,6 +23,8 @@ def review_anchors(
     max_repo_files: int | None = None,
     context_lines: int = 1,
     source_label: str = "Repository",
+    root_cause: RootCauseAnalysis | None = None,
+    analysis_subject: AnalysisSubject | None = None,
 ) -> str:
     """Scan cases and repository, render their anchor results, and optionally save the report."""
     anchors = [anchor.model_dump(mode="json", by_alias=True) for anchor in core.anchors]
@@ -31,6 +37,42 @@ def review_anchors(
         max_files=max_repo_files,
         context_lines=context_lines,
     )
+    warnings = list(disabled_anchor_warnings(core))
+    if warnings:
+        matched_case_files = {match.file for match in case_scan.matches}
+        missing_cases = [
+            path
+            for path in list_files(cases_dir)
+            if path not in matched_case_files
+        ]
+        if missing_cases:
+            warnings.append(
+                "enabled anchors do not cover case files: "
+                + ", ".join(missing_cases)
+            )
+        if (
+            root_cause is not None
+            and analysis_subject is not None
+            and analysis_subject.type == "example_suite"
+        ):
+            uncovered_spans = [
+                f"{span.file}:{span.start_line}-{span.end_line}"
+                for span in root_cause_source_spans(root_cause)
+                if not any(
+                    Path(match.file).as_posix().removeprefix("./")
+                    == Path(span.file).as_posix().removeprefix("./")
+                    and match.start_line <= span.end_line
+                    and match.end_line >= span.start_line
+                    for match in repo_scan.matches
+                )
+            ]
+            if uncovered_spans:
+                warnings.append(
+                    "enabled anchors do not cover source spans: "
+                    + ", ".join(uncovered_spans)
+                )
+        for warning in warnings:
+            logger.warning("Degraded VAS: %s", warning)
     markdown = (
         "\n".join(
             [
@@ -39,6 +81,14 @@ def review_anchors(
                 "## Rule Summary",
                 "",
                 core.summary,
+                "",
+                "## Validation Warnings",
+                "",
+                *(
+                    [f"⚠️ {warning}" for warning in warnings]
+                    if warnings
+                    else ["None."]
+                ),
                 "",
                 "## Scenarios",
                 "",
@@ -71,47 +121,6 @@ def review_anchors(
         output_path.write_text(markdown, encoding="utf-8")
     return markdown
 
-
-def render_root_cause_analysis(analysis: RootCauseAnalysis) -> str:
-    """Render the typed RCA as a stable human-readable artifact."""
-    lines = [
-        "## Root Cause Summary",
-        "",
-        analysis.root_cause_summary,
-        "",
-        "## Analysis",
-        "",
-        analysis.analysis,
-        "",
-        "## Concrete Buggy Components",
-        "",
-    ]
-    for component in analysis.buggy_components:
-        lines.extend(
-            [
-                f"### `{component.file}:{component.start_line}`",
-                "",
-                component.role,
-                "",
-                "```",
-                component.snippet,
-                "```",
-                "",
-            ]
-        )
-    lines.extend(
-        [
-            "## Fixing Pattern",
-            "",
-            analysis.fixing_pattern,
-            "",
-            "## Extracted Case Files",
-            "",
-            *[f"- `cases/{Path(path).as_posix().removeprefix('cases/')}`" for path in analysis.extracted_case_files],
-            "",
-        ]
-    )
-    return "\n".join(lines)
 
 def render_hotspot_annotated_view(
     scan: AnchorScanResult,

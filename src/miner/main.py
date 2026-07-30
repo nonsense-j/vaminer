@@ -4,34 +4,37 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Iterable
 from pathlib import Path
 
-from .configs import (
-    CLAUDE_CODE_COMMAND,
-    CLAUDE_CODE_MAX_BUDGET_USD,
-    CLAUDE_CODE_MAX_OUTPUT_BYTES,
-    CLAUDE_CODE_MODEL,
-    CLAUDE_CODE_SETTING_SOURCES,
-    CLAUDE_CODE_SETTINGS,
-    CLAUDE_CODE_TIMEOUT_SECONDS,
+from .agent import AgentPhase, RuntimeRouter
+from .utils.config import (
     MINER_AGENT_RUNTIME,
     MINER_LOG_DIR,
+    MINER_OUTPUT_DIR,
     VAS_RULES_DIR,
     VAS_WORKSPACE_DIR,
-    flush_tracing,
-    trace_pipeline,
 )
-from .core.example_suite_intake import inspect_example_suite, materialize_example_suite
-from .core.workflow import ExampleSuiteWorkflow, IssueWorkflow, WorkflowOptions
-from .runtime import AgentPhase, RuntimeRouter
-from .runtime.claude_code import ClaudeCodeConfig, ClaudeCodeRuntime
-from .runtime.pydantic_ai import PydanticAIRuntime
-from .utils.hooks import make_cli_hooks
-from .utils.logger import logger, run_log_file
-from .utils.models import VASFull
+from .models.vas import VASFull
+from .utils.log import logger, run_log_file
+from .mining.examples import inspect_example_suite, materialize_example_suite
+from .mining.workflow import ExampleSuiteWorkflow, IssueWorkflow, WorkflowOptions
+from .runtimes.claude.config import (
+    COMMAND as CLAUDE_CODE_COMMAND,
+    ClaudeCodeConfig,
+    MAX_OUTPUT_BYTES as CLAUDE_CODE_MAX_OUTPUT_BYTES,
+    MODEL as CLAUDE_CODE_MODEL,
+    TIMEOUT_SECONDS as CLAUDE_CODE_TIMEOUT_SECONDS,
+)
 from .utils.workspace import Workspace
+from .utils.telemetry import flush_tracing, trace_pipeline
 
 RUNTIME_IDS = ("pydantic-ai", "claude-code")
+_ISSUE_WORKFLOW_PHASES = tuple(AgentPhase)
+_EXAMPLE_SUITE_WORKFLOW_PHASES = (
+    AgentPhase.ROOT_CAUSE,
+    AgentPhase.RULE_GENERATION,
+)
 _PHASE_ALIASES = {
     "issue": AgentPhase.ISSUE_COLLECTION,
     "issue_collection": AgentPhase.ISSUE_COLLECTION,
@@ -59,18 +62,6 @@ def _phase_runtime(value: str) -> tuple[AgentPhase, str]:
             f"unknown runtime {runtime_id!r}; expected one of: {', '.join(RUNTIME_IDS)}"
         )
     return phase, runtime_id
-
-
-def _setting_sources(value: str) -> tuple[str, ...]:
-    """Parse the intentionally narrow Claude settings-source policy."""
-
-    normalized = value.strip().lower()
-    if normalized in {"", "none"}:
-        return ()
-    sources = tuple(item.strip() for item in normalized.split(",") if item.strip())
-    if set(sources) - {"user"}:
-        raise argparse.ArgumentTypeError("Claude Runtime supports only 'user' or 'none' setting sources")
-    return sources
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -105,7 +96,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workspace-dir",
         type=Path,
         default=VAS_WORKSPACE_DIR,
-        help="Root for source registry, checkouts, cases, caches, and run artifacts.",
+        help="Root for source registry, checkouts, and generated cases.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=MINER_OUTPUT_DIR,
+        help="Root for caches, logs, reviews, and runtime artifacts.",
     )
     parser.add_argument(
         "--rules-dir",
@@ -116,24 +113,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--log-dir",
         type=Path,
-        default=MINER_LOG_DIR,
-        help="Root for append-only workflow logs.",
+        default=None,
+        help=f"Optional workflow log root override; defaults to {MINER_LOG_DIR}.",
     )
 
     claude = parser.add_argument_group("Claude Code Runtime")
     claude.add_argument("--claude-command", default=CLAUDE_CODE_COMMAND)
-    claude.add_argument("--claude-model", default=CLAUDE_CODE_MODEL)
     claude.add_argument(
-        "--claude-settings",
-        default=CLAUDE_CODE_SETTINGS,
-        help="Optional auth/model settings JSON; execution customizations are stripped.",
-    )
-    claude.add_argument(
-        "--claude-setting-sources",
-        type=_setting_sources,
-        default=_setting_sources(CLAUDE_CODE_SETTING_SOURCES),
-        metavar="user|none",
-        help="Load only user settings for auth/provider configuration, or none for environment-only auth.",
+        "--claude-model",
+        default=CLAUDE_CODE_MODEL,
+        help="Claude model name. Authentication always comes from the Claude CLI user session.",
     )
     claude.add_argument(
         "--claude-effort",
@@ -146,20 +135,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=CLAUDE_CODE_TIMEOUT_SECONDS,
     )
     claude.add_argument(
-        "--claude-max-budget-usd",
-        type=float,
-        default=CLAUDE_CODE_MAX_BUDGET_USD,
-        help="Optional native Claude safety cap per CLI attempt; request_limit remains the primary agent bound.",
-    )
-    claude.add_argument(
         "--claude-max-output-bytes",
         type=int,
         default=CLAUDE_CODE_MAX_OUTPUT_BYTES,
-    )
-    claude.add_argument(
-        "--claude-bare",
-        action="store_true",
-        help="Use Claude --bare for API-key or apiKeyHelper authentication instead of OAuth-compatible isolation.",
     )
     args = parser.parse_args(argv)
     args.issue_input = [
@@ -176,31 +154,46 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def make_runtime_router(args: argparse.Namespace) -> RuntimeRouter:
-    """Build both adapters without initializing either model provider."""
+    """Build only the adapters selected by the default and phase routes."""
 
     phase_runtimes = dict(args.phase_runtime)
-    claude_settings = Path(args.claude_settings) if args.claude_settings else None
-    runtimes = {
-        "pydantic-ai": PydanticAIRuntime(additional_capabilities=(make_cli_hooks(),)),
-        "claude-code": ClaudeCodeRuntime(
+    selected = {args.runtime, *phase_runtimes.values()}
+    runtimes = {}
+    if "pydantic-ai" in selected:
+        from .runtimes.pydantic.hooks import make_cli_hooks
+        from .runtimes.pydantic.runtime import PydanticAIRuntime
+        from .runtimes.pydantic.telemetry import instrument_tracing
+
+        instrument_tracing()
+        runtimes["pydantic-ai"] = PydanticAIRuntime(
+            additional_capabilities=(make_cli_hooks(),)
+        )
+    if "claude-code" in selected:
+        from .runtimes.claude.runtime import ClaudeCodeRuntime
+
+        runtimes["claude-code"] = ClaudeCodeRuntime(
             ClaudeCodeConfig(
                 executable=args.claude_command,
                 model=args.claude_model,
                 effort=args.claude_effort,
-                setting_sources=tuple(args.claude_setting_sources),
-                settings_file=claude_settings,
-                max_budget_usd=args.claude_max_budget_usd,
                 default_timeout_seconds=args.claude_timeout_seconds,
                 max_stdout_bytes=args.claude_max_output_bytes,
-                bare=args.claude_bare,
             )
-        ),
-    }
+        )
     return RuntimeRouter(
         runtimes=runtimes,
         default_runtime=args.runtime,
         phase_runtimes=phase_runtimes,
     )
+
+
+def _workflow_runtime_ids(
+    router: RuntimeRouter,
+    phases: Iterable[AgentPhase],
+) -> tuple[str, ...]:
+    """Return the distinct runtimes used by a workflow in phase order."""
+
+    return tuple(dict.fromkeys(router.runtime_id_for(phase) for phase in phases))
 
 
 async def run_issue_workflow(
@@ -212,34 +205,54 @@ async def run_issue_workflow(
     """Run one complete issue pipeline under a single active trace root."""
 
     workspace_dir = args.workspace_dir.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
     rules_dir = args.rules_dir.expanduser().resolve()
     vas_id = Workspace.get_vas_id(issue_input, base_dir=workspace_dir)
-    workspace = Workspace.from_id(
-        vas_id,
-        base_dir=workspace_dir,
-        rules_dir=rules_dir,
-    )
     workflow = IssueWorkflow(
         router,
         options=WorkflowOptions(use_cache=args.use_cache),
     )
-    with run_log_file(args.log_dir.expanduser().resolve(), vas_id) as log_path:
-        logger.info("Starting miner workflow for issue input: %s", issue_input)
-        logger.info("Storing run log in %s", log_path)
-        logger.info("Default runtime: %s", args.runtime)
-        try:
-            with trace_pipeline(issue_input=issue_input, vas_id=vas_id) as pipeline_span:
+    runtime_ids = _workflow_runtime_ids(router, _ISSUE_WORKFLOW_PHASES)
+    with trace_pipeline(
+        issue_input=issue_input,
+        vas_id=vas_id,
+        runtime_ids=runtime_ids,
+    ) as pipeline_trace:
+        workspace = Workspace.from_id(
+            vas_id,
+            base_dir=workspace_dir,
+            input_id=issue_input,
+            output_root=output_dir,
+            trace_id=pipeline_trace.trace_id,
+            rules_dir=rules_dir,
+        )
+        log_root = (
+            args.log_dir.expanduser().resolve()
+            if args.log_dir is not None
+            else output_dir / "logs" / "miner"
+        )
+        with run_log_file(
+            log_root,
+            vas_id,
+            input_id=workspace.input_id,
+            trace_id=pipeline_trace.trace_id,
+            runtime="+".join(runtime_ids),
+        ) as log_path:
+            logger.info("Starting miner workflow for issue input: %s", issue_input)
+            logger.info("Trace ID: %s", pipeline_trace.trace_id)
+            logger.info("Storing run log in %s", log_path)
+            logger.info("Default runtime: %s", args.runtime)
+            try:
                 result = await workflow.run(
                     issue_input,
                     vas_id=vas_id,
                     workspace=workspace,
                 )
-                if pipeline_span is not None:
-                    pipeline_span.update(output=result.vas.model_dump(mode="json"))
+                pipeline_trace.update(output=result.vas.model_dump(mode="json"))
                 return result.vas
-        except Exception:
-            logger.exception("Miner workflow failed for issue input: %s", issue_input)
-            raise
+            except Exception:
+                logger.exception("Miner workflow failed for issue input: %s", issue_input)
+                raise
 
 
 async def run_example_suite_workflow(
@@ -251,6 +264,7 @@ async def run_example_suite_workflow(
     """Run one complete example-suite pipeline under a single trace root."""
 
     workspace_dir = args.workspace_dir.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
     rules_dir = args.rules_dir.expanduser().resolve()
     inspection = inspect_example_suite(example_suite)
     vas_id = Workspace.prepare_example_suite_vas_id(
@@ -258,39 +272,58 @@ async def run_example_suite_workflow(
         content_digest=inspection.content_digest,
         base_dir=workspace_dir,
     )
-    workspace = Workspace.from_id(
-        vas_id,
-        base_dir=workspace_dir,
-        rules_dir=rules_dir,
-    )
-    intake = materialize_example_suite(inspection, workspace=workspace)
-    Workspace.register_example_suite(
-        inspection.registry_key,
-        vas_id=vas_id,
-        content_digest=inspection.content_digest,
-        base_dir=workspace_dir,
-    )
     workflow = ExampleSuiteWorkflow(
         router,
         options=WorkflowOptions(use_cache=args.use_cache),
     )
-    with run_log_file(args.log_dir.expanduser().resolve(), vas_id) as log_path:
-        logger.info("Starting miner workflow for example suite: %s", example_suite)
-        logger.info("Storing run log in %s", log_path)
-        logger.info("Default runtime: %s", args.runtime)
-        try:
-            with trace_pipeline(issue_input=inspection.registry_key, vas_id=vas_id) as pipeline_span:
+    runtime_ids = _workflow_runtime_ids(router, _EXAMPLE_SUITE_WORKFLOW_PHASES)
+    with trace_pipeline(
+        issue_input=inspection.registry_key,
+        vas_id=vas_id,
+        runtime_ids=runtime_ids,
+    ) as pipeline_trace:
+        workspace = Workspace.from_id(
+            vas_id,
+            base_dir=workspace_dir,
+            input_id=inspection.registry_key,
+            output_root=output_dir,
+            trace_id=pipeline_trace.trace_id,
+            rules_dir=rules_dir,
+        )
+        log_root = (
+            args.log_dir.expanduser().resolve()
+            if args.log_dir is not None
+            else output_dir / "logs" / "miner"
+        )
+        with run_log_file(
+            log_root,
+            vas_id,
+            input_id=workspace.input_id,
+            trace_id=pipeline_trace.trace_id,
+            runtime="+".join(runtime_ids),
+        ) as log_path:
+            logger.info("Starting miner workflow for example suite: %s", example_suite)
+            logger.info("Trace ID: %s", pipeline_trace.trace_id)
+            logger.info("Storing run log in %s", log_path)
+            logger.info("Default runtime: %s", args.runtime)
+            try:
+                intake = materialize_example_suite(inspection, workspace=workspace)
+                Workspace.register_example_suite(
+                    inspection.registry_key,
+                    vas_id=vas_id,
+                    content_digest=inspection.content_digest,
+                    base_dir=workspace_dir,
+                )
                 result = await workflow.run(
                     intake,
                     vas_id=vas_id,
                     workspace=workspace,
                 )
-                if pipeline_span is not None:
-                    pipeline_span.update(output=result.vas.model_dump(mode="json"))
+                pipeline_trace.update(output=result.vas.model_dump(mode="json"))
                 return result.vas
-        except Exception:
-            logger.exception("Miner workflow failed for example suite: %s", example_suite)
-            raise
+            except Exception:
+                logger.exception("Miner workflow failed for example suite: %s", example_suite)
+                raise
 
 
 async def main(args: argparse.Namespace) -> VASFull | list[VASFull]:

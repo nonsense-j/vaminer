@@ -12,10 +12,11 @@ dependencies = [
     "mcp[cli]>=2.0.0",
     "pydantic>=2.13.4",
     "pydantic-ai-harness>=0.11.0",
-    "pydantic-ai-slim[duckduckgo,openai,web-fetch]>=2.18.0",
+    "pydantic-ai-slim[duckduckgo,openai]>=2.18.0",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "rich>=15.0.0",
+    "trafilatura>=2.1.0",
 ]
 
 [dependency-groups]
@@ -30,4 +31,4 @@ line-length = 120
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
-testpaths = ["test"]
+testpaths = ["tests"]

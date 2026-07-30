@@ -183,8 +183,13 @@ def run_anchor(
     anchor: dict[str, Any],
     root: Path,
     language: str,
-    ast_grep: str,
+    ast_grep: str | None,
 ) -> AnchorRunResult:
+    if not str(anchor["query"]).strip():
+        return AnchorRunResult(anchor=dict(anchor), matches=[])
+    if ast_grep is None:
+        raise AnchorScanError("ast-grep is required for enabled anchors but was not found on PATH")
+
     query_type = anchor["type"]
     if query_type == "pattern":
         command = [
@@ -253,8 +258,13 @@ def scan_anchors(
     root = root.resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"scan root does not exist: {root}")
-    binary = find_ast_grep(ast_grep)
+    ordered = sorted_anchors(anchors)
+    binary = (
+        find_ast_grep(ast_grep)
+        if any(str(anchor["query"]).strip() for anchor in ordered)
+        else None
+    )
     results = [
-        run_anchor(anchor, root, language, binary) for anchor in sorted_anchors(anchors)
+        run_anchor(anchor, root, language, binary) for anchor in ordered
     ]
     return AnchorScanResult(root=root, anchor_results=results)

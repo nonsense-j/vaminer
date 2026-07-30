@@ -5,8 +5,8 @@ from urllib.parse import quote
 
 import httpx
 
-from ..configs import GITHUB_TOKEN
-from ..utils.models import CommitRawInfo, IssueRawInfo
+from ..utils.config import GITHUB_TOKEN
+from ..models.issue import CommitRawInfo, IssueRawInfo
 
 
 def _headers() -> dict:

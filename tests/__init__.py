@@ -1,0 +1,1 @@
+"""VAMiner behavior tests."""

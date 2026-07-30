@@ -136,13 +136,16 @@ def load_rule(vas_id: str, rules_dir: Path = RULES_DIR) -> dict[str, Any]:
                 "anchor.query_weight must be an integer from 1 to behavior_weight: "
                 f"{source}"
             )
+        query = anchor.get("query")
+        if not isinstance(query, str):
+            raise ValueError(f"anchor.query must be a string: {source}")
         normalized_anchors.append(
             {
                 "id": anchor_id,
                 "behavior_weight": behavior_weight,
                 "query_weight": query_weight,
                 "type": query_type,
-                "query": require_string(anchor, "query", source),
+                "query": query,
                 "behavior": require_string(anchor, "behavior", source),
                 "inspect_hint": require_string(anchor, "inspect_hint", source),
             }
