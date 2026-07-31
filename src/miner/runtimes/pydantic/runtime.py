@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai import (
     Agent,
@@ -19,7 +17,7 @@ from pydantic_ai import (
 from pydantic_ai.models import Model
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
-from pydantic_ai_harness import FileSystem, Shell
+from pydantic_ai_harness import FileSystem
 
 from ...agent.contracts import (
     AgentPhase,
@@ -31,20 +29,18 @@ from ...agent.contracts import (
     RuntimeCapability,
     RuntimeUsage,
 )
-from ...utils.config import (
-    MINER_AST_GREP_MAX_PARALLEL_RUNS,
-    MINER_MAX_TURNS_PER_ANCHOR,
-)
+from ...agent.instructions import compose_instructions
 from .config import (
     MINER_FS_MAX_FIND_RESULTS,
     MINER_FS_MAX_READ_LINES,
     MINER_FS_MAX_SEARCH_RESULTS,
 )
-from ...models.anchors import (
-    AnchorIntent,
-    AnchorSynthesisRequest,
-    AnchorSynthesisRunRequest,
-    AnchorSynthesisRunResult,
+from ...models.anchors import AnchorSynthesisRequest, AnchorSynthesisRunResult
+from ...tools.ast_grep import run_ast_grep
+from ...utils.config import (
+    MINER_AST_GREP_MAX_SAMPLE_SIZE,
+    MINER_AST_GREP_SAMPLE_SIZE,
+    MINER_AST_GREP_TIMEOUT_SECONDS,
 )
 from ...tools.cve import fetch_cve
 from ...tools.github import fetch_github_issue, parse_commit
@@ -60,19 +56,20 @@ from .capabilities import (
 )
 from .context import MinerContext
 from .llm import get_llm
+from ..shared.synthesis import (
+    AnchorSynthesisContext,
+    AnchorSynthesisDelegator,
+)
 from .tools import clone_repo, read_patch_diff
 
 _READ_ONLY_FILE_TOOLS = frozenset({"read_file", "search_files", "find_files"})
 _WRITABLE_FILE_TOOLS = _READ_ONLY_FILE_TOOLS | {"write_file"}
 _SKILL_REFERENCE_TOOLS = frozenset({"read_file"})
-_SYNTHESIZER_INSTRUCTIONS = (
-    Path(__file__).resolve().parents[2] / "instructions" / "ast_grep_synthesizer.md"
-).read_text(encoding="utf-8")
-
 _OUTPUT_TOOL_NAMES = {
     AgentPhase.ISSUE_COLLECTION: "submit_issue_collection",
     AgentPhase.ROOT_CAUSE: "submit_root_cause",
     AgentPhase.RULE_GENERATION: "submit_vas_core",
+    AgentPhase.AST_GREP_SYNTHESIS: "return_anchor_synthesis_run",
 }
 
 
@@ -101,8 +98,9 @@ def _workspace_files(
     root: Path,
     *,
     writable: bool,
+    prefix: str | None = None,
 ) -> AbstractToolset[MinerContext]:
-    return (
+    toolset = (
         FileSystem[MinerContext](
             root_dir=root,
             max_read_lines=MINER_FS_MAX_READ_LINES,
@@ -112,6 +110,7 @@ def _workspace_files(
         .get_toolset()
         .filtered(lambda _ctx, tool: tool.name in (_WRITABLE_FILE_TOOLS if writable else _READ_ONLY_FILE_TOOLS))
     )
+    return toolset.prefixed(prefix) if prefix else toolset
 
 
 def _skill_reference_files(root: Path) -> AbstractToolset[MinerContext]:
@@ -123,20 +122,6 @@ def _skill_reference_files(root: Path) -> AbstractToolset[MinerContext]:
         .get_toolset()
         .filtered(lambda _ctx, tool: tool.name in _SKILL_REFERENCE_TOOLS)
         .prefixed("skill")
-    )
-
-
-def _runner_shell(root: Path) -> AbstractToolset[MinerContext]:
-    return (
-        Shell[MinerContext](
-            cwd=root,
-            allowed_commands=(sys.executable,),
-            denied_commands=(),
-            default_timeout=60,
-            max_output_chars=50_000,
-        )
-        .get_toolset()
-        .filtered(lambda _ctx, tool: tool.name == "run_command")
     )
 
 
@@ -152,6 +137,32 @@ def _model_id(model: Model | str) -> str:
     return str(getattr(model, "model_id", None) or getattr(model, "model_name", None) or type(model).__name__)
 
 
+def _merge_runtime_usage(
+    parent: RunUsage,
+    child: RuntimeUsage | None,
+) -> None:
+    """Merge a normalized child run back into the Pydantic parent budget."""
+
+    if child is None:
+        return
+    values = {
+        "requests": child.requests,
+        "input_tokens": child.input_tokens,
+        "output_tokens": child.output_tokens,
+        "cache_write_tokens": child.cache_creation_input_tokens,
+        "cache_read_tokens": child.cache_read_input_tokens,
+    }
+    parent.incr(
+        RunUsage(
+            **{
+                name: value
+                for name, value in values.items()
+                if value is not None
+            }
+        )
+    )
+
+
 def _deps(task: AgentTask[Any]) -> MinerContext:
     context = task.context
     return MinerContext(
@@ -164,103 +175,68 @@ def _deps(task: AgentTask[Any]) -> MinerContext:
     )
 
 
-_OPERATIONAL_BINDINGS = {
-    AgentPhase.ISSUE_COLLECTION: """
-## Pydantic AI operational bindings
+def _runtime_binding(task: AgentTask[Any]) -> str:
+    if task.phase is AgentPhase.ISSUE_COLLECTION:
+        return """# Runtime Binding
 
-- Primary evidence tools: `fetch_cve`, `fetch_github_issue`, and `parse_commit`.
-- Checkout tool: `clone_repo`.
-- Optional web and commit-history tools are loaded through `load_capability`
-  only when the domain workflow calls for them.
+## Pydantic AI
+
+- Use `fetch_cve`, `fetch_github_issue`, and `parse_commit` for primary
+  evidence.
+- Use `clone_repo` to prepare the verified checkout.
+- Load optional web and commit-history capabilities only when the shared
+  workflow identifies a concrete evidence gap.
 - Submit the final object through the active structured-output contract.
-""",
-    AgentPhase.ROOT_CAUSE: """
-## Pydantic AI operational bindings
+"""
+    if task.phase is AgentPhase.ROOT_CAUSE:
+        diff_binding = (
+            "- Use `read_patch_diff` for the verified buggy-to-fixed diff."
+            if RuntimeCapability.FIXED_DIFF in task.required_capabilities
+            else "- `read_patch_diff` is not available for this task."
+        )
+        return f"""# Runtime Binding
 
-- Locate files or matching lines with `search_files` and `find_files`, then use `read_file`
-  with the smallest useful `offset` and `limit`. Page only when required context crosses the current slice.
-- `read_patch_diff` is present only for issue intake with a verified fixed revision.
-- Create complete files with `write_file`; generated cases belong directly under `cases/`.
+## Pydantic AI
+
+- Locate files or matching lines with `search_files` and `find_files`, then use
+  `read_file` with the smallest useful `offset` and `limit`.
+- Create complete case files with `write_file`.
+{diff_binding}
 - Submit the final object through the active structured-output contract.
-""",
-    AgentPhase.RULE_GENERATION: """
-## Pydantic AI operational bindings
+"""
+    if task.phase is AgentPhase.RULE_GENERATION:
+        return """# Runtime Binding
 
-- Locate files or matching lines with `search_files` and `find_files`, then use `read_file`
-  with the smallest useful `offset` and `limit`. Page only when required context crosses the current slice.
-- Delegate every query through the typed `synthesize_ast_grep_anchors` tool.
-- The tool fans out one isolated Synthesizer per intent and returns typed run results in request order.
-- Treat each `plan_suggestion` as optional advisory text. Ignore it unless the shared
-  Rule Generator instructions justify one bounded plan-refinement attempt.
-- Assemble one complete VASCoreInfo from those results. Do not author or repair query text.
-- If final validation rejects a query, disable only that anchor with `query: ""`.
-""",
-}
+## Pydantic AI
+
+- Use `find_files`, `search_files`, and `read_file` only within the cases root.
+  The source root is not exposed to the Rule Generator.
+- Submit one complete `AnchorSynthesisRequest` through
+  `synthesize_ast_grep_anchors`. The tool returns typed results in request
+  order.
+- Submit the final `VASCoreInfo` through the active structured-output contract.
+"""
+    if task.phase is AgentPhase.AST_GREP_SYNTHESIS:
+        return """# Runtime Binding
+
+## Pydantic AI
+
+- Inspect source only with `source_find_files`, `source_search_files`, and
+  `source_read_file`. Inspect generated cases only with the corresponding
+  `cases_*` tools.
+- Read detailed ast-grep syntax references with `skill_read_file`.
+- Execute queries only with `run_ast_grep_query`, selecting the logical target
+  `cases` or `source`. The tool accepts no shell command or filesystem path.
+- Submit one result through the active structured-output contract.
+"""
+    raise PydanticAIRuntimeConfigurationError(f"unsupported phase: {task.phase.value}")
 
 
 def _compiled_instructions(task: AgentTask[Any]) -> str:
-    sections = [task.instructions.strip()]
-    if task.input_instructions.strip():
-        sections.append(task.input_instructions.strip())
-    sections.append(_OPERATIONAL_BINDINGS[task.phase].strip())
-    return "\n\n".join(sections) + "\n"
-
-
-def _compiled_synthesizer_instructions(
-    task: AgentTask[Any],
-    *,
-    skill_root: Path,
-) -> str:
-    binding = f"""## Pydantic AI operational bindings
-
-- Locate files or matching lines with `search_files` and `find_files`, then use `read_file`
-  with the smallest useful `offset` and `limit`. Page only when required context crosses the current slice.
-- Read detailed syntax references with `skill_read_file`.
-- Run structural queries only with `run_command` using this exact prefix:
-  `{sys.executable} {skill_root / "scripts" / "runner.py"}`
-- Return exactly one complete result through the active structured-output contract.
-"""
-    sections = [_SYNTHESIZER_INSTRUCTIONS.strip()]
-    if task.input_instructions.strip():
-        sections.append(task.input_instructions.strip())
-    sections.append(binding.strip())
-    return "\n\n".join(sections) + "\n"
-
-
-def _enforce_target_anchor_result(
-    result: AnchorSynthesisRunResult,
-    intent: AnchorIntent,
-) -> AnchorSynthesisRunResult:
-    """Disable a child query if it rewrites or returns the wrong immutable intent."""
-    anchor = result.anchor
-    mismatches = [
-        field
-        for field in ("id", "behavior_weight", "behavior", "inspect_hint")
-        if getattr(anchor, field) != getattr(intent, field)
-    ]
-    if not mismatches:
-        return result
-
-    disabled_anchor = anchor.model_copy(
-        update={
-            "id": intent.id,
-            "behavior_weight": intent.behavior_weight,
-            "query_weight": min(anchor.query_weight, intent.behavior_weight),
-            "query": "",
-            "behavior": intent.behavior,
-            "inspect_hint": intent.inspect_hint,
-        }
-    )
-    adjustment = (
-        "Disabled the query because the Synthesizer changed immutable target "
-        f"fields: {', '.join(mismatches)}."
-    )
-    return result.model_copy(
-        update={
-            "anchor": disabled_anchor,
-            "adjustments": [*result.adjustments, adjustment],
-            "plan_suggestion": "",
-        }
+    return compose_instructions(
+        task.instructions,
+        input_policy=task.input_instructions,
+        runtime_binding=_runtime_binding(task),
     )
 
 
@@ -321,6 +297,7 @@ class PydanticAIRuntime:
             AgentPhase.ISSUE_COLLECTION: FileAccess.NONE,
             AgentPhase.ROOT_CAUSE: FileAccess.READ_WRITE,
             AgentPhase.RULE_GENERATION: FileAccess.READ_ONLY,
+            AgentPhase.AST_GREP_SYNTHESIS: FileAccess.READ_ONLY,
         }[task.phase]
         if task.workspace.native_workspace_access is not expected_access:
             raise PydanticAIRuntimeConfigurationError(
@@ -351,43 +328,19 @@ class PydanticAIRuntime:
             toolsets.append(_workspace_files(task.context.workspace_root, writable=True))
             capabilities.extend((overflow_capability(), compaction_capability(), cache_stability_capability()))
         elif task.phase is AgentPhase.RULE_GENERATION:
-            source_root = _require_path(task.context.source_root, "source_root", task.phase)
+            _require_path(task.context.source_root, "source_root", task.phase)
             cases_dir = _require_path(task.context.cases_dir, "cases_dir", task.phase)
             root_cause = task.context.root_cause
             analysis_subject = task.context.analysis_subject
             if root_cause is None or analysis_subject is None:
                 raise PydanticAIRuntimeConfigurationError("rule generation requires root_cause and analysis_subject")
-            skill = next((item for item in task.skills if item.name == "ast-grep"), None)
-            if skill is None:
-                raise PydanticAIRuntimeConfigurationError("rule generation requires the ast-grep skill")
-            ast_grep_skill = local_skill_capability(
-                skill.root / "SKILL.md",
-                defer_loading=False,
-                toolsets=[
-                    _skill_reference_files(skill.root),
-                    _runner_shell(task.context.workspace_root),
-                ],
-            )
-            synthesizer = Agent(
-                name="AST-Grep Synthesizer",
-                description="Compiles one immutable anchor intent into one ast-grep anchor.",
-                model=model,
-                deps_type=MinerContext,
-                instructions=_compiled_synthesizer_instructions(task, skill_root=skill.root),
-                toolsets=(_workspace_files(task.context.workspace_root, writable=False),),
-                capabilities=(
-                    ast_grep_skill,
-                    overflow_capability(),
-                    compaction_capability(),
-                    cache_stability_capability(),
-                ),
-                model_settings={"parallel_tool_calls": False},
-                output_type=ToolOutput(
-                    AnchorSynthesisRunResult,
-                    name="return_anchor_synthesis_run",
-                    strict=False,
-                ),
-                retries={"output": 2},
+            try:
+                synthesis_context = AnchorSynthesisContext.from_task(task)
+            except ValueError as exc:
+                raise PydanticAIRuntimeConfigurationError(str(exc)) from exc
+            synthesis_delegator = AnchorSynthesisDelegator(
+                context=synthesis_context,
+                execute=self.run,
             )
 
             async def synthesize_ast_grep_anchors(
@@ -396,61 +349,90 @@ class PydanticAIRuntime:
             ) -> list[AnchorSynthesisRunResult]:
                 """Delegate every intent and return structurally typed child results."""
 
-                semaphore = asyncio.Semaphore(MINER_AST_GREP_MAX_PARALLEL_RUNS)
-
-                async def synthesize_one(
-                    intent: AnchorIntent,
-                ) -> tuple[AnchorSynthesisRunResult, RunUsage]:
-                    run_request = AnchorSynthesisRunRequest(
-                        root_cause=request.root_cause,
-                        summary=request.summary,
-                        anchor_plan=request.anchor_intents,
-                        target_anchor_id=intent.id,
-                    )
-                    child_context = MinerContext(
-                        workspace_root=ctx.deps.workspace_root,
-                        source_root=source_root,
-                        repo_path=task.context.repo_path,
-                        cases_dir=cases_dir,
-                        root_cause=root_cause,
-                        analysis_subject=analysis_subject,
-                    )
-                    child_usage = RunUsage()
-                    child_input = json.dumps(
-                        {
-                            "anchor_synthesis_run_request": run_request.model_dump(mode="json"),
-                            "available_directories": {
-                                "source_root": source_root.resolve().as_posix(),
-                                "cases": cases_dir.resolve().as_posix(),
-                            },
-                        }
-                    )
-                    async with semaphore:
-                        child_result = await synthesizer.run(
-                            child_input,
-                            deps=child_context,
-                            usage=child_usage,
-                            usage_limits=UsageLimits(request_limit=MINER_MAX_TURNS_PER_ANCHOR),
-                        )
-                    return _enforce_target_anchor_result(child_result.output, intent), child_usage
-
-                child_results = await asyncio.gather(*(synthesize_one(intent) for intent in request.anchor_intents))
-                for _, child_usage in child_results:
-                    ctx.usage.incr(child_usage)
-                ctx.deps.subagent_events.extend(
-                    {
-                        "intent_id": intent.id,
-                        "runtime_id": self.runtime_id,
-                        "model_id": _model_id(model),
-                        "status": "completed",
-                    }
-                    for intent in request.anchor_intents
-                )
-                return [output for output, _ in child_results]
+                batch = await synthesis_delegator.synthesize(request)
+                for child_run in batch.runs:
+                    _merge_runtime_usage(ctx.usage, child_run.usage)
+                ctx.deps.subagent_events.extend(batch.events)
+                return list(batch.results)
 
             tools.append(synthesize_ast_grep_anchors)
-            toolsets.append(_workspace_files(task.context.workspace_root, writable=False))
+            toolsets.append(_workspace_files(cases_dir, writable=False))
             capabilities.append(overflow_capability())
+            model_settings = {"parallel_tool_calls": False}
+        elif task.phase is AgentPhase.AST_GREP_SYNTHESIS:
+            source_root = _require_path(
+                task.context.source_root,
+                "source_root",
+                task.phase,
+            )
+            cases_dir = _require_path(
+                task.context.cases_dir,
+                "cases_dir",
+                task.phase,
+            )
+            skill = next(
+                (item for item in task.skills if item.name == "ast-grep"),
+                None,
+            )
+            if skill is None:
+                raise PydanticAIRuntimeConfigurationError(
+                    "AST-Grep synthesis requires the ast-grep skill"
+                )
+
+            async def run_ast_grep_query(
+                target: Literal["source", "cases"],
+                language: str,
+                query_type: Literal["pattern", "rule"],
+                query: str,
+                output: Literal["count", "sample", "full"] = "sample",
+                sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
+            ) -> dict[str, Any]:
+                """Run one bounded query against an approved logical root."""
+
+                if sample_size < 1 or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE:
+                    raise ValueError(
+                        "sample_size must be between 1 and "
+                        f"{MINER_AST_GREP_MAX_SAMPLE_SIZE}"
+                    )
+                target_root = source_root if target == "source" else cases_dir
+                return await asyncio.to_thread(
+                    run_ast_grep,
+                    target_root,
+                    language=language,
+                    query_type=query_type,
+                    query=query,
+                    output=output,
+                    sample_size=sample_size,
+                    timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+                )
+
+            tools.append(run_ast_grep_query)
+            toolsets.extend(
+                (
+                    _workspace_files(
+                        source_root,
+                        writable=False,
+                        prefix="source",
+                    ),
+                    _workspace_files(
+                        cases_dir,
+                        writable=False,
+                        prefix="cases",
+                    ),
+                )
+            )
+            capabilities.extend(
+                (
+                    local_skill_capability(
+                        skill.root / "SKILL.md",
+                        defer_loading=False,
+                        toolsets=[_skill_reference_files(skill.root)],
+                    ),
+                    overflow_capability(),
+                    compaction_capability(),
+                    cache_stability_capability(),
+                )
+            )
             model_settings = {"parallel_tool_calls": False}
         else:  # pragma: no cover - exhaustive enum guard for future phases.
             raise PydanticAIRuntimeConfigurationError(f"unsupported phase: {task.phase.value}")

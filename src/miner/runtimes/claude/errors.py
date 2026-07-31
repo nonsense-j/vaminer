@@ -55,10 +55,6 @@ class ClaudeCodeProtocolError(ClaudeCodeError):
     """Raised when stdout does not implement the expected Claude result protocol."""
 
 
-class ClaudeCodePermissionError(ClaudeCodeError):
-    """Raised when the headless run reports denied tool calls."""
-
-
 class ClaudeCodeProviderError(ClaudeCodeError):
     """Raised for authentication, model, credit, rate-limit, or upstream failures."""
 

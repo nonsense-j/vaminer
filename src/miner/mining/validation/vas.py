@@ -27,8 +27,6 @@ def validate_vas_core(
             f"rule language {value.language.value!r} differs from RCA language "
             f"{root_cause.language.value!r}"
         )
-    if value.root_cause_summary != root_cause.root_cause_summary:
-        errors.append("rule root_cause_summary must equal the authoritative RCA")
     errors.extend(
         validate_anchors(
             value,

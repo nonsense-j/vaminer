@@ -58,6 +58,38 @@ def log_renderable(rendered: str) -> None:
     )
 
 
+def active_run_log_path() -> Path | None:
+    """Return the run file currently attached to the shared Miner logger."""
+
+    for handler in reversed(logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            return Path(handler.baseFilename).resolve()
+    return None
+
+
+@contextmanager
+def mirror_run_log_file(path: Path | None) -> Iterator[None]:
+    """Append subprocess diagnostics to an existing parent-owned run log."""
+
+    resolved = path.expanduser().resolve() if path is not None else None
+    if resolved is None or not resolved.is_file():
+        yield
+        return
+    file_handler = logging.FileHandler(
+        resolved,
+        mode="a",
+        encoding="utf-8",
+    )
+    file_handler.setLevel(LOG_LEVEL)
+    file_handler.setFormatter(_RunFormatter())
+    logger.addHandler(file_handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(file_handler)
+        file_handler.close()
+
+
 @contextmanager
 def run_log_file(
     log_root: Path,

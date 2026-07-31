@@ -25,6 +25,9 @@ wheels/
 .agents/
 .codex/
 
+# Generated VAS scanner rules
+**/.vaminer/skills/*scanner/rules/*.json
+
 # others
 bakup/
 .agent/

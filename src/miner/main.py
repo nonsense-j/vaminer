@@ -30,7 +30,11 @@ from .utils.workspace import Workspace
 from .utils.telemetry import flush_tracing, trace_pipeline
 
 RUNTIME_IDS = ("pydantic-ai", "claude-code")
-_ISSUE_WORKFLOW_PHASES = tuple(AgentPhase)
+_ISSUE_WORKFLOW_PHASES = (
+    AgentPhase.ISSUE_COLLECTION,
+    AgentPhase.ROOT_CAUSE,
+    AgentPhase.RULE_GENERATION,
+)
 _EXAMPLE_SUITE_WORKFLOW_PHASES = (
     AgentPhase.ROOT_CAUSE,
     AgentPhase.RULE_GENERATION,

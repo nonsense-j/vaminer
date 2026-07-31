@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import os
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from langfuse import Langfuse, get_client
+from opentelemetry import context as otel_context
+from opentelemetry import propagate, trace
 
 _TRACING_CONFIGURED = False
 _TRACING_ATTEMPTED = False
 _TRACING_CLIENT: Langfuse | None = None
+_TRACE_CARRIER_ENV = {
+    "traceparent": "VAMINER_OTEL_TRACEPARENT",
+    "tracestate": "VAMINER_OTEL_TRACESTATE",
+    "baggage": "VAMINER_OTEL_BAGGAGE",
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,83 @@ def configure_tracing() -> Langfuse | None:
         return langfuse
     except Exception:  # noqa: BLE001 - optional tracing must not block mining.
         return None
+
+
+def propagated_trace_environment() -> dict[str, str]:
+    """Serialize the active W3C trace context for an owned subprocess."""
+
+    carrier: dict[str, str] = {}
+    propagate.inject(carrier)
+    return {
+        env_name: value
+        for key, env_name in _TRACE_CARRIER_ENV.items()
+        if (value := carrier.get(key))
+    }
+
+
+@contextmanager
+def use_propagated_trace_environment(
+    environment: Mapping[str, str] | None = None,
+) -> Iterator[None]:
+    """Attach a subprocess-propagated W3C context for the current process."""
+
+    values = os.environ if environment is None else environment
+    carrier = {
+        key: value
+        for key, env_name in _TRACE_CARRIER_ENV.items()
+        if (value := values.get(env_name))
+    }
+    if "traceparent" not in carrier:
+        yield
+        return
+    token = otel_context.attach(propagate.extract(carrier))
+    try:
+        yield
+    finally:
+        otel_context.detach(token)
+
+
+@contextmanager
+def trace_tool_observation(
+    *,
+    name: str,
+    input: Any,
+    metadata: Mapping[str, Any] | None = None,
+) -> Iterator[Any | None]:
+    """Create one current TOOL observation under an active owned trace."""
+
+    if not trace.get_current_span().get_span_context().is_valid:
+        yield None
+        return
+    langfuse = configure_tracing()
+    if langfuse is None:
+        yield None
+        return
+    try:
+        manager = langfuse.start_as_current_observation(
+            name=name,
+            as_type="tool",
+            input=input,
+            metadata=dict(metadata or {}),
+        )
+        observation = manager.__enter__()
+    except Exception:  # noqa: BLE001 - optional tracing must not block work.
+        yield None
+        return
+
+    try:
+        yield observation
+    except BaseException as error:
+        try:
+            manager.__exit__(type(error), error, error.__traceback__)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    else:
+        try:
+            manager.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @contextmanager

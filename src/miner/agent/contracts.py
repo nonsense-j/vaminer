@@ -22,6 +22,7 @@ class AgentPhase(StrEnum):
     ISSUE_COLLECTION = "issue_collection"
     ROOT_CAUSE = "root_cause"
     RULE_GENERATION = "rule_generation"
+    AST_GREP_SYNTHESIS = "ast_grep_synthesis"
 
 
 class RuntimeCapability(StrEnum):

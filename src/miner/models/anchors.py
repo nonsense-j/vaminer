@@ -148,7 +148,7 @@ class AnchorSynthesisRunRequest(BaseModel):
 
 
 class AnchorSynthesisRunResult(BaseModel):
-    """One structurally valid anchor returned by an isolated Synthesizer."""
+    """One structurally valid anchor returned by a contract-bound Synthesizer."""
 
     model_config = ConfigDict(extra="forbid")
 

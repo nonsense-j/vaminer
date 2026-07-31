@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,7 +10,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from ...agent.contracts import RuntimeCapability
-from ...utils.config import MINER_AST_GREP_MAX_PARALLEL_RUNS, PROJECT_ROOT
+from ...utils.config import PROJECT_ROOT
 
 COMMAND = (os.getenv("CLAUDE_CODE_COMMAND") or "claude").strip()
 MODEL = (os.getenv("CLAUDE_CODE_MODEL") or "").strip() or None
@@ -20,7 +19,6 @@ MAX_OUTPUT_BYTES = int(os.getenv("CLAUDE_CODE_MAX_OUTPUT_BYTES") or str(16 * 102
 
 ClaudeOutputFormat = Literal["json", "stream-json"]
 
-_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 DEFAULT_ENV_ALLOWLIST = (
     "HOME",
     "PATH",
@@ -72,7 +70,6 @@ class ClaudeCodeConfig:
     output_format: ClaudeOutputFormat = "stream-json"
     project_root: Path = PROJECT_ROOT
     mcp_python: Path | None = None
-    plugin_name: str = "vaminer"
     permission_mode: Literal["dontAsk"] = "dontAsk"
     default_timeout_seconds: float = 600.0
     terminate_grace_seconds: float = 2.0
@@ -81,9 +78,6 @@ class ClaudeCodeConfig:
     max_repair_attempts: int = 2
     max_repair_payload_chars: int = 50_000
     artifact_root: Path | None = None
-    max_subagents_per_session: int = 8
-    max_concurrent_subagents: int = MINER_AST_GREP_MAX_PARALLEL_RUNS
-    max_subagent_depth: int = 1
     environment: Mapping[str, str] = field(default_factory=dict)
     capabilities: frozenset[RuntimeCapability] = frozenset(
         {
@@ -107,10 +101,6 @@ class ClaudeCodeConfig:
                 "Claude model provider and authentication must come from the Claude user session; "
                 f"custom environment contains forbidden keys: {', '.join(forbidden_environment)}"
             )
-        if not _PLUGIN_NAME_RE.fullmatch(self.plugin_name):
-            raise ValueError("plugin_name must contain only lowercase letters, digits, and hyphens")
-        if self.plugin_name != "vaminer":
-            raise ValueError("the invocation-scoped plugin name is fixed as 'vaminer'")
         if self.default_timeout_seconds <= 0:
             raise ValueError("default_timeout_seconds must be positive")
         if self.terminate_grace_seconds < 0:
@@ -121,12 +111,6 @@ class ClaudeCodeConfig:
             raise ValueError("max_repair_attempts must be between zero and two")
         if self.max_repair_payload_chars < 1:
             raise ValueError("max_repair_payload_chars must be positive")
-        if self.max_subagents_per_session < 1:
-            raise ValueError("max_subagents_per_session must be positive")
-        if self.max_concurrent_subagents < 1:
-            raise ValueError("max_concurrent_subagents must be positive")
-        if self.max_subagent_depth != 1:
-            raise ValueError("VAMiner permits exactly one subagent layer")
         project_root = self.project_root.expanduser().resolve()
         if not project_root.is_dir():
             raise ValueError(f"project_root is not an existing directory: {project_root}")

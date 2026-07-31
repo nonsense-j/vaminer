@@ -5,43 +5,35 @@
   "sources": [
     {
       "type": "issue",
-      "issue_id": "CVE-2019-3822",
+      "issue_id": "CVE-2023-46218",
       "repo_url": "https://github.com/curl/curl",
-      "buggy_commit": "b780b30d1377adb10bbe774835f49e9b237fb9bb",
-      "fixed_commit": "50c9484278c63b958655a717844f0721263939cc",
-      "root_cause_summary": "Unsigned subtraction wrap in NTLM type-3 size guard bypasses stack buffer overflow prevention"
+      "buggy_commit": "006977859dcc4b8670878bd669276d778a2715bb",
+      "fixed_commit": "2b0994c29a721c91c572cff7808c572a24d251eb",
+      "root_cause_summary": "Missing lowercasing of domain strings before PSL comparison bypasses public suffix check"
     }
   ],
-  "summary": "Buffer capacity guard using unsigned subtraction of a runtime value from a compile-time constant wraps on large values, making the guard always pass and allowing a subsequent memcpy to overflow a fixed-size stack buffer.",
+  "summary": "Cookie domain PSL verification calls `psl_is_cookie_domain_acceptable()` without lowercasing the domain arguments first. Since PSL entries are lowercase and libpsl comparison is case-sensitive, a mixed-case cookie domain (e.g., \"co.UK\") bypasses the public suffix check, allowing a \"super cookie\" that leaks to all domains under the same TLD.",
   "scenarios": {
     "unsafe": [
-      "Guard using unsigned subtraction `size < (capacity - len)` wraps when the runtime length exceeds capacity, bypassing bounds checking and allowing unbounded memory copies",
-      "Memory copy of a runtime-controlled length into a fixed-size stack buffer at a runtime offset without adequate bounds validation"
+      "Calling `psl_is_cookie_domain_acceptable()` with domain strings that may contain uppercase characters without prior lowercasing, allowing mixed-case domains (e.g., \"co.UK\", \"example.AT\") to bypass the case-sensitive PSL comparison.",
+      "A wrapper function that directly delegates to `psl_is_cookie_domain_acceptable()` without normalizing case on either the host domain or cookie domain arguments.",
+      "Passing a mixed-case cookie domain attribute alongside a lowercase host domain to the PSL check function, where the case mismatch defeats the public suffix restriction."
     ],
     "safe": [
-      "Guard using additive comparison `len + offset > capacity` avoids unsigned wrap by computing total size first",
-      "Pre-validation of the runtime length against buffer capacity before any comparison with remaining capacity",
-      "Signed arithmetic in size guards where a negative subtraction result correctly fails the check"
+      "Domain strings are lowercased via `Curl_strntolower()` (or equivalent) before being passed to `psl_is_cookie_domain_acceptable()`, ensuring case-insensitive matching against the lowercase PSL entries.",
+      "Both the host domain and cookie domain are normalized to lowercase in local buffers before the PSL comparison call, so mixed-case cookie domains cannot bypass the public suffix check.",
+      "A case-insensitive comparison or normalization wrapper is interposed between the domain sources and the `psl_is_cookie_domain_acceptable()` call."
     ]
   },
   "anchors": [
     {
-      "id": "vulnerable-guard",
+      "id": "psl-is-cookie-domain-acceptable-call",
       "behavior_weight": 5,
       "query_weight": 5,
-      "type": "rule",
-      "query": "rule:\n  any:\n    - pattern: if ($SIZE < ($CAPACITY - $LEN)) { $$$ }\n    - pattern: if ($SIZE <= ($CAPACITY - $LEN)) { $$$ }",
-      "behavior": "Comparison guarding a memory copy where the right-hand side subtracts a runtime value from a buffer capacity constant using unsigned arithmetic",
-      "inspect_hint": "Verify that the subtracted runtime value can exceed the buffer capacity constant, causing unsigned wrap of the result and making the comparison always pass. Check the types of all operands—size_t and unsigned int will wrap; signed types would produce a negative value that correctly fails the guard."
-    },
-    {
-      "id": "overflowing-copy",
-      "behavior_weight": 4,
-      "query_weight": 4,
       "type": "pattern",
-      "query": "memcpy(&$ARR[$OFF], $SRC, $LEN)",
-      "behavior": "Memory copy of a runtime-determined number of bytes into a fixed-size stack buffer at a runtime offset",
-      "inspect_hint": "Check whether the guard condition preceding this copy can be bypassed via unsigned integer wrap. Evaluate whether the copy length plus offset exceeds the buffer capacity. Verify that the guard uses additive or signed arithmetic rather than unsigned subtraction."
+      "query": "psl_is_cookie_domain_acceptable($CTX, $DOMAIN, $COOKIE_DOMAIN)",
+      "behavior": "Calling `psl_is_cookie_domain_acceptable()` with a PSL context pointer and two domain string arguments (host domain and cookie domain) to check cookie domain acceptability against the Public Suffix List.",
+      "inspect_hint": "Check whether the domain arguments are lowercased before being passed to this function. Missing lowercasing means mixed-case domains (e.g., 'co.UK') bypass the case-sensitive PSL comparison, allowing cookie injection across origin boundaries."
     }
   ]
 }

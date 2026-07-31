@@ -21,11 +21,10 @@ from src.miner.agent import (
 from src.miner.runtimes.pydantic.runtime import (
     PydanticAIOutputValidationError,
     PydanticAIRuntime,
-    _enforce_target_anchor_result,
 )
+from src.miner.runtimes.pydantic.hooks import make_cli_hooks
+from src.miner.utils.log import run_log_file
 from src.miner.models import (
-    AnchorIntent,
-    AnchorSynthesisRunResult,
     AnchorSynthesisRequest,
     IssueCollectionInfo,
     RootCauseAnalysis,
@@ -87,43 +86,6 @@ def _probe_task(tmp_path: Path, *, retries: int, validator) -> AgentTask[ProbeOu
         limits=RunLimits(request_limit=20, output_retries=retries),
         output_validator=validator,
     )
-
-
-def test_synthesizer_result_with_wrong_target_fields_is_disabled():
-    intent = AnchorIntent.model_validate(
-        {
-            "id": "danger-call",
-            "behavior_weight": 5,
-            "behavior": BEHAVIOR,
-            "inspect_hint": INSPECT_HINT,
-            "required_cases": ["case1.c"],
-        }
-    )
-    wrong = AnchorSynthesisRunResult.model_validate(
-        {
-            "anchor": {
-                "id": "guard-check",
-                "behavior_weight": 4,
-                "query_weight": 4,
-                "type": "pattern",
-                "query": "if ($COND) { $$$ }",
-                "behavior": "Evaluates a guard condition.",
-                "inspect_hint": "Inspect the guard.",
-            },
-            "adjustments": [],
-            "plan_suggestion": "Merge this with an unrelated anchor.",
-        }
-    )
-
-    result = _enforce_target_anchor_result(wrong, intent)
-
-    assert result.anchor.id == intent.id
-    assert result.anchor.behavior == intent.behavior
-    assert result.anchor.inspect_hint == intent.inspect_hint
-    assert result.anchor.behavior_weight == intent.behavior_weight
-    assert result.anchor.query == ""
-    assert result.plan_suggestion == ""
-    assert "immutable target fields" in result.adjustments[-1]
 
 
 async def test_pydantic_runtime_uses_native_output_retry_after_deterministic_rejection(
@@ -294,13 +256,34 @@ async def test_rule_generator_delegates_typed_intent_and_receives_structural_res
 
         child_requests += 1
         assert tool_names == {
-            "read_file",
-            "search_files",
-            "find_files",
+            "source_read_file",
+            "source_search_files",
+            "source_find_files",
+            "cases_read_file",
+            "cases_search_files",
+            "cases_find_files",
             "skill_read_file",
-            "run_command",
+            "run_ast_grep_query",
             "read_tool_result",
         }
+        assert "run_command" not in tool_names
+        runner_tool = next(
+            tool
+            for tool in info.function_tools
+            if tool.name == "run_ast_grep_query"
+        )
+        assert set(runner_tool.parameters_json_schema["properties"]) == {
+            "target",
+            "language",
+            "query_type",
+            "query",
+            "output",
+            "sample_size",
+        }
+        assert runner_tool.parameters_json_schema["properties"]["target"]["enum"] == [
+            "source",
+            "cases",
+        ]
         rendered = repr(messages)
         assert '"anchor_plan"' in rendered
         assert '"target_anchor_id"' in rendered
@@ -340,7 +323,17 @@ async def test_rule_generator_delegates_typed_intent_and_receives_structural_res
         cases_dir=cases_dir,
         analysis_subject=_subject(source_root, cases_dir),
     )
-    result = await PydanticAIRuntime(model=FunctionModel(model_function)).run(task)
+    with run_log_file(
+        tmp_path / "logs",
+        "VAS-TEST",
+        input_id="CVE-TEST",
+        trace_id="trace-1",
+        runtime="pydantic-ai",
+    ) as log_path:
+        result = await PydanticAIRuntime(
+            model=FunctionModel(model_function),
+            additional_capabilities=(make_cli_hooks(emit_console=False),),
+        ).run(task)
 
     assert result.output == core
     assert parent_requests == 2
@@ -361,3 +354,7 @@ async def test_rule_generator_delegates_typed_intent_and_receives_structural_res
             "status": "completed",
         }
     ]
+    rendered_log = log_path.read_text(encoding="utf-8")
+    assert "AST-Grep Synthesizer Started" in rendered_log
+    assert "AST-Grep Synthesizer Finished" in rendered_log
+    assert "danger-call" in rendered_log

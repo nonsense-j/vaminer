@@ -28,6 +28,12 @@ from ..utils.config import (
     MINER_MAX_TURNS_RULE_GENERATION,
 )
 from ..models.analysis import AnalysisSubject, RootCauseAnalysis
+from ..models.anchors import (
+    AnchorIntent,
+    AnchorSynthesisRequest,
+    AnchorSynthesisRunRequest,
+    AnchorSynthesisRunResult,
+)
 from ..models.issue import IssueCollectionInfo
 from ..models.vas import VASCoreInfo
 from .examples import ExampleSuiteIntake
@@ -110,7 +116,11 @@ ROOT_CAUSE_SPEC = PhaseSpec(
 RULE_GENERATION_SPEC = PhaseSpec(
     phase=AgentPhase.RULE_GENERATION,
     agent_name="Rule Generator",
-    description="Generates a complete VAS core and delegates every query to an isolated Synthesizer.",
+    description=(
+        "Produces the complete variant-analysis checking specification and rules "
+        "for detecting code issues corresponding to the authoritative RCA; "
+        "delegates only executable query synthesis."
+    ),
     instructions=_instructions("rule_generator.md"),
     output_type=VASCoreInfo,
     required_capabilities=frozenset(
@@ -126,6 +136,27 @@ RULE_GENERATION_SPEC = PhaseSpec(
     skills=(SkillSpec(name="ast-grep", root=_SKILLS_DIR / "ast-grep"),),
 )
 
+AST_GREP_SYNTHESIS_SPEC = PhaseSpec(
+    phase=AgentPhase.AST_GREP_SYNTHESIS,
+    agent_name="AST-Grep Synthesizer",
+    description=(
+        "Compiles one target structural intent from a complete read-only plan "
+        "into one ast-grep anchor."
+    ),
+    instructions=_instructions("ast_grep_synthesizer.md"),
+    output_type=AnchorSynthesisRunResult,
+    required_capabilities=frozenset(
+        {
+            RuntimeCapability.STRUCTURED_OUTPUT,
+            RuntimeCapability.WORKSPACE_READ,
+            RuntimeCapability.AST_GREP,
+            RuntimeCapability.SKILLS,
+        }
+    ),
+    limits=DEFAULT_SYNTHESIZER_LIMITS,
+    skills=(SkillSpec(name="ast-grep", root=_SKILLS_DIR / "ast-grep"),),
+)
+
 PHASE_SPECS = MappingProxyType(
     {
         spec.phase: spec
@@ -133,6 +164,7 @@ PHASE_SPECS = MappingProxyType(
             ISSUE_COLLECTION_SPEC,
             ROOT_CAUSE_SPEC,
             RULE_GENERATION_SPEC,
+            AST_GREP_SYNTHESIS_SPEC,
         )
     }
 )
@@ -214,19 +246,25 @@ def _task[OutputT: BaseModel](
 
 def _root_cause_input_instructions(*, source_type: str, fixed_revision: bool) -> str:
     if source_type == "example_suite":
-        return """## Example-suite input policy
+        return """# Input Policy
+
+## Example suite
 
 - Treat comments and good/bad/CWE labels as comparison and navigation hints, not conclusions.
 - Compare good and bad examples by code behavior and record the complete set of concrete bad spans.
 - Describe an observed good-example fix, or label the fixing invariant explicitly as inferred.
 """
     if fixed_revision:
-        return """## Fixed-issue input policy
+        return """# Input Policy
+
+## Issue with a verified fixed revision
 
 - Inspect the narrowest useful buggy-to-fixed diff before broad exploration.
 - Treat diff and source behavior as stronger evidence than issue prose.
 """
-    return """## Unfixed-issue input policy
+    return """# Input Policy
+
+## Issue without a verified fixed revision
 
 - Use bounded source exploration to establish the causal chain.
 - Label the fixing invariant explicitly as inferred because no fixed revision is available.
@@ -235,12 +273,16 @@ def _root_cause_input_instructions(*, source_type: str, fixed_revision: bool) ->
 
 def _rule_input_instructions(subject: AnalysisSubject) -> str:
     if subject.type == "example_suite":
-        return """## Example-suite grounding policy
+        return """# Input Policy
+
+## Example-suite grounding
 
 - Design intents from the RCA-declared bad spans.
 - The finalized anchor batch must collectively cover every RCA-declared bad span.
 """
-    return """## Issue grounding policy
+    return """# Input Policy
+
+## Issue grounding
 
 - Design intents from the RCA-declared repository spans.
 - Every synthesized query must overlap its applicable RCA-declared repository span.
@@ -264,7 +306,7 @@ def make_issue_collection_task(
     return _task(
         ISSUE_COLLECTION_SPEC,
         task_id=task_id or f"issue-collection:{issue_input}",
-        prompt=f"issue_input: {issue_input}",
+        prompt=json.dumps({"issue_input": issue_input}, ensure_ascii=False, indent=2),
         context=TaskContext(
             workspace_root=workspace_root,
             output_root=output_root,
@@ -436,16 +478,12 @@ def make_rule_generation_task(
     trace_id: str | None = None,
     task_id: str | None = None,
 ) -> AgentTask[VASCoreInfo]:
-    """Build the complete Rule Generator task with isolated query delegation."""
+    """Build a complete variant-analysis specification task with query delegation."""
 
     prompt = json.dumps(
         {
-            "task": "generate_complete_vas_core",
-            "analysis_subject": analysis_subject.model_dump(mode="json"),
             "root_cause_analysis": root_cause.model_dump(mode="json"),
             "available_directories": {
-                "source_root": source_root.resolve().as_posix(),
-                "repository": repo_path.resolve().as_posix() if repo_path is not None else None,
                 "cases": cases_dir.resolve().as_posix(),
             },
         },
@@ -482,7 +520,90 @@ def make_rule_generation_task(
     )
 
 
+def _synthesis_grounding(subject: AnalysisSubject) -> dict[str, str]:
+    if subject.grounding_policy == "repo_evidence":
+        requirement = (
+            "Confirm that the target query overlaps at least one applicable "
+            "source span declared by the authoritative root-cause analysis."
+        )
+    else:
+        requirement = (
+            "Confirm that the target query matches at least one applicable bad "
+            "source span declared by the authoritative root-cause analysis; "
+            "do not use a good-example-only site as grounding."
+        )
+    return {
+        "policy": subject.grounding_policy,
+        "requirement": requirement,
+    }
+
+
+def make_ast_grep_synthesis_task(
+    request: AnchorSynthesisRequest,
+    intent: AnchorIntent,
+    *,
+    workspace_root: Path,
+    source_root: Path,
+    repo_path: Path | None,
+    cases_dir: Path,
+    analysis_subject: AnalysisSubject,
+    output_root: Path | None = None,
+    input_id: str | None = None,
+    trace_id: str | None = None,
+    model_hint: str | None = None,
+    task_id: str | None = None,
+    skill: SkillSpec | None = None,
+    limits: RunLimits = DEFAULT_SYNTHESIZER_LIMITS,
+) -> AgentTask[AnchorSynthesisRunResult]:
+    """Build one runtime-neutral, per-intent AST-Grep Synthesizer task."""
+
+    run_request = AnchorSynthesisRunRequest(
+        root_cause=request.root_cause,
+        summary=request.summary,
+        anchor_plan=request.anchor_intents,
+        target_anchor_id=intent.id,
+    )
+    selected_skill = skill or AST_GREP_SYNTHESIS_SPEC.skills[0]
+    prompt = json.dumps(
+        {
+            "anchor_synthesis_run_request": run_request.model_dump(mode="json"),
+            "grounding": _synthesis_grounding(analysis_subject),
+        },
+        ensure_ascii=False,
+    )
+    return AgentTask(
+        task_id=task_id or f"ast-grep-synthesis:{intent.id}",
+        phase=AST_GREP_SYNTHESIS_SPEC.phase,
+        agent_name=AST_GREP_SYNTHESIS_SPEC.agent_name,
+        description=AST_GREP_SYNTHESIS_SPEC.description,
+        instructions=AST_GREP_SYNTHESIS_SPEC.instructions,
+        prompt=prompt,
+        output_type=AST_GREP_SYNTHESIS_SPEC.output_type,
+        context=TaskContext(
+            workspace_root=workspace_root,
+            output_root=output_root,
+            input_id=input_id,
+            trace_id=trace_id,
+            source_root=source_root,
+            repo_path=repo_path,
+            cases_dir=cases_dir,
+            root_cause=request.root_cause,
+            analysis_subject=analysis_subject,
+        ),
+        workspace=WorkspacePolicy(
+            cwd=workspace_root,
+            native_workspace_access=FileAccess.READ_ONLY,
+        ),
+        required_capabilities=AST_GREP_SYNTHESIS_SPEC.required_capabilities,
+        limits=limits,
+        skills=(selected_skill,),
+        model_hint=model_hint,
+        metadata={"target_anchor_id": intent.id},
+    )
+
+
 __all__ = [
+    "AST_GREP_SYNTHESIS_SPEC",
     "DEFAULT_SYNTHESIZER_LIMITS",
     "ISSUE_COLLECTION_SPEC",
     "ISSUE_COLLECTION_LIMITS",
@@ -493,6 +614,7 @@ __all__ = [
     "RULE_GENERATION_LIMITS",
     "PhaseSpec",
     "make_example_suite_root_cause_task",
+    "make_ast_grep_synthesis_task",
     "make_issue_collection_task",
     "make_root_cause_task",
     "make_rule_generation_task",

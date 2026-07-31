@@ -143,7 +143,7 @@ class _CliLogSink:
     def __init__(
         self,
         *,
-        console: Console,
+        console: Console | None,
         width: int,
     ) -> None:
         self.console = console
@@ -152,7 +152,8 @@ class _CliLogSink:
     def emit(self, renderable: RenderableType) -> None:
         """Best-effort diagnostics must never affect agent execution."""
         try:
-            self.console.print(renderable)
+            if self.console is not None:
+                self.console.print(renderable)
             buffer = StringIO()
             file_console = Console(
                 file=buffer,
@@ -169,13 +170,14 @@ class _CliLogSink:
 def make_cli_hooks(
     *,
     console: Console | None = None,
+    emit_console: bool = True,
     width: int = 120,
     body_limit: int = 1_000,
     lines_limit: int = 15,
 ) -> Hooks[MinerContext]:
-    """Build eager, observe-only hooks for local Agent/LLM/tool diagnostics."""
+    """Build eager, observe-only hooks for console and active run-file diagnostics."""
     sink = _CliLogSink(
-        console=console or Console(width=width),
+        console=(console or Console(width=width)) if emit_console else None,
         width=width,
     )
     hooks = Hooks[MinerContext](defer_loading=False)

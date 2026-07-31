@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ...tools.cve import fetch_cve as fetch_cve_plain
 from ...tools.github import (
@@ -16,14 +17,31 @@ from ...tools.github import (
     search_commit_by_tag as search_commit_by_tag_plain,
     search_commit_by_time as search_commit_by_time_plain,
 )
+from ...tools.ast_grep import run_ast_grep
 from ...tools.repo import clone_repository, read_patch_diff_from_repo
+from ...models.anchors import AnchorSynthesisRequest, AnchorSynthesisRunResult
+from ...utils.config import (
+    MINER_AST_GREP_MAX_SAMPLE_SIZE,
+    MINER_AST_GREP_SAMPLE_SIZE,
+    MINER_AST_GREP_TIMEOUT_SECONDS,
+)
+from ...utils.log import mirror_run_log_file
+from ...utils.telemetry import (
+    flush_tracing,
+    trace_tool_observation,
+    use_propagated_trace_environment,
+)
 
 SERVER_NAME = "vaminer"
 PROFILE_ENV = "VAMINER_MCP_PROFILE"
 WORKSPACE_ROOT_ENV = "VAMINER_MCP_WORKSPACE_ROOT"
 REPO_PATH_ENV = "VAMINER_MCP_REPO_PATH"
+SOURCE_ROOT_ENV = "VAMINER_MCP_SOURCE_ROOT"
+CASES_DIR_ENV = "VAMINER_MCP_CASES_DIR"
 FIXED_DIFF_ENV = "VAMINER_MCP_FIXED_DIFF_ENABLED"
 GITHUB_MIRROR_ENV = "VAMINER_MCP_GITHUB_MIRROR_ENABLED"
+SYNTHESIS_CONTEXT_ENV = "VAMINER_MCP_SYNTHESIS_CONTEXT"
+SYNTHESIS_LOG_ENV = "VAMINER_MCP_SYNTHESIS_LOG"
 
 
 class MCPProfile(StrEnum):
@@ -31,6 +49,8 @@ class MCPProfile(StrEnum):
 
     ISSUE = "issue"
     ROOT_CAUSE = "root_cause"
+    RULE_GENERATION = "rule_generation"
+    AST_GREP_SYNTHESIS = "ast_grep_synthesis"
 
     @classmethod
     def parse(cls, value: str) -> MCPProfile:
@@ -38,6 +58,8 @@ class MCPProfile(StrEnum):
             "issue": cls.ISSUE,
             "issue_collection": cls.ISSUE,
             "root_cause": cls.ROOT_CAUSE,
+            "rule_generation": cls.RULE_GENERATION,
+            "ast_grep_synthesis": cls.AST_GREP_SYNTHESIS,
         }
         try:
             return aliases[value.strip().lower()]
@@ -87,8 +109,11 @@ class MCPServerSettings:
     profile: MCPProfile
     workspace_root: Path
     repo_path: Path | None = None
+    source_root: Path | None = None
+    cases_dir: Path | None = None
     fixed_diff_enabled: bool = False
     github_mirror_enabled: bool = True
+    synthesis_context_path: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> MCPServerSettings:
@@ -108,12 +133,38 @@ class MCPServerSettings:
                     label="repository path",
                     workspace_root=workspace_root,
                 )
+        synthesis_context_path: Path | None = None
+        if profile is MCPProfile.RULE_GENERATION:
+            synthesis_context_path = Path(
+                _required_env(values, SYNTHESIS_CONTEXT_ENV)
+            ).expanduser().resolve()
+            if not synthesis_context_path.is_file():
+                raise ValueError(
+                    "synthesis context is not an existing file: "
+                    f"{synthesis_context_path}"
+                )
+        source_root: Path | None = None
+        cases_dir: Path | None = None
+        if profile is MCPProfile.AST_GREP_SYNTHESIS:
+            source_root = _scoped_directory(
+                _required_env(values, SOURCE_ROOT_ENV),
+                label="source root",
+                workspace_root=workspace_root,
+            )
+            cases_dir = _scoped_directory(
+                _required_env(values, CASES_DIR_ENV),
+                label="cases directory",
+                workspace_root=workspace_root,
+            )
         return cls(
             profile=profile,
             workspace_root=workspace_root,
             repo_path=repo_path,
+            source_root=source_root,
+            cases_dir=cases_dir,
             fixed_diff_enabled=fixed_diff_enabled,
             github_mirror_enabled=_parse_bool(values.get(GITHUB_MIRROR_ENV), default=True),
+            synthesis_context_path=synthesis_context_path,
         )
 
 
@@ -213,30 +264,164 @@ def _register_root_cause_tools(server: Any, settings: MCPServerSettings) -> None
         _register_tool(server, "read_patch_diff", read_patch_diff)
 
 
+RuleSynthesisHandler = Callable[
+    [AnchorSynthesisRequest],
+    Awaitable[list[AnchorSynthesisRunResult]],
+]
+
+
+def _default_rule_synthesis_handler(
+    settings: MCPServerSettings,
+) -> RuleSynthesisHandler:
+    assert settings.synthesis_context_path is not None
+
+    handler = None
+
+    async def synthesize(
+        request: AnchorSynthesisRequest,
+    ) -> list[AnchorSynthesisRunResult]:
+        nonlocal handler
+        if handler is None:
+            from .synthesis import load_claude_synthesis_handler
+
+            handler = load_claude_synthesis_handler(
+                settings.synthesis_context_path
+            )
+        with trace_tool_observation(
+            name="synthesize_ast_grep_anchors",
+            input=request.model_dump(mode="json"),
+            metadata={
+                "runtime": "claude-code",
+                "gen_ai.operation.name": "execute_tool",
+                "gen_ai.tool.name": "synthesize_ast_grep_anchors",
+            },
+        ) as tool_observation:
+            results = await handler(request)
+            if tool_observation is not None:
+                try:
+                    tool_observation.update(
+                        output=[
+                            result.model_dump(mode="json")
+                            for result in results
+                        ]
+                    )
+                except Exception:  # noqa: BLE001 - tracing is observe-only.
+                    pass
+            return results
+
+    return synthesize
+
+
+def _register_ast_grep_synthesis_tools(
+    server: Any,
+    settings: MCPServerSettings,
+) -> None:
+    assert settings.source_root is not None
+    assert settings.cases_dir is not None
+
+    async def run_ast_grep_query(
+        target: Literal["source", "cases"],
+        language: str,
+        query_type: Literal["pattern", "rule"],
+        query: str,
+        output: Literal["count", "sample", "full"] = "sample",
+        sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
+    ) -> dict[str, Any]:
+        """Run one bounded ast-grep query against an approved logical root."""
+
+        if sample_size < 1 or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE:
+            raise ValueError(
+                "sample_size must be between 1 and "
+                f"{MINER_AST_GREP_MAX_SAMPLE_SIZE}"
+            )
+        target_root = (
+            settings.source_root
+            if target == "source"
+            else settings.cases_dir
+        )
+        return await asyncio.to_thread(
+            run_ast_grep,
+            target_root,
+            language=language,
+            query_type=query_type,
+            query=query,
+            output=output,
+            sample_size=sample_size,
+            timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+        )
+
+    _register_tool(server, "run_ast_grep_query", run_ast_grep_query)
+
+
+def _register_rule_generation_tools(
+    server: Any,
+    settings: MCPServerSettings,
+    *,
+    handler: RuleSynthesisHandler | None = None,
+) -> None:
+    synthesize = handler or _default_rule_synthesis_handler(settings)
+
+    async def synthesize_ast_grep_anchors(
+        request: AnchorSynthesisRequest,
+    ) -> list[AnchorSynthesisRunResult]:
+        """Compile every queryless intent from one complete authoritative plan.
+
+        The host fans out isolated, contract-bound Synthesizers concurrently
+        and returns results in the same order as ``request.anchor_intents``.
+        """
+
+        return await synthesize(request)
+
+    _register_tool(
+        server,
+        "synthesize_ast_grep_anchors",
+        synthesize_ast_grep_anchors,
+    )
+
+
 def build_server(
     *,
     settings: MCPServerSettings | None = None,
     env: Mapping[str, str] | None = None,
     fast_mcp_factory: Callable[[str], Any] | None = None,
+    rule_synthesis_handler: RuleSynthesisHandler | None = None,
 ) -> Any:
     """Build one ``vaminer`` server exposing only the selected profile tools."""
     resolved_settings = settings or MCPServerSettings.from_env(env)
     factory = fast_mcp_factory or _load_mcp_factory()
     server = factory(SERVER_NAME)
-    {
-        MCPProfile.ISSUE: _register_issue_tools,
-        MCPProfile.ROOT_CAUSE: _register_root_cause_tools,
-    }[resolved_settings.profile](server, resolved_settings)
+    if resolved_settings.profile is MCPProfile.ISSUE:
+        _register_issue_tools(server, resolved_settings)
+    elif resolved_settings.profile is MCPProfile.ROOT_CAUSE:
+        _register_root_cause_tools(server, resolved_settings)
+    elif resolved_settings.profile is MCPProfile.RULE_GENERATION:
+        _register_rule_generation_tools(
+            server,
+            resolved_settings,
+            handler=rule_synthesis_handler,
+        )
+    else:
+        _register_ast_grep_synthesis_tools(server, resolved_settings)
     return server
 
 
 def main() -> None:
     """Run the selected MCP profile over stdio."""
     try:
-        server = build_server()
+        settings = MCPServerSettings.from_env()
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(f"VAMiner MCP configuration error: {exc}") from exc
-    server.run(transport="stdio")
+    raw_log_path = os.getenv(SYNTHESIS_LOG_ENV)
+    log_path = Path(raw_log_path) if raw_log_path else None
+    with (
+        use_propagated_trace_environment(),
+        mirror_run_log_file(log_path),
+    ):
+        try:
+            server = build_server(settings=settings)
+            server.run(transport="stdio")
+        finally:
+            flush_tracing()
 
 
 if __name__ == "__main__":
@@ -244,11 +429,15 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "CASES_DIR_ENV",
     "FIXED_DIFF_ENV",
     "GITHUB_MIRROR_ENV",
     "PROFILE_ENV",
     "REPO_PATH_ENV",
     "SERVER_NAME",
+    "SOURCE_ROOT_ENV",
+    "SYNTHESIS_CONTEXT_ENV",
+    "SYNTHESIS_LOG_ENV",
     "WORKSPACE_ROOT_ENV",
     "MCPProfile",
     "MCPServerSettings",

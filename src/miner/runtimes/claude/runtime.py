@@ -12,6 +12,7 @@ import json
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from ...agent.contracts import (
@@ -27,6 +28,7 @@ from .config import ClaudeCodeConfig
 from .errors import (
     ClaudeCodeConfigurationError,
     ClaudeCodeRequestLimitError,
+    ClaudeCodeTimeoutError,
     ClaudeCodeValidationError,
 )
 from .policy import PolicyCompiler
@@ -90,6 +92,7 @@ class ClaudeCodeRuntime:
         policy_compiler = PolicyCompiler(self.config)
         policy_compiler.validate(task)
         timeout_seconds = task.limits.timeout_seconds or self.config.default_timeout_seconds
+        deadline = monotonic() + timeout_seconds
         max_repairs = min(task.limits.output_retries, self.config.max_repair_attempts)
         max_attempts = 1 + max_repairs
 
@@ -105,20 +108,24 @@ class ClaudeCodeRuntime:
 
         with tempfile.TemporaryDirectory(prefix="vaminer-claude-") as temporary:
             temporary_root = Path(temporary)
-            environment = policy_compiler.build_environment(task)
+            environment = policy_compiler.build_environment()
             executable = policy_compiler.resolve_executable(environment)
-            native_delegation_tool = policy_compiler.resolve_delegation_tool(task)
-            policy = policy_compiler.compile(
-                task,
-                native_delegation_tool=native_delegation_tool,
-            )
+            policy = policy_compiler.compile(task)
             policy_files = policy_compiler.materialize(
                 temporary_root,
                 task=task,
                 policy=policy,
+                executable=executable,
                 model_id=model_id,
                 trace_compaction=task_trace is not None,
             )
+            if task_trace is not None:
+                task_trace.configure_request(
+                    system_prompt=policy_files.system_prompt.read_text(
+                        encoding="utf-8"
+                    ),
+                    tool_names=policy.allowed_tools,
+                )
             schema_json = json.dumps(
                 descriptive_json_schema(task.output_type),
                 ensure_ascii=False,
@@ -186,16 +193,22 @@ class ClaudeCodeRuntime:
                     attempt,
                     max_attempts,
                 )
-                process = await process_runner.run(
-                    attempt_argv,
-                    prompt=prompt,
-                    cwd=task.workspace.cwd,
-                    environment=environment,
-                    timeout_seconds=timeout_seconds,
-                    stdout_path=persisted.stdout_path,
-                    stderr_path=persisted.stderr_path,
-                    stdout_line_handler=stream_monitor.observe_line,
-                )
+                remaining_timeout = deadline - monotonic()
+                if remaining_timeout <= 0:
+                    raise ClaudeCodeTimeoutError(timeout_seconds)
+                try:
+                    process = await process_runner.run(
+                        attempt_argv,
+                        prompt=prompt,
+                        cwd=task.workspace.cwd,
+                        environment=environment,
+                        timeout_seconds=remaining_timeout,
+                        stdout_path=persisted.stdout_path,
+                        stderr_path=persisted.stderr_path,
+                        stdout_line_handler=stream_monitor.observe_line,
+                    )
+                except ClaudeCodeTimeoutError as exc:
+                    raise ClaudeCodeTimeoutError(timeout_seconds) from exc
                 stream_monitor.finish()
                 if (
                     persisted.stderr_path is not None
@@ -269,6 +282,15 @@ class ClaudeCodeRuntime:
                             "observed_model_ids": observed_models,
                             "subagent_events": recorded_subagents,
                             "structured_candidate_count": len(parsed.structured_candidates),
+                            "permission_denial_count": sum(
+                                len(attempt_output.permission_denials)
+                                for attempt_output, _ in completed_attempts
+                            ),
+                            "permission_denials": tuple(
+                                denial
+                                for attempt_output, _ in completed_attempts
+                                for denial in attempt_output.permission_denials
+                            ),
                             "attempt_artifacts": tuple(
                                 {
                                     "prompt": str(item.prompt_path) if item.prompt_path else None,

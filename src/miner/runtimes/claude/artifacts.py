@@ -25,11 +25,7 @@ class ArtifactPolicy(Protocol):
     registered_tools: tuple[str, ...]
     mcp_tools: tuple[str, ...]
     allowed_tools: tuple[str, ...]
-    main_allowed_tools: tuple[str, ...]
     denied_tools: tuple[str, ...]
-    main_agent: str | None
-    allowed_subagent: str | None
-    native_delegation_tool: str | None
 
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
@@ -137,12 +133,8 @@ class ArtifactStore:
             "tools": {
                 "registered": list(policy.registered_tools),
                 "allowed": list(policy.allowed_tools),
-                "main_allowed": list(policy.main_allowed_tools),
                 "denied": list(policy.denied_tools),
                 "mcp": list(policy.mcp_tools),
-                "main_agent": policy.main_agent,
-                "allowed_subagent": policy.allowed_subagent,
-                "native_delegation_tool": policy.native_delegation_tool,
             },
             "isolation": {
                 "setting_sources": ["user"],
@@ -150,9 +142,6 @@ class ArtifactStore:
                 "session_persistence": False,
                 "auto_memory": False,
                 "claude_ai_mcp_servers": False,
-                "subagent_depth": self._config.max_subagent_depth,
-                "subagent_count": self._config.max_subagents_per_session,
-                "subagent_concurrency": self._config.max_concurrent_subagents,
             },
         }
         write_private(

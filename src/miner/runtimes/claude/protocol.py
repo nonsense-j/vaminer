@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -18,7 +17,6 @@ from .artifacts import clip, redact, sanitize_json
 from .config import ClaudeCodeConfig
 from .errors import (
     ClaudeCodeConfigurationError,
-    ClaudeCodePermissionError,
     ClaudeCodeProcessError,
     ClaudeCodeProtocolError,
     ClaudeCodeProviderError,
@@ -41,6 +39,8 @@ class ParsedOutput:
     usage: RuntimeUsage | None
     session_id: str | None
     model_id: str | None
+    permission_denials: tuple[Any, ...]
+    output_errors: tuple[str, ...]
 
 
 @dataclass
@@ -230,7 +230,8 @@ class StreamMonitor:
                 )
             logger.info(
                 "Claude terminal output: task=%s attempt=%s turns=%s reason=%s "
-                "structured=%s output=%s actor=%s parent_tool_use_id=%s",
+                "structured=%s output=%s actor=%s parent_tool_use_id=%s "
+                "permission_denials=%s",
                 self.task_id,
                 self.attempt,
                 event.get("num_turns"),
@@ -239,6 +240,7 @@ class StreamMonitor:
                 clip(rendered_output, _MAX_LOGGED_OUTPUT_CHARS),
                 actor,
                 parent_tool_use_id,
+                len(event.get("permission_denials") or []),
             )
         elif event.get("type") == "user":
             actor, parent_tool_use_id = self._actor(event)
@@ -371,14 +373,24 @@ class ProtocolDecoder:
                     "stream-json output did not contain a terminal result event"
                 )
 
-        permission_denials = terminal.get("permission_denials") or []
+        raw_permission_denials = terminal.get("permission_denials") or []
+        if not isinstance(raw_permission_denials, (list, tuple)):
+            raise ClaudeCodeProtocolError(
+                "Claude Code permission_denials must be an array"
+            )
+        permission_denials = tuple(
+            sanitize_json(item) for item in raw_permission_denials
+        )
         if permission_denials:
-            raise ClaudeCodePermissionError(
-                f"Claude Code denied {len(permission_denials)} tool call(s) under dontAsk mode"
+            logger.warning(
+                "Claude Code reported recoverable tool denials: count=%s; "
+                "continuing terminal and structured-output validation",
+                len(permission_denials),
             )
 
         structured = terminal.get("structured_output")
         event_candidates = _structured_output_candidates(events)
+        output_errors: tuple[str, ...] = ()
         if (
             terminal.get("terminal_reason") == "budget_exhausted"
             or terminal.get("subtype") == "error_max_budget_usd"
@@ -397,16 +409,16 @@ class ProtocolDecoder:
             terminal.get("terminal_reason") == "structured_output_retry_exhausted"
             or terminal.get("subtype") == "error_max_structured_output_retries"
         ):
-            raise ClaudeCodeProtocolError(
-                "Claude Code exhausted its native structured-output retry limit"
-            )
+            output_errors = _structured_output_errors(terminal)
         if terminal.get("stop_reason") == "max_tokens":
             raise ClaudeCodeProtocolError(
                 "Claude Code terminal response hit its output-token limit"
             )
-        if terminal.get("is_error") or terminal.get("terminal_reason") == "api_error":
+        if not output_errors and (
+            terminal.get("is_error") or terminal.get("terminal_reason") == "api_error"
+        ):
             self._raise_provider_error(terminal, stderr)
-        if process.returncode != 0:
+        if process.returncode != 0 and not output_errors:
             self._raise_process_or_provider(
                 process.returncode,
                 stdout,
@@ -417,15 +429,9 @@ class ProtocolDecoder:
 
         final_value = terminal.get("result")
         final_text = final_value if isinstance(final_value, str) else None
-        if structured is None and isinstance(final_value, (dict, list)):
-            structured = final_value
-        if structured is None and isinstance(final_value, str):
-            structured = _parse_json_text(final_value)
         candidates = _dedupe_candidates(
             ([structured] if structured is not None else []) + list(event_candidates)
         )
-        if structured is None and candidates:
-            structured = candidates[-1]
 
         usage_value = terminal.get("usage")
         usage = None
@@ -484,6 +490,8 @@ class ProtocolDecoder:
             usage=usage,
             session_id=session_id if isinstance(session_id, str) else None,
             model_id=model_id,
+            permission_denials=permission_denials,
+            output_errors=output_errors,
         )
 
     @staticmethod
@@ -562,41 +570,34 @@ def validate_output(
     task: AgentTask[OutputT],
     parsed: ParsedOutput,
 ) -> tuple[OutputT | None, tuple[str, ...], str]:
-    """Select and validate the strongest structured-output candidate."""
+    """Validate only Claude's authoritative terminal structured output."""
 
-    candidates = parsed.structured_candidates or (
-        (parsed.structured_output,) if parsed.structured_output is not None else ()
-    )
-    if not candidates:
-        return None, ("structured_output is missing",), parsed.final_text or ""
+    candidate_text = _output_repair_candidate(parsed)
+    if parsed.output_errors:
+        return None, parsed.output_errors, candidate_text
 
-    best: tuple[tuple[int, int, int, int], tuple[str, ...], str] | None = None
-    for index, raw_candidate in enumerate(candidates):
-        payload = _normalize_payload(task.output_type, raw_candidate)
-        candidate_text = _candidate_text(payload, parsed.final_text)
-        try:
-            output = task.output_type.model_validate(payload)
-        except ValidationError as exc:
-            errors = tuple(
-                _format_validation_error(item)
-                for item in exc.errors(include_url=False)
-            )
-            score = (1, len(errors), -len(candidate_text), index)
-        else:
-            try:
-                errors = task.validate_output(output)
-            except Exception as exc:
-                raise ClaudeCodeProtocolError(
-                    f"task output validator raised: {redact(str(exc))}"
-                ) from exc
-            if not errors:
-                return output, (), candidate_text
-            score = (0, len(errors), -len(candidate_text), index)
-        if best is None or score < best[0]:
-            best = (score, tuple(errors), candidate_text)
+    payload = parsed.structured_output
+    if payload is None:
+        return None, ("structured_output is missing",), candidate_text
 
-    assert best is not None
-    return None, best[1], best[2]
+    try:
+        output = task.output_type.model_validate(payload)
+    except ValidationError as exc:
+        errors = tuple(
+            _format_validation_error(item)
+            for item in exc.errors(include_url=False)
+        )
+        return None, errors, candidate_text
+
+    try:
+        errors = task.validate_output(output)
+    except Exception as exc:
+        raise ClaudeCodeProtocolError(
+            f"task output validator raised: {redact(str(exc))}"
+        ) from exc
+    if errors:
+        return None, tuple(errors), candidate_text
+    return output, (), candidate_text
 
 
 def aggregate_attempt_usage(
@@ -738,25 +739,6 @@ def _merge_numeric_usage(target: dict[str, Any], value: Mapping[str, Any]) -> No
             target[str(key)] = item
 
 
-def _parse_json_text(value: str) -> Any | None:
-    stripped = value.strip()
-    candidates = [stripped]
-    candidates.extend(
-        match.group(1).strip()
-        for match in re.finditer(
-            r"```(?:json)?\s*(.*?)```",
-            stripped,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    )
-    for candidate in reversed(candidates):
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
 def _structured_output_candidates(
     events: Sequence[Mapping[str, Any]],
 ) -> tuple[Any, ...]:
@@ -791,23 +773,6 @@ def _dedupe_candidates(candidates: Sequence[Any]) -> tuple[Any, ...]:
             seen.add(key)
             deduped.append(candidate)
     return tuple(deduped)
-
-
-def _normalize_payload(output_type: type[BaseModel], payload: Any) -> Any:
-    for _ in range(3):
-        if not isinstance(payload, Mapping) or len(payload) != 1:
-            break
-        wrapper, nested = next(iter(payload.items()))
-        if wrapper in output_type.model_fields:
-            break
-        if isinstance(nested, str):
-            parsed = _parse_json_text(nested)
-            if parsed is not None:
-                nested = parsed
-        if not isinstance(nested, (Mapping, list)):
-            break
-        payload = nested
-    return payload
 
 
 def _successful_mcp_servers(
@@ -860,6 +825,38 @@ def _candidate_text(payload: Any, final_text: str | None) -> str:
         with suppress(TypeError, ValueError):
             return json.dumps(payload, ensure_ascii=False, indent=2)
     return final_text or ""
+
+
+def _output_repair_candidate(parsed: ParsedOutput) -> str:
+    """Render diagnostics without promoting a non-terminal candidate to output."""
+
+    if parsed.structured_output is not None:
+        return _candidate_text(parsed.structured_output, parsed.final_text)
+    if parsed.final_text:
+        return parsed.final_text
+    if parsed.structured_candidates:
+        return _candidate_text(parsed.structured_candidates[-1], None)
+    return ""
+
+
+def _structured_output_errors(terminal: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return model-visible errors from Claude's native output retry loop."""
+
+    raw_errors = terminal.get("errors")
+    if raw_errors is None:
+        return ("Claude Code exhausted its native structured-output retry limit",)
+    if not isinstance(raw_errors, (list, tuple)):
+        raise ClaudeCodeProtocolError(
+            "Claude Code structured-output errors must be an array"
+        )
+    if any(not isinstance(item, str) for item in raw_errors):
+        raise ClaudeCodeProtocolError(
+            "Claude Code structured-output errors must contain only strings"
+        )
+    errors = tuple(redact(item.strip()) for item in raw_errors if item.strip())
+    return errors or (
+        "Claude Code exhausted its native structured-output retry limit",
+    )
 
 
 def _provider_category(message: str, status_code: int | None) -> str:

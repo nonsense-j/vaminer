@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -53,9 +54,13 @@ class FakeLangfuse:
         self.started: list[dict[str, Any]] = []
         self.observation = FakeObservation()
 
-    def start_observation(self, **values: Any) -> FakeObservation:
+    @contextmanager
+    def start_as_current_observation(self, **values: Any):
         self.started.append(values)
-        return self.observation
+        try:
+            yield self.observation
+        finally:
+            self.observation.end()
 
 
 def _task(tmp_path: Path) -> AgentTask[ProbeOutput]:
@@ -85,21 +90,68 @@ def _active_span() -> NonRecordingSpan:
     )
 
 
-def test_trace_is_skipped_without_an_active_workflow(monkeypatch, tmp_path: Path):
+def _assistant(
+    *,
+    message_id: str,
+    content: list[dict[str, Any]],
+    usage: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": message_id,
+            "content": content,
+            **({"usage": usage} if usage is not None else {}),
+        },
+    }
+
+
+def _tool_result(
+    *,
+    tool_use_id: str,
+    content: Any,
+    is_error: bool = False,
+) -> dict[str, Any]:
+    return {
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": is_error,
+                }
+            ]
+        },
+    }
+
+
+def test_trace_is_skipped_without_an_active_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     monkeypatch.setattr(
         telemetry,
         "configure_tracing",
-        lambda: pytest.fail("Langfuse should not be configured without an active trace"),
+        lambda: pytest.fail(
+            "Langfuse should not be configured without an active trace"
+        ),
     )
 
-    with telemetry.trace_claude_task(_task(tmp_path), model_id="claude-test") as task_trace:
+    with telemetry.trace_claude_task(
+        _task(tmp_path),
+        model_id="claude-test",
+    ) as task_trace:
         assert task_trace is None
 
 
-def test_trace_records_aggregate_result_and_usage(monkeypatch, tmp_path: Path):
+def test_agent_observation_matches_pydantic_shape_and_aggregates_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     langfuse = FakeLangfuse()
     monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
-    task = _task(tmp_path)
     result = AgentRunResult(
         output=ProbeOutput(value=7),
         runtime_id="claude-code",
@@ -118,318 +170,384 @@ def test_trace_records_aggregate_result_and_usage(monkeypatch, tmp_path: Path):
     )
 
     with trace.use_span(_active_span()):
-        with telemetry.trace_claude_task(task, model_id="claude-test") as task_trace:
+        with telemetry.trace_claude_task(
+            _task(tmp_path),
+            model_id="claude-test",
+        ) as task_trace:
             assert task_trace is not None
+            task_trace.configure_request(
+                system_prompt="System instructions",
+                tool_names=("Read", "mcp__vaminer__read_patch_diff"),
+            )
             task_trace.complete(result)
 
     started = langfuse.started[0]
-    assert started["name"] == "Claude Code: Root Cause Analyzer"
-    assert started["as_type"] == "generation"
-    assert started["model"] == "claude-test"
-    assert started["input"] == '{"api_key":"<redacted>"}'
-    update = langfuse.observation.updates[0]
+    assert started["name"] == "Root Cause Analyzer run"
+    assert started["as_type"] == "agent"
+    assert "model" not in started
+    assert started["input"] == [
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "type": "text",
+                    "content": '{"api_key":"<redacted>"}',
+                }
+            ],
+        }
+    ]
+    update = langfuse.observation.updates[-1]
+    assert update["input"][0] == {
+        "role": "system",
+        "content": "System instructions",
+    }
     assert update["output"] == {"value": 7}
-    assert update["usage_details"] == {
-        "input": 11,
-        "output": 5,
+    assert "usage_details" not in update
+    assert update["metadata"]["aggregated_usage"] == {
+        "input_tokens": 11,
+        "output_tokens": 5,
         "cache_creation_input_tokens": 2,
         "cache_read_input_tokens": 3,
+        "requests": 2,
+        "turns": 2,
     }
-    assert "cost_details" not in update
     assert update["metadata"]["attempts"] == 2
-    assert update["metadata"]["requests"] == 2
     assert update["metadata"]["session_id"] == "session-1"
     assert langfuse.observation.ended is True
 
 
-def test_trace_exports_completed_stream_events_as_children(monkeypatch, tmp_path: Path):
+def test_chat_and_tool_observations_match_pydantic_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     langfuse = FakeLangfuse()
     monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
-    assistant = {
-        "type": "assistant",
-        "message": {
-            "id": "request-1",
-            "usage": {
-                "input_tokens": 11,
-                "output_tokens": 5,
+    assistant = _assistant(
+        message_id="request-1",
+        usage={
+            "input_tokens": 11,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 3,
+        },
+        content=[
+            {"type": "thinking", "thinking": "Inspect first."},
+            {"type": "text", "text": "Inspecting the repository."},
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "Read",
+                "input": {"api_key": "sk-secret-value-123456"},
             },
-            "content": [
-                {"type": "text", "text": "Inspecting the repository."},
-                {
-                    "type": "tool_use",
-                    "id": "tool-1",
-                    "name": "read_file",
-                    "input": {"api_key": "sk-secret-value-123456"},
-                },
-            ],
-        },
-    }
-    tool_result = {
-        "type": "user",
-        "message": {
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "tool-1",
-                    "content": {"secret": "sk-secret-value-123456"},
-                }
-            ]
-        },
-    }
-    terminal = {
-        "type": "result",
-        "is_error": False,
-        "session_id": "session-1",
-        "terminal_reason": "end_turn",
-        "total_cost_usd": 0.01,
-        "result": '{"value": 7}',
-    }
-    result = AgentRunResult(
-        output=ProbeOutput(value=7),
-        runtime_id="claude-code",
-        model_id="claude-test",
-        usage=RuntimeUsage(requests=1, turns=1),
-        metadata={"session_id": "session-1"},
+        ],
+    )
+    tool_result = _tool_result(
+        tool_use_id="tool-1",
+        content={"secret": "sk-secret-value-123456"},
     )
 
     with trace.use_span(_active_span()):
-        with telemetry.trace_claude_task(_task(tmp_path), model_id="claude-test") as task_trace:
+        with telemetry.trace_claude_task(
+            _task(tmp_path),
+            model_id="claude-test",
+        ) as task_trace:
             assert task_trace is not None
+            task_trace.configure_request(
+                system_prompt="System instructions",
+                tool_names=("Read",),
+            )
             task_trace.observe_event(assistant, attempt=1)
             task_trace.observe_event(assistant, attempt=1)
             task_trace.observe_event(tool_result, attempt=1)
             task_trace.observe_event(tool_result, attempt=1)
-            task_trace.observe_event(terminal, attempt=1)
-            task_trace.complete(result)
 
-    aggregate = langfuse.observation
-    assert [values["name"] for values, _ in aggregate.children] == [
-        "Claude response 1",
-        "Claude tool result",
-        "Claude result attempt 1",
+    agent = langfuse.observation
+    assert [values["name"] for values, _ in agent.children] == [
+        "chat claude-test",
+        "Read",
     ]
-    response_values, response = aggregate.children[0]
-    assert response_values["as_type"] == "generation"
-    assert response_values["model"] == "claude-test"
-    assert response_values["input"] == '{"api_key":"<redacted>"}'
-    assert response_values["usage_details"] == {"input": 11, "output": 5}
-    assert response.ended is True
+    chat_values, chat = agent.children[0]
+    assert chat_values["as_type"] == "generation"
+    assert chat_values["model"] == "claude-test"
+    assert chat_values["input"] == {
+        "messages": [
+            {"role": "system", "content": "System instructions"},
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "type": "text",
+                        "content": '{"api_key":"<redacted>"}',
+                    }
+                ],
+            },
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "name": "Read",
+                "parameters": {"type": "object"},
+            }
+        ],
+    }
+    assert chat_values["output"] == [
+        {
+            "role": "assistant",
+            "parts": [
+                {"type": "thinking", "content": "Inspect first."},
+                {
+                    "type": "text",
+                    "content": "Inspecting the repository.",
+                },
+                {
+                    "type": "tool_call",
+                    "id": "tool-1",
+                    "name": "Read",
+                    "arguments": '{"api_key":"<redacted>"}',
+                },
+            ],
+        }
+    ]
+    assert chat_values["usage_details"] == {
+        "input": 11,
+        "output": 5,
+        "input_cached_tokens": 3,
+        "prompt_cache_hit_tokens": 3,
+        "cache_read_input_tokens": 3,
+        "total": 19,
+    }
+    assert chat.ended is True
 
-    tool_values, tool = response.children[0]
-    assert tool_values["name"] == "Claude tool: read_file"
+    tool_values, tool = agent.children[1]
     assert tool_values["as_type"] == "tool"
     assert tool_values["input"] == {"api_key": "<redacted>"}
+    assert tool.updates == [{"output": {"secret": "<redacted>"}}]
     assert tool.ended is True
 
-    tool_result_values, tool_result_observation = aggregate.children[1]
-    assert tool_result_values["input"] == {
-        "attempt": 1,
-        "tool_use_id": "tool-1",
-    }
-    assert tool_result_values["output"] == {"secret": "<redacted>"}
-    assert tool_result_observation.ended is True
 
-    terminal_values, terminal_observation = aggregate.children[2]
-    assert terminal_values["input"] == {
-        "attempt": 1,
-        "responses_observed": 1,
-        "tool_calls_observed": 1,
-    }
-    assert "total_cost_usd" not in terminal_values["output"]
-    assert terminal_observation.ended is True
-    assert aggregate.updates[0]["metadata"]["live_responses"] == 1
-    assert aggregate.updates[0]["metadata"]["live_tool_calls"] == 1
-    assert aggregate.updates[0]["metadata"]["live_tool_results"] == 1
-    assert aggregate.updates[0]["metadata"]["live_terminal_events"] == 1
-
-
-def test_trace_uses_tool_results_as_the_next_response_input(monkeypatch, tmp_path: Path):
+def test_next_chat_receives_full_message_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     langfuse = FakeLangfuse()
     monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
 
     with trace.use_span(_active_span()):
-        with telemetry.trace_claude_task(_task(tmp_path), model_id="claude-test") as task_trace:
+        with telemetry.trace_claude_task(
+            _task(tmp_path),
+            model_id="claude-test",
+        ) as task_trace:
             assert task_trace is not None
             task_trace.start_attempt("Actual runtime prompt", attempt=1)
             task_trace.observe_event(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "id": "request-1",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "tool-1",
-                                "name": "read_file",
-                                "input": {"path": "probe.py"},
-                            }
-                        ],
-                    },
-                },
+                _assistant(
+                    message_id="request-1",
+                    content=[
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Read",
+                            "input": {"file_path": "probe.py"},
+                        }
+                    ],
+                ),
                 attempt=1,
             )
-            user_event = {
-                "type": "user",
-                "message": {
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "tool-1",
-                            "content": "file contents",
-                        }
-                    ]
-                },
-            }
-            task_trace.observe_event(user_event, attempt=1)
-            task_trace.observe_event(user_event, attempt=1)
             task_trace.observe_event(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "id": "request-2",
-                        "content": [{"type": "text", "text": "Done"}],
-                    },
-                },
+                _tool_result(
+                    tool_use_id="tool-1",
+                    content="file contents",
+                ),
+                attempt=1,
+            )
+            task_trace.observe_event(
+                _assistant(
+                    message_id="request-2",
+                    content=[{"type": "text", "text": "Done"}],
+                ),
                 attempt=1,
             )
 
-    response_values = [
+    chats = [
         values
         for values, _ in langfuse.observation.children
         if values["as_type"] == "generation"
     ]
-    assert response_values[0]["input"] == "Actual runtime prompt"
-    assert response_values[1]["input"] == [
+    assert chats[0]["input"]["messages"] == [
         {
-            "type": "tool_result",
-            "tool_use_id": "tool-1",
-            "content": "file contents",
+            "role": "user",
+            "parts": [
+                {"type": "text", "content": "Actual runtime prompt"}
+            ],
+        }
+    ]
+    assert chats[1]["input"]["messages"] == [
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "content": "Actual runtime prompt"}
+            ],
+        },
+        {
+            "role": "assistant",
+            "parts": [
+                {
+                    "type": "tool_call",
+                    "id": "tool-1",
+                    "name": "Read",
+                    "arguments": '{"file_path":"probe.py"}',
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "type": "tool_call_response",
+                    "id": "tool-1",
+                    "name": "Read",
+                    "result": "file contents",
+                }
+            ],
+        },
+    ]
+
+
+def test_repeated_assistant_message_updates_one_chat_and_one_tool(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    langfuse = FakeLangfuse()
+    monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
+
+    with trace.use_span(_active_span()):
+        with telemetry.trace_claude_task(
+            _task(tmp_path),
+            model_id="claude-test",
+        ) as task_trace:
+            assert task_trace is not None
+            task_trace.observe_event(
+                _assistant(
+                    message_id="request-1",
+                    content=[
+                        {"type": "thinking", "thinking": "Inspect first"}
+                    ],
+                ),
+                attempt=1,
+            )
+            task_trace.observe_event(
+                _assistant(
+                    message_id="request-1",
+                    content=[
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "Read",
+                            "input": {"file_path": "probe.py"},
+                        }
+                    ],
+                ),
+                attempt=1,
+            )
+            task_trace.observe_event(
+                _tool_result(
+                    tool_use_id="tool-1",
+                    content="file contents",
+                ),
+                attempt=1,
+            )
+
+    agent = langfuse.observation
+    assert [values["name"] for values, _ in agent.children] == [
+        "chat claude-test",
+        "Read",
+    ]
+    _, chat = agent.children[0]
+    assert chat.updates[-1]["output"] == [
+        {
+            "role": "assistant",
+            "parts": [
+                {"type": "thinking", "content": "Inspect first"},
+                {
+                    "type": "tool_call",
+                    "id": "tool-1",
+                    "name": "Read",
+                    "arguments": '{"file_path":"probe.py"}',
+                },
+            ],
         }
     ]
 
 
-def test_trace_nests_forwarded_subagent_events(monkeypatch, tmp_path: Path):
+def test_synthesis_tool_is_owned_by_mcp_to_preserve_child_agent_nesting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     langfuse = FakeLangfuse()
     monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
 
     with trace.use_span(_active_span()):
-        with telemetry.trace_claude_task(_task(tmp_path), model_id="claude-test") as task_trace:
+        with telemetry.trace_claude_task(
+            _task(tmp_path),
+            model_id="claude-test",
+        ) as task_trace:
             assert task_trace is not None
             task_trace.observe_event(
-                {
-                    "type": "assistant",
-                    "message": {
-                        "id": "shared-request-id",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "agent-1",
-                                "name": "Agent",
-                                "input": {
-                                    "subagent_type": "vaminer:rule-generator",
-                                    "prompt": "Generate the rule",
-                                },
-                            }
-                        ],
-                    },
-                },
+                _assistant(
+                    message_id="request-1",
+                    content=[
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": (
+                                "mcp__vaminer__"
+                                "synthesize_ast_grep_anchors"
+                            ),
+                            "input": {"anchor_intents": []},
+                        }
+                    ],
+                ),
                 attempt=1,
             )
             task_trace.observe_event(
-                {
-                    "type": "assistant",
-                    "parent_tool_use_id": "agent-1",
-                    "message": {
-                        "id": "shared-request-id",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": "child-tool-1",
-                                "name": "Read",
-                                "input": {"file_path": "probe.py"},
-                            }
-                        ],
-                    },
-                },
-                attempt=1,
-            )
-            task_trace.observe_event(
-                {
-                    "type": "user",
-                    "parent_tool_use_id": "agent-1",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": "child-tool-1",
-                                "content": "source",
-                            }
-                        ]
-                    },
-                },
-                attempt=1,
-            )
-            task_trace.observe_event(
-                {
-                    "type": "user",
-                    "message": {
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": "agent-1",
-                                "content": "rule generated",
-                            }
-                        ]
-                    },
-                },
+                _tool_result(tool_use_id="tool-1", content=[]),
                 attempt=1,
             )
 
-    aggregate = langfuse.observation
-    parent_values, parent_response = aggregate.children[0]
-    subagent_values, subagent = aggregate.children[1]
-    assert parent_values["metadata"]["actor"] == "parent"
-    assert parent_response.children[0][0]["name"] == "Claude tool: Agent"
-    assert subagent_values["name"] == "Claude subagent: vaminer:rule-generator"
-    assert subagent_values["as_type"] == "agent"
-    assert subagent_values["metadata"]["parent_tool_use_id"] == "agent-1"
-
-    child_response_values, child_response = subagent.children[0]
-    assert child_response_values["name"] == "Claude response 2"
-    assert child_response_values["input"] == "Generate the rule"
-    assert child_response_values["metadata"]["actor"] == "subagent"
-    assert child_response_values["metadata"]["subagent_type"] == (
-        "vaminer:rule-generator"
-    )
-    assert child_response.children[0][0]["name"] == "Claude tool: Read"
-    assert subagent.children[1][0]["name"] == "Claude tool result"
-    assert subagent.children[2][0]["name"] == (
-        "Claude subagent result: vaminer:rule-generator"
-    )
-    assert subagent.children[2][0]["metadata"]["actor"] == "subagent"
-    assert subagent.updates[0]["metadata"]["status"] == "completed"
-    assert subagent.ended is True
+    assert [
+        values["name"]
+        for values, _ in langfuse.observation.children
+    ] == ["chat claude-test"]
 
 
-def test_trace_records_compaction_and_updates_next_input(monkeypatch, tmp_path: Path):
+def test_compaction_remains_a_diagnostic_span_and_updates_chat_history(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     langfuse = FakeLangfuse()
     monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
 
     with trace.use_span(_active_span()):
-        with telemetry.trace_claude_task(_task(tmp_path), model_id="claude-test") as task_trace:
+        with telemetry.trace_claude_task(
+            _task(tmp_path),
+            model_id="claude-test",
+        ) as task_trace:
             assert task_trace is not None
             task_trace.start_attempt("Initial prompt", attempt=1)
             task_trace.observe_event(
-                {
-                    "type": "assistant",
-                    "message": {"id": "request-1", "content": []},
-                },
+                _assistant(
+                    message_id="request-1",
+                    content=[{"type": "text", "text": "Working"}],
+                ),
                 attempt=1,
             )
             task_trace.observe_event(
                 {
                     "type": "user",
-                    "message": {"content": [{"type": "text", "text": "Continue"}]},
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": "Continue"}
+                        ]
+                    },
                 },
                 attempt=1,
             )
@@ -455,49 +573,58 @@ def test_trace_records_compaction_and_updates_next_input(monkeypatch, tmp_path: 
                 attempt=1,
             )
             task_trace.observe_event(
-                {
-                    "type": "assistant",
-                    "message": {"id": "request-2", "content": []},
-                },
+                _assistant(
+                    message_id="request-2",
+                    content=[{"type": "text", "text": "Done"}],
+                ),
                 attempt=1,
             )
 
-    aggregate = langfuse.observation
+    agent = langfuse.observation
     compact_values = next(
         values
-        for values, _ in aggregate.children
-        if values["name"] == "Claude context compacted"
+        for values, _ in agent.children
+        if values["name"] == "context_compaction"
     )
     assert compact_values["input"]["pre_tokens"] == 12345
     assert compact_values["output"]["summary"] == "Condensed context"
-    response_values = [
+    chats = [
         values
-        for values, _ in aggregate.children
+        for values, _ in agent.children
         if values["as_type"] == "generation"
     ]
-    assert response_values[1]["input"] == [
-        {
-            "compacted": True,
-            "trigger": "auto",
-            "pre_tokens": 12345,
-            "summary": "Condensed context",
-            "summary_available": True,
-            "summary_truncated": False,
-        },
-        [{"type": "text", "text": "Continue"}],
-    ]
+    next_messages = chats[1]["input"]["messages"]
+    assert next_messages[-1] == {
+        "role": "user",
+        "parts": [
+            {
+                "type": "text",
+                "content": (
+                    "Compacted context (auto): Condensed context"
+                ),
+            }
+        ],
+    }
 
 
-def test_trace_marks_failure_and_preserves_the_exception(monkeypatch, tmp_path: Path):
+def test_trace_marks_failure_and_preserves_the_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
     langfuse = FakeLangfuse()
     monkeypatch.setattr(telemetry, "configure_tracing", lambda: langfuse)
 
     with trace.use_span(_active_span()):
         with pytest.raises(RuntimeError, match="provider failed"):
-            with telemetry.trace_claude_task(_task(tmp_path), model_id="claude-test"):
-                raise RuntimeError("provider failed with sk-secret-value-123456")
+            with telemetry.trace_claude_task(
+                _task(tmp_path),
+                model_id="claude-test",
+            ):
+                raise RuntimeError(
+                    "provider failed with sk-secret-value-123456"
+                )
 
-    update = langfuse.observation.updates[0]
+    update = langfuse.observation.updates[-1]
     assert update["level"] == "ERROR"
     assert update["metadata"]["error_type"] == "RuntimeError"
     assert "<redacted>" in update["status_message"]

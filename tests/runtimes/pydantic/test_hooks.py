@@ -16,7 +16,12 @@ from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
 
-from src.miner.utils.log import run_log_file
+from src.miner.utils.log import (
+    active_run_log_path,
+    log_renderable,
+    mirror_run_log_file,
+    run_log_file,
+)
 from src.miner.runtimes.pydantic.context import MinerContext
 from src.miner.runtimes.pydantic.hooks import make_cli_hooks
 
@@ -78,6 +83,24 @@ async def test_agent_hooks_write_second_precision_redacted_run_logs(
     assert "Probe Agent Finished" in rendered
     assert "<redacted>" in rendered
     assert "sk-super-secret-value" not in rendered
+
+
+def test_subprocess_log_mirror_reuses_the_active_run_file(tmp_path: Path):
+    with run_log_file(
+        tmp_path / "logs",
+        "VAS-TEST",
+        input_id="CVE-TEST",
+        trace_id="trace-1",
+        runtime="claude-code",
+    ) as log_path:
+        assert active_run_log_path() == log_path.resolve()
+
+    with mirror_run_log_file(log_path):
+        log_renderable("AST-Grep Synthesizer child output")
+
+    assert "AST-Grep Synthesizer child output" in log_path.read_text(
+        encoding="utf-8"
+    )
 
 
 async def test_nested_agents_share_the_active_trace():

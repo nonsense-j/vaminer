@@ -14,16 +14,17 @@ import pytest
 from pydantic import BaseModel
 
 from src.miner.mining.tasks import make_rule_generation_task
+from src.miner.runtimes.claude import runtime as runtime_module
 from src.miner.runtimes.claude.config import ClaudeCodeConfig
 from src.miner.runtimes.claude.errors import (
     ClaudeCodeConfigurationError,
     ClaudeCodeOutputLimitError,
-    ClaudeCodeProtocolError,
     ClaudeCodeProviderError,
     ClaudeCodeRequestLimitError,
     ClaudeCodeTimeoutError,
     ClaudeCodeValidationError,
 )
+from src.miner.runtimes.claude.process import ProcessResult
 from src.miner.runtimes.claude.runtime import ClaudeCodeRuntime
 from src.miner.utils.log import logger
 from src.miner.agent.contracts import (
@@ -84,6 +85,15 @@ def _write_fake_claude(path: Path) -> Path:
                 for item in (Path(plugin_path) / "agents").glob("*.md"):
                     plugin_agents[item.name] = item.read_text()
             mcp = json.loads(Path(mcp_path).read_text()) if mcp_path else None
+            synthesis_context = None
+            if mcp and "vaminer" in mcp.get("mcpServers", {}):
+                context_path = (
+                    mcp["mcpServers"]["vaminer"]
+                    .get("env", {})
+                    .get("VAMINER_MCP_SYNTHESIS_CONTEXT")
+                )
+                if context_path:
+                    synthesis_context = json.loads(Path(context_path).read_text())
             record = {
                 "argv": sys.argv[1:],
                 "prompt": prompt,
@@ -95,6 +105,7 @@ def _write_fake_claude(path: Path) -> Path:
                 ) if plugin_path else [],
                 "plugin_agents": plugin_agents,
                 "mcp": mcp,
+                "synthesis_context": synthesis_context,
                 "settings": json.loads(Path(settings_path).read_text()) if settings_path else None,
                 "isolation_env": {
                     key: os.environ.get(key)
@@ -165,15 +176,41 @@ def _write_fake_claude(path: Path) -> Path:
                         "content": (
                             [{
                                 "type": "tool_use",
-                                "id": "agent-1",
-                                "name": "Agent",
-                                "input": {"subagent_type": "vaminer:ast-grep-synthesizer"},
+                                "id": "synthesis-1",
+                                "name": "mcp__vaminer__synthesize_ast_grep_anchors",
+                                "input": {"request": {}},
                             }]
                             if scenario.startswith("rule_")
                             else []
                         ),
                     },
                 }))
+                print(json.dumps(terminal))
+            elif scenario == "retracted_stream_candidate":
+                print(json.dumps({
+                    "type": "system",
+                    "subtype": "init",
+                    "plugin_errors": [],
+                    "mcp_servers": [],
+                }))
+                if attempt == 1:
+                    print(json.dumps({
+                        "type": "assistant",
+                        "message": {
+                            "id": "request-1",
+                            "content": [{
+                                "type": "tool_use",
+                                "id": "structured-1",
+                                "name": "StructuredOutput",
+                                "input": {"value": 7},
+                            }],
+                        },
+                    }))
+                    terminal["structured_output"] = None
+                    terminal["result"] = "The previous structured output was retracted."
+                else:
+                    terminal["structured_output"] = {"value": 9}
+                    terminal["result"] = json.dumps(terminal["structured_output"])
                 print(json.dumps(terminal))
             elif scenario == "live_stream":
                 print(json.dumps({
@@ -203,9 +240,26 @@ def _write_fake_claude(path: Path) -> Path:
             elif scenario == "always_invalid":
                 terminal["structured_output"] = {"value": "invalid"}
                 print(json.dumps(terminal))
+            elif scenario == "permission_then_repair":
+                if attempt == 1:
+                    terminal["permission_denials"] = [{
+                        "tool_name": "Read",
+                        "tool_use_id": "read-1",
+                        "tool_input": {"file_path": "/outside/secret"},
+                    }]
+                    terminal["structured_output"] = None
+                    terminal["result"] = "I stopped after a denied tool call."
+                else:
+                    terminal["structured_output"] = {"value": 9}
+                    terminal["result"] = json.dumps(terminal["structured_output"])
+                print(json.dumps(terminal))
             elif scenario == "prose_fenced_json":
-                terminal["structured_output"] = None
-                terminal["result"] = 'Completed.\\n```json\\n{"value": 7}\\n```'
+                if attempt == 1:
+                    terminal["structured_output"] = None
+                    terminal["result"] = 'Completed.\\n```json\\n{"value": 7}\\n```'
+                else:
+                    terminal["structured_output"] = {"value": 9}
+                    terminal["result"] = json.dumps(terminal["structured_output"])
                 print(json.dumps(terminal))
             elif scenario == "provider_error":
                 terminal.update({
@@ -235,11 +289,18 @@ def _write_fake_claude(path: Path) -> Path:
                 })
                 print(json.dumps(terminal))
             elif scenario == "structured_retry_with_output":
-                terminal.update({
-                    "subtype": "error_max_structured_output_retries",
-                    "is_error": True,
-                    "terminal_reason": "structured_output_retry_exhausted",
-                })
+                if attempt == 1:
+                    terminal.update({
+                        "subtype": "error_max_structured_output_retries",
+                        "is_error": True,
+                        "terminal_reason": "structured_output_retry_exhausted",
+                        "errors": [
+                            "Output does not match required schema: value must be an integer"
+                        ],
+                    })
+                else:
+                    terminal["structured_output"] = {"value": 9}
+                    terminal["result"] = json.dumps(terminal["structured_output"])
                 print(json.dumps(terminal))
             elif scenario == "timeout":
                 marker = os.environ["FAKE_CLAUDE_CHILD_MARKER"]
@@ -407,7 +468,6 @@ async def test_user_auth_model_selection_and_usage_audit(tmp_path: Path):
     assert invocation["isolation"]["session_persistence"] is False
     assert invocation["isolation"]["auto_memory"] is False
     assert invocation["isolation"]["claude_ai_mcp_servers"] is False
-    assert invocation["isolation"]["subagent_depth"] == 1
     assert result.metadata["model_usage"]["fake-model"]["inputTokens"] == 11
     assert call["isolation_env"] == {
         "CLAUDE_CONFIG_DIR": None,
@@ -416,7 +476,7 @@ async def test_user_auth_model_selection_and_usage_audit(tmp_path: Path):
         "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
         "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": None,
-        "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2",
+        "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": None,
     }
 
 
@@ -428,7 +488,9 @@ def test_claude_runtime_requires_an_explicit_model(tmp_path: Path):
 
 
 @pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-async def test_rule_generation_registers_restricted_synthesizer(tmp_path: Path):
+async def test_rule_generation_uses_cases_only_and_typed_synthesis_mcp(
+    tmp_path: Path,
+):
     fake = _write_fake_claude(tmp_path / "claude")
     task, core = _make_rule_task(tmp_path)
     environment = {
@@ -447,43 +509,60 @@ async def test_rule_generation_registers_restricted_synthesizer(tmp_path: Path):
     ).run(task)
 
     assert result.output == core
-    assert result.metadata["subagent_events"][0]["agent_type"] == ("vaminer:ast-grep-synthesizer")
+    assert result.metadata["subagent_events"] == []
     call = json.loads((tmp_path / "calls.json").read_text(encoding="utf-8"))[0]
     argv = call["argv"]
-    assert _option(argv, "--agent") == "vaminer:rule-generator"
-    assert "--forward-subagent-text" in argv
-    assert _option(argv, "--tools") == "Read,Grep,Glob,Agent,Bash"
+    assert "--agent" not in argv
+    assert "--forward-subagent-text" not in argv
+    assert "--plugin-dir" not in argv
+    assert "--disable-slash-commands" in argv
+    assert _option(argv, "--tools") == "Read,Grep,Glob"
     allowed = set(_option(argv, "--allowedTools").split(","))
-    assert "Agent(vaminer:ast-grep-synthesizer)" in allowed
-    assert "Agent" not in allowed
-    assert any(tool.startswith("Bash(") and "ast-grep/scripts/runner.py" in tool for tool in allowed)
-    assert "Bash" not in call["settings"]["permissions"]["deny"]
-    assert {"Write", "Edit"} <= set(call["settings"]["permissions"]["deny"])
-    assert "Task" not in call["settings"]["permissions"]["deny"]
+    assert allowed == {
+        "Read",
+        "Grep",
+        "Glob",
+        "mcp__vaminer__synthesize_ast_grep_anchors",
+    }
+    assert {"Bash", "Task", "Write", "Edit"} <= set(
+        call["settings"]["permissions"]["deny"]
+    )
     assert not any(item.startswith("Read(") for item in call["settings"]["permissions"]["deny"])
     guard = call["settings"]["hooks"]["PreToolUse"][0]
-    assert guard["matcher"] == "Read|Grep|Glob|Write|Bash"
+    assert guard["matcher"] == "Read|Grep|Glob|Write"
     guard_args = guard["hooks"][0]["args"]
-    assert guard_args[guard_args.index("--root") + 1] == str(tmp_path)
+    assert guard_args[guard_args.index("--root") + 1] == str(tmp_path / "cases")
+    assert guard_args[guard_args.index("--restricted-root") + 1] == str(
+        tmp_path / "source"
+    )
+    assert guard_args[guard_args.index("--role") + 1] == "rule-generator"
     assert "--write-root" not in guard_args
-    assert {
-        ".claude-plugin/plugin.json",
-        "agents/rule-generator.md",
-        "agents/ast-grep-synthesizer.md",
-        "skills/ast-grep/SKILL.md",
-    } <= set(call["plugin_files"])
-    parent = call["plugin_agents"]["rule-generator.md"]
-    assert "tools: Read, Grep, Glob, Agent" in parent
-    child = call["plugin_agents"]["ast-grep-synthesizer.md"]
-    assert "tools: Read, Grep, Glob, Bash" in child
-    assert "Agent" not in child.split("---", 2)[1]
-    assert call["mcp"]["mcpServers"] == {}
+    assert call["plugin_files"] == []
+    assert call["plugin_agents"] == {}
+    assert task.instructions.strip() in call["system_prompt"]
+    assert task.input_instructions.strip() in call["system_prompt"]
+    assert "# Runtime Binding\n\n## Claude Code" in call["system_prompt"]
+    assert "## Pydantic AI" not in call["system_prompt"]
+    assert "This is not a source-code repair task" in call["system_prompt"]
+    mcp_server = call["mcp"]["mcpServers"]["vaminer"]
+    assert mcp_server["env"][PROFILE_ENV] == "rule_generation"
+    assert "VAMINER_MCP_SYNTHESIS_CONTEXT" in mcp_server["env"]
+    host_context = call["synthesis_context"]
+    assert host_context["synthesis"]["source_root"] == str(tmp_path / "source")
+    assert host_context["synthesis"]["cases_dir"] == str(tmp_path / "cases")
+    assert host_context["synthesis"]["root_cause"] == (
+        task.context.root_cause.model_dump(mode="json")
+    )
+    assert host_context["model"] == "fake-model"
+    assert host_context["output_format"] == "stream-json"
+    assert host_context["executable"] == str(fake)
     schema = json.loads(_option(argv, "--json-schema"))
     rendered_schema = json.dumps(schema)
     assert "$defs" not in rendered_schema
     assert "$ref" not in rendered_schema
     invocation = json.loads(result.artifacts.invocation_path.read_text(encoding="utf-8"))
-    assert invocation["tools"]["registered"] == ["Read", "Grep", "Glob", "Agent", "Bash"]
+    assert invocation["tools"]["registered"] == ["Read", "Grep", "Glob"]
+    assert invocation["tools"]["mcp"] == ["synthesize_ast_grep_anchors"]
 
 
 async def test_root_cause_uses_native_workspace_tools(tmp_path: Path):
@@ -501,11 +580,12 @@ async def test_root_cause_uses_native_workspace_tools(tmp_path: Path):
     assert "Edit" in call["settings"]["permissions"]["deny"]
     assert "Bash" in call["settings"]["permissions"]["deny"]
     guard = call["settings"]["hooks"]["PreToolUse"][0]
-    assert guard["matcher"] == "Read|Grep|Glob|Write|Bash"
+    assert guard["matcher"] == "Read|Grep|Glob|Write"
     guard_args = guard["hooks"][0]["args"]
     assert guard_args[guard_args.index("--root") + 1] == str(tmp_path)
     write_root_index = guard_args.index("--write-root")
     assert guard_args[write_root_index + 1] == str(tmp_path / "cases")
+    assert "--allowed-subagent" not in guard_args
     assert call["mcp"]["mcpServers"] == {}
 
 
@@ -568,13 +648,55 @@ async def test_repair_attempts_are_bounded_and_usage_is_aggregated(
     assert exc_info.value.attempts == 3
 
 
-async def test_fenced_json_is_still_subject_to_typed_validation(tmp_path: Path):
+async def test_permission_denial_is_audited_but_not_injected_into_output_repair(
+    tmp_path: Path,
+):
+    fake = _write_fake_claude(tmp_path / "claude")
+    result = await ClaudeCodeRuntime(
+        _make_config(tmp_path, fake, scenario="permission_then_repair")
+    ).run(_make_task(tmp_path))
+
+    assert result.output == ProbeOutput(value=9)
+    assert result.attempts == 2
+    assert result.metadata["permission_denial_count"] == 1
+    assert result.metadata["permission_denials"][0]["tool_name"] == "Read"
+    records = json.loads((tmp_path / "calls.json").read_text(encoding="utf-8"))
+    assert len(records) == 2
+    assert "structured_output is missing" in records[1]["prompt"]
+    assert "/outside/secret" not in records[1]["prompt"]
+    assert "Treat each denial as a recoverable tool result" not in records[1]["prompt"]
+
+
+async def test_fenced_json_without_terminal_structured_output_is_repaired(
+    tmp_path: Path,
+):
     fake = _write_fake_claude(tmp_path / "claude")
     result = await ClaudeCodeRuntime(_make_config(tmp_path, fake, scenario="prose_fenced_json")).run(
         _make_task(tmp_path)
     )
 
-    assert result.output == ProbeOutput(value=7)
+    assert result.output == ProbeOutput(value=9)
+    assert result.attempts == 2
+    records = json.loads((tmp_path / "calls.json").read_text(encoding="utf-8"))
+    assert '```json\n{"value": 7}\n```' in records[1]["prompt"]
+
+
+async def test_retracted_stream_candidate_is_diagnostic_only(tmp_path: Path):
+    fake = _write_fake_claude(tmp_path / "claude")
+    result = await ClaudeCodeRuntime(
+        _make_config(
+            tmp_path,
+            fake,
+            scenario="retracted_stream_candidate",
+            output_format="stream-json",
+        )
+    ).run(_make_task(tmp_path))
+
+    assert result.output == ProbeOutput(value=9)
+    assert result.attempts == 2
+    records = json.loads((tmp_path / "calls.json").read_text(encoding="utf-8"))
+    assert "structured_output is missing" in records[1]["prompt"]
+    assert "retracted" in records[1]["prompt"]
 
 
 async def test_request_limit_is_enforced_across_streamed_responses(tmp_path: Path):
@@ -603,7 +725,6 @@ async def test_request_limit_is_enforced_across_streamed_responses(tmp_path: Pat
     [
         ("budget_with_output", ClaudeCodeProviderError),
         ("max_turns_with_output", ClaudeCodeRequestLimitError),
-        ("structured_retry_with_output", ClaudeCodeProtocolError),
     ],
 )
 async def test_terminal_exhaustion_is_authoritative_even_with_structured_output(
@@ -617,6 +738,72 @@ async def test_terminal_exhaustion_is_authoritative_even_with_structured_output(
         await ClaudeCodeRuntime(config).run(_make_task(tmp_path))
     if scenario.startswith("budget"):
         assert exc_info.value.category == "budget"
+
+
+async def test_native_structured_output_exhaustion_uses_output_repair(
+    tmp_path: Path,
+):
+    fake = _write_fake_claude(tmp_path / "claude")
+    result = await ClaudeCodeRuntime(
+        _make_config(tmp_path, fake, scenario="structured_retry_with_output")
+    ).run(_make_task(tmp_path))
+
+    assert result.output == ProbeOutput(value=9)
+    assert result.attempts == 2
+    records = json.loads((tmp_path / "calls.json").read_text(encoding="utf-8"))
+    assert len(records) == 2
+    assert "value must be an integer" in records[1]["prompt"]
+
+
+async def test_output_repairs_share_one_task_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake = _write_fake_claude(tmp_path / "claude")
+    process_calls = 0
+
+    async def run_invalid_attempt(*args, **kwargs):
+        nonlocal process_calls
+        process_calls += 1
+        terminal = {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "session_id": "session-1",
+            "num_turns": 1,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "modelUsage": {"fake-model": {"inputTokens": 1, "outputTokens": 1}},
+            "permission_denials": [],
+            "result": '{"value":"invalid"}',
+            "structured_output": {"value": "invalid"},
+        }
+        return ProcessResult(
+            returncode=0,
+            stdout=json.dumps(terminal).encode(),
+            stderr=b"",
+            duration_ms=1,
+        )
+
+    clock = iter((100.0, 100.2, 101.1))
+    monkeypatch.setattr(runtime_module, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(runtime_module.ProcessRunner, "run", run_invalid_attempt)
+
+    with pytest.raises(ClaudeCodeTimeoutError) as exc_info:
+        await ClaudeCodeRuntime(
+            _make_config(tmp_path, fake, scenario="unused")
+        ).run(
+            _make_task(
+                tmp_path,
+                limits=RunLimits(
+                    request_limit=8,
+                    timeout_seconds=1.0,
+                    output_retries=2,
+                ),
+            )
+        )
+
+    assert exc_info.value.timeout_seconds == 1.0
+    assert process_calls == 1
 
 
 async def test_provider_errors_are_classified_without_repair(

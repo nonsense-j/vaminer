@@ -12,6 +12,7 @@ from src.miner.mining.validation.anchors import (
     disabled_anchor_warnings,
     validate_anchors,
 )
+from src.miner.mining.validation.vas import validate_vas_core
 from src.miner.models import AnalysisSubject, RootCauseAnalysis, VASCoreInfo
 
 DANGER_BEHAVIOR = "Calls the dangerous operation with one argument."
@@ -103,6 +104,26 @@ def test_final_validation_accepts_enabled_anchor_with_case_and_rca_matches(tmp_p
     core = _core(root_cause, "danger($ARG);")
 
     assert validate_anchors(
+        core,
+        source_root=source_root,
+        cases_dir=cases_dir,
+        root_cause=root_cause,
+        analysis_subject=_subject(source_root, cases_dir),
+    ) == []
+
+
+@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
+def test_final_validation_accepts_a_reworded_root_cause_summary(tmp_path: Path):
+    source_root, cases_dir, root_cause = _prepare_sources(tmp_path)
+    core = _core(root_cause, "danger($ARG);").model_copy(
+        update={
+            "root_cause_summary": (
+                "The dangerous operation can run before its guard is established."
+            )
+        }
+    )
+
+    assert validate_vas_core(
         core,
         source_root=source_root,
         cases_dir=cases_dir,

@@ -1,9 +1,9 @@
-"""Langfuse tracing for Claude Code tasks and live stream events."""
+"""Pydantic-shaped Langfuse observations for Claude Code tasks."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Iterator
@@ -15,6 +15,25 @@ from ...utils.telemetry import configure_tracing
 from .artifacts import clip, redact, sanitize_json
 
 _EVENT_PAYLOAD_LIMIT = 16_000
+_SYNTHESIS_TOOL = "synthesize_ast_grep_anchors"
+
+_ActorKey = tuple[int, str | None]
+_ToolKey = tuple[int, str | None, str]
+_MessageKey = tuple[int, str | None, str]
+
+
+@dataclass
+class _OpenChat:
+    observation: Any
+    message_id: str | None
+    output_message: dict[str, Any]
+
+
+@dataclass
+class _ToolCall:
+    name: str
+    input: Any
+    observation: Any | None
 
 
 @dataclass
@@ -24,12 +43,11 @@ class _PendingCompact:
     summary: str | None = None
     summary_truncated: bool = False
     session_id: str | None = None
-    parent_tool_use_id: str | None = None
-    agent_id: str | None = None
-    agent_type: str | None = None
 
 
 class ClaudeTaskTrace:
+    """Map Claude stream events onto Pydantic AI's Agent/chat/tool model."""
+
     def __init__(
         self,
         observation: Any,
@@ -41,32 +59,58 @@ class ClaudeTaskTrace:
         self._observation = observation
         self._metadata = metadata
         self._model_id = model_id
-        self._seen_message_ids: set[tuple[int, str | None, str]] = set()
-        self._seen_tool_use_ids: set[tuple[int, str | None, str]] = set()
-        self._seen_tool_result_ids: set[tuple[int, str | None, str]] = set()
+        self._system_prompt: str | None = None
+        self._tool_definitions: list[dict[str, Any]] = []
+        self._messages: dict[_ActorKey, list[dict[str, Any]]] = {}
+        self._open_chats: dict[_ActorKey, _OpenChat] = {}
+        self._assistant_messages: dict[_MessageKey, dict[str, Any]] = {}
+        self._seen_message_ids: set[_MessageKey] = set()
+        self._seen_tool_use_ids: set[_ToolKey] = set()
+        self._seen_tool_result_ids: set[_ToolKey] = set()
         self._seen_user_events: set[tuple[int, str | None, str]] = set()
-        self._pending_response_inputs: dict[tuple[int, str | None], list[Any]] = {
-            (1, None): [_bounded_payload(initial_prompt)]
-        }
-        self._pending_compacts: dict[
-            tuple[int, str | None], _PendingCompact
-        ] = {}
-        self._subagent_observations: dict[tuple[int, str], Any] = {}
-        self._subagent_types: dict[tuple[int, str], str] = {}
-        self._open_subagents: set[tuple[int, str]] = set()
+        self._tool_calls: dict[_ToolKey, _ToolCall] = {}
+        self._pending_compacts: dict[_ActorKey, _PendingCompact] = {}
         self._response_count = 0
         self._tool_call_count = 0
         self._tool_result_count = 0
         self._terminal_count = 0
+        self._permission_denial_count = 0
         self._compact_count = 0
-        self._subagent_count = 0
+        self._last_terminal: Any = None
+        self.start_attempt(initial_prompt, attempt=1)
+
+    def configure_request(
+        self,
+        *,
+        system_prompt: str,
+        tool_names: Sequence[str],
+    ) -> None:
+        """Attach the actual Claude system prompt and visible tool catalog."""
+
+        self._system_prompt = redact(system_prompt)
+        self._tool_definitions = [
+            {
+                "type": "function",
+                "name": _display_tool_name(name),
+                "parameters": {"type": "object"},
+            }
+            for name in tool_names
+        ]
+        for actor_key, messages in self._messages.items():
+            self._messages[actor_key] = self._with_system_message(messages)
+        self._update(input=self._all_messages())
 
     def start_attempt(self, prompt: str, *, attempt: int) -> None:
-        """Attach the actual Claude prompt to the next response in an attempt."""
+        """Start one independent Claude process conversation."""
 
-        self._pending_response_inputs[(attempt, None)] = [_bounded_payload(prompt)]
+        actor_key = (attempt, None)
+        self._close_chat(actor_key)
+        self._messages[actor_key] = self._with_system_message(
+            [_user_text_message(prompt)]
+        )
 
     def complete(self, result: AgentRunResult[Any]) -> None:
+        self._close_live_observations()
         usage = result.usage
         metadata = {
             **self._progress_metadata(),
@@ -75,18 +119,20 @@ class ClaudeTaskTrace:
             "turns": usage.turns if usage is not None else None,
             "duration_ms": usage.duration_ms if usage is not None else None,
             "session_id": result.metadata.get("session_id"),
+            "aggregated_usage": _runtime_usage(result),
         }
-        update: dict[str, Any] = {
-            "output": sanitize_json(result.output.model_dump(mode="json", by_alias=True)),
-            "metadata": metadata,
-        }
-        usage_details = _usage_details(result)
-        if usage_details:
-            update["usage_details"] = usage_details
-        self._update(**update)
+        self._update(
+            input=self._all_messages(),
+            output=sanitize_json(
+                result.output.model_dump(mode="json", by_alias=True)
+            ),
+            metadata=metadata,
+        )
 
     def fail(self, error: BaseException) -> None:
+        self._close_live_observations()
         self._update(
+            input=self._all_messages(),
             level="ERROR",
             status_message=redact(clip(str(error), 2_000)),
             metadata={
@@ -96,7 +142,7 @@ class ClaudeTaskTrace:
         )
 
     def observe_event(self, event: Mapping[str, Any], *, attempt: int) -> None:
-        """Export completed stream events while the aggregate task is still running."""
+        """Export completed Claude events without affecting task execution."""
 
         try:
             event_type = event.get("type")
@@ -104,30 +150,24 @@ class ClaudeTaskTrace:
                 self._record_assistant(event, attempt=attempt)
             elif event_type == "user":
                 self._record_user(event, attempt=attempt)
-            elif event_type == "system" and event.get("subtype") == "compact_boundary":
+            elif (
+                event_type == "system"
+                and event.get("subtype") == "compact_boundary"
+            ):
                 self._record_compact_boundary(event, attempt=attempt)
             elif event.get("hook_event_name") == "PostCompact":
                 self._record_post_compact(event, attempt=attempt)
-            elif event_type in {"task_notification", "task_result"}:
-                self._record_subagent_lifecycle(event, attempt=attempt)
             elif event_type == "result":
                 self._record_terminal(event, attempt=attempt)
         except Exception:  # noqa: BLE001 - optional tracing must never block mining.
             return
 
     def close(self) -> None:
-        for compact_key in list(self._pending_compacts):
-            self._flush_pending_compact(compact_key)
-        for subagent_key in list(self._open_subagents):
-            self._finish_subagent(
-                subagent_key,
-                output={"status": "trace_closed"},
-                status="trace_closed",
-            )
-        try:
-            self._observation.end()
-        except Exception:  # noqa: BLE001 - optional tracing must never block mining.
-            return
+        """Close child observations; the surrounding context owns the Agent."""
+
+        for actor_key in list(self._pending_compacts):
+            self._flush_pending_compact(actor_key)
+        self._close_live_observations()
 
     def _record_assistant(
         self,
@@ -135,103 +175,143 @@ class ClaudeTaskTrace:
         *,
         attempt: int,
     ) -> None:
-        parent_tool_use_id = _parent_tool_use_id(event)
-        compact_key = (attempt, parent_tool_use_id)
-        self._flush_pending_compact(compact_key)
         message = event.get("message")
         if not isinstance(message, Mapping):
             return
-
-        message_id = message.get("id")
-        if isinstance(message_id, str) and message_id:
-            dedupe_key = (attempt, parent_tool_use_id, message_id)
-            if dedupe_key in self._seen_message_ids:
-                return
-            self._seen_message_ids.add(dedupe_key)
-
-        self._response_count += 1
-        owner = self._actor_owner(
-            attempt=attempt,
-            parent_tool_use_id=parent_tool_use_id,
+        response_model = message.get("model")
+        model_id = (
+            response_model
+            if isinstance(response_model, str) and response_model
+            else self._model_id
         )
-        metadata = {
-            **self._metadata,
-            "attempt": attempt,
-            "response": self._response_count,
-            "message_id": message_id if isinstance(message_id, str) else None,
-            **self._actor_metadata(attempt, parent_tool_use_id),
-        }
-        response = self._start_child(
-            parent=owner,
-            name=f"Claude response {self._response_count}",
-            as_type="generation",
-            input=self._take_response_input(compact_key),
-            output=_bounded_payload(message.get("content")),
-            metadata=metadata,
-            model=self._model_id,
-            usage_details=_usage_details_from_mapping(message.get("usage")),
+        parent_tool_use_id = _parent_tool_use_id(event)
+        actor_key = (attempt, parent_tool_use_id)
+        self._flush_pending_compact(actor_key)
+        message_id_value = message.get("id")
+        message_id = (
+            message_id_value
+            if isinstance(message_id_value, str) and message_id_value
+            else None
         )
-        if response is None:
-            return
+        message_key = (
+            (attempt, parent_tool_use_id, message_id)
+            if message_id is not None
+            else None
+        )
+
+        existing = self._open_chats.get(actor_key)
+        repeated_open_message = (
+            existing is not None
+            and message_id is not None
+            and existing.message_id == message_id
+        )
+        if not repeated_open_message:
+            self._close_chat(actor_key)
+
+        incoming = _assistant_message(message)
+        if repeated_open_message:
+            assert existing is not None
+            merged = _merge_assistant_messages(existing.output_message, incoming)
+            existing.output_message = merged
+            if message_key is not None:
+                self._assistant_messages[message_key] = merged
+            self._update_observation(
+                existing.observation,
+                output=[_message_payload(merged)],
+                usage_details=_usage_details_from_mapping(message.get("usage")),
+            )
+        elif message_key is not None and message_key in self._seen_message_ids:
+            pass
+        else:
+            self._response_count += 1
+            if message_key is not None:
+                self._seen_message_ids.add(message_key)
+                self._assistant_messages[message_key] = incoming
+            response = self._start_child(
+                parent=self._observation,
+                name=f"chat {model_id}",
+                as_type="generation",
+                input={
+                    "messages": _message_payload(
+                        self._messages_for(actor_key)
+                    ),
+                    "tools": _message_payload(self._tool_definitions),
+                },
+                output=[_message_payload(incoming)],
+                metadata={
+                    **self._metadata,
+                    "attempt": attempt,
+                    "response": self._response_count,
+                    "message_id": message_id,
+                    "actor": (
+                        "subagent"
+                        if parent_tool_use_id is not None
+                        else "parent"
+                    ),
+                    "parent_tool_use_id": parent_tool_use_id,
+                },
+                model=model_id,
+                usage_details=_usage_details_from_mapping(message.get("usage")),
+            )
+            if response is not None:
+                self._open_chats[actor_key] = _OpenChat(
+                    observation=response,
+                    message_id=message_id,
+                    output_message=incoming,
+                )
 
         content = message.get("content")
         if isinstance(content, list):
             for block in content:
-                if not isinstance(block, Mapping) or block.get("type") != "tool_use":
-                    continue
-                self._record_tool_call(
-                    response,
-                    block,
-                    attempt=attempt,
-                    response=self._response_count,
-                    actor_parent_tool_use_id=parent_tool_use_id,
-                )
-        self._end(response)
+                if (
+                    isinstance(block, Mapping)
+                    and block.get("type") == "tool_use"
+                ):
+                    self._record_tool_call(
+                        block,
+                        attempt=attempt,
+                        parent_tool_use_id=parent_tool_use_id,
+                    )
 
     def _record_tool_call(
         self,
-        parent: Any,
         block: Mapping[str, Any],
         *,
         attempt: int,
-        response: int,
-        actor_parent_tool_use_id: str | None,
+        parent_tool_use_id: str | None,
     ) -> None:
-        tool_use_id = block.get("id")
-        if isinstance(tool_use_id, str) and tool_use_id:
-            dedupe_key = (attempt, actor_parent_tool_use_id, tool_use_id)
-            if dedupe_key in self._seen_tool_use_ids:
-                return
-            self._seen_tool_use_ids.add(dedupe_key)
-
+        tool_use_id_value = block.get("id")
+        if not isinstance(tool_use_id_value, str) or not tool_use_id_value:
+            return
+        tool_key = (attempt, parent_tool_use_id, tool_use_id_value)
+        if tool_key in self._seen_tool_use_ids:
+            return
+        self._seen_tool_use_ids.add(tool_key)
         self._tool_call_count += 1
-        tool_name = str(block.get("name") or "unknown")
-        child = self._start_child(
-            parent=parent,
-            name=f"Claude tool: {tool_name}",
-            as_type="tool",
-            input=_bounded_payload(block.get("input")),
-            metadata={
-                **self._metadata,
-                "attempt": attempt,
-                "response": response,
-                "tool_use_id": tool_use_id if isinstance(tool_use_id, str) else None,
-                **self._actor_metadata(attempt, actor_parent_tool_use_id),
-            },
-        )
-        self._end(child)
-        if (
-            tool_name in {"Agent", "Task"}
-            and isinstance(tool_use_id, str)
-            and tool_use_id
-        ):
-            self._start_subagent(
-                attempt=attempt,
-                tool_use_id=tool_use_id,
-                block=block,
-                parent_tool_use_id=actor_parent_tool_use_id,
-                response=response,
+        raw_name = str(block.get("name") or "unknown")
+        display_name = _display_tool_name(raw_name)
+        tool_input = _bounded_payload(block.get("input"))
+        tool_observation = None
+        if display_name != _SYNTHESIS_TOOL:
+            tool_observation = self._start_child(
+                parent=self._observation,
+                name=display_name,
+                as_type="tool",
+                input=tool_input,
+                metadata={
+                    **self._metadata,
+                    "attempt": attempt,
+                    "tool_use_id": tool_use_id_value,
+                    "tool_name": display_name,
+                    "claude_tool_name": raw_name,
+                    "parent_tool_use_id": parent_tool_use_id,
+                },
             )
+        self._tool_calls[tool_key] = _ToolCall(
+            name=display_name,
+            input=tool_input,
+            observation=tool_observation,
+        )
 
     def _record_user(
         self,
@@ -245,7 +325,6 @@ class ClaudeTaskTrace:
             return
         parent_tool_use_id = _parent_tool_use_id(event)
         actor_key = (attempt, parent_tool_use_id)
-
         event_key = json.dumps(
             sanitize_json(content),
             ensure_ascii=False,
@@ -256,75 +335,63 @@ class ClaudeTaskTrace:
         if dedupe_key in self._seen_user_events:
             return
         self._seen_user_events.add(dedupe_key)
-        self._pending_response_inputs.setdefault(actor_key, []).append(
-            _bounded_payload(content)
-        )
+        self._close_chat(actor_key)
 
-        if not isinstance(content, list):
-            return
-        for block in content:
-            if not isinstance(block, Mapping) or block.get("type") != "tool_result":
+        blocks = content if isinstance(content, list) else [
+            {"type": "text", "text": content}
+        ]
+        parts: list[dict[str, Any]] = []
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                parts.append(
+                    {"type": "text", "content": _string_content(block)}
+                )
                 continue
-            tool_use_id = block.get("tool_use_id")
-            if isinstance(tool_use_id, str) and tool_use_id:
-                dedupe_key = (attempt, parent_tool_use_id, tool_use_id)
-                if dedupe_key in self._seen_tool_result_ids:
-                    continue
-                self._seen_tool_result_ids.add(dedupe_key)
+            if block.get("type") != "tool_result":
+                text = block.get("text", block.get("content"))
+                parts.append(
+                    {"type": "text", "content": _string_content(text)}
+                )
+                continue
+            tool_use_id_value = block.get("tool_use_id")
+            tool_use_id = (
+                tool_use_id_value
+                if isinstance(tool_use_id_value, str)
+                else ""
+            )
+            tool_key = (attempt, parent_tool_use_id, tool_use_id)
+            tool_call = self._tool_calls.get(tool_key)
+            tool_name = tool_call.name if tool_call is not None else "unknown"
+            result = _bounded_payload(block.get("content"))
+            parts.append(
+                {
+                    "type": "tool_call_response",
+                    "id": tool_use_id,
+                    "name": tool_name,
+                    "result": _string_content(result),
+                }
+            )
+            if tool_key in self._seen_tool_result_ids:
+                continue
+            self._seen_tool_result_ids.add(tool_key)
             self._tool_result_count += 1
             is_error = bool(block.get("is_error"))
-            subagent_key = (
-                (attempt, tool_use_id)
-                if isinstance(tool_use_id, str)
-                and (attempt, tool_use_id) in self._subagent_observations
-                else None
-            )
-            subagent_type = (
-                self._subagent_types.get(subagent_key)
-                if subagent_key is not None
-                else None
-            )
-            child = self._start_child(
-                parent=(
-                    self._subagent_observations[subagent_key]
-                    if subagent_key is not None
-                    else self._actor_owner(
-                        attempt=attempt,
-                        parent_tool_use_id=parent_tool_use_id,
-                    )
-                ),
-                name=(
-                    f"Claude subagent result: {subagent_type}"
-                    if subagent_type
-                    else "Claude tool result"
-                ),
-                as_type="span",
-                input={
-                    "attempt": attempt,
-                    "tool_use_id": tool_use_id,
-                },
-                output=_bounded_payload(block.get("content")),
-                metadata={
-                    **self._metadata,
-                    "attempt": attempt,
-                    "tool_use_id": tool_use_id,
-                    **self._actor_metadata(
-                        attempt,
-                        subagent_key[1] if subagent_key is not None else parent_tool_use_id,
+            if tool_call is not None and tool_call.observation is not None:
+                self._update_observation(
+                    tool_call.observation,
+                    output=result,
+                    level="ERROR" if is_error else None,
+                    status_message=(
+                        "Claude tool returned an error" if is_error else None
                     ),
-                    "result_kind": "subagent" if subagent_key else "tool",
-                },
-                level="ERROR" if is_error else None,
-                status_message="Claude tool returned an error" if is_error else None,
-            )
-            self._end(child)
-            if subagent_key is not None:
-                self._finish_subagent(
-                    subagent_key,
-                    output=block.get("content"),
-                    status="error" if is_error else "completed",
-                    is_error=is_error,
                 )
+                self._end(tool_call.observation)
+                tool_call.observation = None
+
+        if parts:
+            self._messages_for(actor_key).append(
+                {"role": "user", "parts": parts}
+            )
 
     def _record_terminal(
         self,
@@ -332,96 +399,23 @@ class ClaudeTaskTrace:
         *,
         attempt: int,
     ) -> None:
-        for compact_key in [
-            key for key in self._pending_compacts if key[0] == attempt
-        ]:
-            self._flush_pending_compact(compact_key)
-        parent_tool_use_id = _parent_tool_use_id(event)
+        actor_key = (attempt, _parent_tool_use_id(event))
+        self._flush_pending_compact(actor_key)
+        self._close_chat(actor_key)
         self._terminal_count += 1
-        is_error = bool(event.get("is_error"))
-        child = self._start_child(
-            parent=self._actor_owner(
-                attempt=attempt,
-                parent_tool_use_id=parent_tool_use_id,
-            ),
-            name=f"Claude result attempt {attempt}",
-            as_type="span",
-            input={
-                "attempt": attempt,
-                "responses_observed": self._response_count,
-                "tool_calls_observed": self._tool_call_count,
-            },
-            output=_bounded_payload(event),
-            metadata={
-                **self._metadata,
-                "attempt": attempt,
-                "terminal_reason": event.get("terminal_reason"),
-                "session_id": event.get("session_id"),
-                **self._actor_metadata(attempt, parent_tool_use_id),
-            },
-            level="ERROR" if is_error else None,
-            status_message=(
-                redact(clip(str(event.get("result") or "Claude task failed"), 2_000))
-                if is_error
-                else None
-            ),
-        )
-        self._end(child)
-        if parent_tool_use_id is not None:
-            self._finish_subagent(
-                (attempt, parent_tool_use_id),
-                output=event,
-                status="error" if is_error else "completed",
-                is_error=is_error,
-            )
-
-    def _record_subagent_lifecycle(
-        self,
-        event: Mapping[str, Any],
-        *,
-        attempt: int,
-    ) -> None:
-        parent_tool_use_id = _parent_tool_use_id(event)
-        task_id = event.get("task_id")
-        if parent_tool_use_id is None and isinstance(task_id, str):
-            if (attempt, task_id) in self._subagent_observations:
-                parent_tool_use_id = task_id
-        actor_metadata = (
-            self._actor_metadata(attempt, parent_tool_use_id)
-            if parent_tool_use_id is not None
-            else {
-                "actor": "subagent",
-                "parent_tool_use_id": None,
-                "subagent_type": str(event.get("agent_type") or "unknown"),
-            }
-        )
-        child = self._start_child(
-            parent=self._actor_owner(
-                attempt=attempt,
-                parent_tool_use_id=parent_tool_use_id,
-            ),
-            name=f"Claude subagent {event.get('type')}",
-            as_type="span",
-            input={
-                "attempt": attempt,
-                "task_id": task_id,
-                "status": event.get("status"),
-            },
-            output=_bounded_payload(event),
-            metadata={
-                **self._metadata,
-                "attempt": attempt,
-                **actor_metadata,
-            },
-        )
-        self._end(child)
-        if event.get("type") == "task_result" and parent_tool_use_id is not None:
-            status = str(event.get("status") or "completed")
-            self._finish_subagent(
-                (attempt, parent_tool_use_id),
-                output=event,
-                status=status,
-                is_error=status.lower() in {"error", "failed"},
+        permission_denials = event.get("permission_denials") or []
+        if isinstance(permission_denials, (list, tuple)):
+            self._permission_denial_count += len(permission_denials)
+        self._last_terminal = _bounded_payload(event)
+        if bool(event.get("is_error")):
+            self._update(
+                level="ERROR",
+                status_message=redact(
+                    clip(
+                        str(event.get("result") or "Claude task failed"),
+                        2_000,
+                    )
+                ),
             )
 
     def _record_compact_boundary(
@@ -430,24 +424,12 @@ class ClaudeTaskTrace:
         *,
         attempt: int,
     ) -> None:
+        actor_key = (attempt, _parent_tool_use_id(event))
+        compact = self._pending_compacts.setdefault(
+            actor_key,
+            _PendingCompact(),
+        )
         metadata = event.get("compactMetadata")
-        parent_tool_use_id = _parent_tool_use_id(event)
-        compact_key = (attempt, parent_tool_use_id)
-        compact = self._pending_compacts.get(compact_key)
-        if compact is None:
-            candidates = [
-                key
-                for key, pending in self._pending_compacts.items()
-                if key[0] == attempt
-                and pending.pre_tokens is None
-                and pending.summary is not None
-            ]
-            if len(candidates) == 1:
-                compact = self._pending_compacts.pop(candidates[0])
-            else:
-                compact = _PendingCompact()
-            self._pending_compacts[compact_key] = compact
-        compact.parent_tool_use_id = parent_tool_use_id
         if isinstance(metadata, Mapping):
             trigger = metadata.get("trigger")
             if isinstance(trigger, str):
@@ -455,7 +437,7 @@ class ClaudeTaskTrace:
             pre_tokens = metadata.get("preTokens")
             if isinstance(pre_tokens, int) and not isinstance(pre_tokens, bool):
                 compact.pre_tokens = pre_tokens
-        self._emit_compact_if_complete(compact_key)
+        self._emit_compact_if_complete(actor_key)
 
     def _record_post_compact(
         self,
@@ -463,38 +445,11 @@ class ClaudeTaskTrace:
         *,
         attempt: int,
     ) -> None:
-        parent_tool_use_id = _parent_tool_use_id(event)
-        hook_agent_type = event.get("agent_type")
-        if (
-            parent_tool_use_id is None
-            and isinstance(hook_agent_type, str)
-            and hook_agent_type
-        ):
-            matching_boundaries = [
-                key
-                for key, pending in self._pending_compacts.items()
-                if key[0] == attempt
-                and key[1] is not None
-                and pending.summary is None
-                and self._subagent_types.get((key[0], key[1]))
-                == hook_agent_type
-            ]
-            if len(matching_boundaries) == 1:
-                parent_tool_use_id = matching_boundaries[0][1]
-        compact_key = (attempt, parent_tool_use_id)
-        compact = self._pending_compacts.get(compact_key)
-        if compact is None and parent_tool_use_id is None:
-            candidates = [
-                key
-                for key, pending in self._pending_compacts.items()
-                if key[0] == attempt and pending.summary is None
-            ]
-            if len(candidates) == 1:
-                compact_key = candidates[0]
-                compact = self._pending_compacts[compact_key]
-        if compact is None:
-            compact = _PendingCompact()
-            self._pending_compacts[compact_key] = compact
+        actor_key = (attempt, _parent_tool_use_id(event))
+        compact = self._pending_compacts.setdefault(
+            actor_key,
+            _PendingCompact(),
+        )
         trigger = event.get("trigger")
         if isinstance(trigger, str):
             compact.trigger = trigger
@@ -505,36 +460,24 @@ class ClaudeTaskTrace:
         session_id = event.get("session_id")
         if isinstance(session_id, str):
             compact.session_id = session_id
-        agent_id = event.get("agent_id")
-        if isinstance(agent_id, str):
-            compact.agent_id = agent_id
-        agent_type = event.get("agent_type")
-        if isinstance(agent_type, str):
-            compact.agent_type = agent_type
-        compact.parent_tool_use_id = compact_key[1]
-        self._emit_compact_if_complete(compact_key)
+        self._emit_compact_if_complete(actor_key)
 
-    def _emit_compact_if_complete(
-        self,
-        compact_key: tuple[int, str | None],
-    ) -> None:
-        compact = self._pending_compacts.get(compact_key)
-        if compact is None or compact.summary is None or compact.pre_tokens is None:
-            return
-        self._flush_pending_compact(compact_key)
+    def _emit_compact_if_complete(self, actor_key: _ActorKey) -> None:
+        compact = self._pending_compacts.get(actor_key)
+        if (
+            compact is not None
+            and compact.summary is not None
+            and compact.pre_tokens is not None
+        ):
+            self._flush_pending_compact(actor_key)
 
-    def _flush_pending_compact(
-        self,
-        compact_key: tuple[int, str | None],
-    ) -> None:
-        compact = self._pending_compacts.pop(compact_key, None)
+    def _flush_pending_compact(self, actor_key: _ActorKey) -> None:
+        compact = self._pending_compacts.pop(actor_key, None)
         if compact is None:
             return
-
-        attempt, parent_tool_use_id = compact_key
+        self._close_chat(actor_key)
         self._compact_count += 1
         compact_input = {
-            "attempt": attempt,
             "trigger": compact.trigger,
             "pre_tokens": compact.pre_tokens,
         }
@@ -544,177 +487,107 @@ class ClaudeTaskTrace:
             "summary_truncated": compact.summary_truncated,
         }
         child = self._start_child(
-            parent=self._actor_owner(
-                attempt=attempt,
-                parent_tool_use_id=parent_tool_use_id,
-            ),
-            name="Claude context compacted",
+            parent=self._observation,
+            name="context_compaction",
             as_type="span",
             input=_bounded_payload(compact_input),
             output=_bounded_payload(compact_output),
             metadata={
                 **self._metadata,
-                "attempt": attempt,
+                "attempt": actor_key[0],
                 "compact": self._compact_count,
                 "session_id": compact.session_id,
-                "agent_id": compact.agent_id,
-                "hook_agent_type": compact.agent_type,
-                **self._actor_metadata(attempt, parent_tool_use_id),
+                "parent_tool_use_id": actor_key[1],
             },
         )
         self._end(child)
-        compact_context = _bounded_payload(
-            {
-                "compacted": True,
-                "trigger": compact.trigger,
-                "pre_tokens": compact.pre_tokens,
-                "summary": compact.summary,
-                "summary_available": compact.summary is not None,
-                "summary_truncated": compact.summary_truncated,
-            }
-        )
-        pending_inputs = self._pending_response_inputs.get(compact_key, [])
-        self._pending_response_inputs[compact_key] = [
-            compact_context,
-            *pending_inputs,
-        ]
-
-    def _start_subagent(
-        self,
-        *,
-        attempt: int,
-        tool_use_id: str,
-        block: Mapping[str, Any],
-        parent_tool_use_id: str | None,
-        response: int,
-    ) -> None:
-        subagent_key = (attempt, tool_use_id)
-        if subagent_key in self._subagent_observations:
-            return
-        tool_input = block.get("input")
-        agent_type = (
-            tool_input.get("subagent_type")
-            if isinstance(tool_input, Mapping)
-            else None
-        )
-        normalized_type = str(agent_type or "unknown")
-        self._subagent_types[subagent_key] = normalized_type
-        subagent_prompt = (
-            tool_input.get("prompt")
-            if isinstance(tool_input, Mapping)
-            else None
-        )
-        self._pending_response_inputs[subagent_key] = [
-            _bounded_payload(
-                subagent_prompt if subagent_prompt is not None else tool_input
+        if compact.summary is not None:
+            self._messages_for(actor_key).append(
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "type": "text",
+                            "content": (
+                                "Compacted context"
+                                f" ({compact.trigger or 'unknown'}): "
+                                f"{redact(compact.summary)}"
+                            ),
+                        }
+                    ],
+                }
             )
+
+    def _messages_for(self, actor_key: _ActorKey) -> list[dict[str, Any]]:
+        return self._messages.setdefault(
+            actor_key,
+            self._with_system_message([]),
+        )
+
+    def _with_system_message(
+        self,
+        messages: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        without_system = [
+            message
+            for message in messages
+            if message.get("role") != "system"
         ]
-        self._subagent_count += 1
-        observation = self._start_child(
-            parent=self._actor_owner(
-                attempt=attempt,
-                parent_tool_use_id=parent_tool_use_id,
-            ),
-            name=f"Claude subagent: {normalized_type}",
-            as_type="agent",
-            input=_bounded_payload(tool_input),
-            metadata={
-                **self._metadata,
-                "attempt": attempt,
-                "response": response,
-                "actor": "subagent",
-                "subagent_type": normalized_type,
-                "parent_tool_use_id": tool_use_id,
-                "spawned_by_parent_tool_use_id": parent_tool_use_id,
-            },
-        )
-        if observation is None:
-            return
-        self._subagent_observations[subagent_key] = observation
-        self._open_subagents.add(subagent_key)
+        if self._system_prompt is None:
+            return list(without_system)
+        return [
+            {"role": "system", "content": self._system_prompt},
+            *without_system,
+        ]
 
-    def _actor_owner(
-        self,
-        *,
-        attempt: int,
-        parent_tool_use_id: str | None,
-    ) -> Any:
-        if parent_tool_use_id is None:
-            return self._observation
-        return self._subagent_observations.get(
-            (attempt, parent_tool_use_id),
-            self._observation,
-        )
+    def _all_messages(self) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        for actor_key in sorted(
+            self._messages,
+            key=lambda item: (item[0], item[1] or ""),
+        ):
+            messages.extend(self._messages[actor_key])
+        return _message_payload(messages)
 
-    def _actor_metadata(
-        self,
-        attempt: int,
-        parent_tool_use_id: str | None,
-    ) -> dict[str, Any]:
-        if parent_tool_use_id is None:
-            return {
-                "actor": "parent",
-                "parent_tool_use_id": None,
-                "subagent_type": None,
-            }
-        return {
-            "actor": "subagent",
-            "parent_tool_use_id": parent_tool_use_id,
-            "subagent_type": self._subagent_types.get(
-                (attempt, parent_tool_use_id),
-                "unknown",
-            ),
-        }
+    def _close_chat(self, actor_key: _ActorKey) -> None:
+        chat = self._open_chats.pop(actor_key, None)
+        if chat is None:
+            return
+        self._messages_for(actor_key).append(chat.output_message)
+        self._end(chat.observation)
 
-    def _finish_subagent(
-        self,
-        subagent_key: tuple[int, str],
-        *,
-        output: Any,
-        status: str,
-        is_error: bool = False,
-    ) -> None:
-        if subagent_key not in self._open_subagents:
-            return
-        observation = self._subagent_observations.get(subagent_key)
-        if observation is None:
-            return
-        self._update_observation(
-            observation,
-            output=_bounded_payload(output),
-            metadata={
-                **self._metadata,
-                "attempt": subagent_key[0],
-                "actor": "subagent",
-                "parent_tool_use_id": subagent_key[1],
-                "subagent_type": self._subagent_types.get(
-                    subagent_key,
-                    "unknown",
-                ),
-                "status": status,
-            },
-            level="ERROR" if is_error else None,
-            status_message=(
-                "Claude subagent returned an error" if is_error else None
-            ),
-        )
-        self._end(observation)
-        self._open_subagents.discard(subagent_key)
+    def _close_live_observations(self) -> None:
+        for actor_key in list(self._open_chats):
+            self._close_chat(actor_key)
+        for tool_call in self._tool_calls.values():
+            if tool_call.observation is None:
+                continue
+            self._update_observation(
+                tool_call.observation,
+                output={"status": "trace_closed_without_tool_result"},
+                level="WARNING",
+                status_message="Claude stream ended before the tool result",
+            )
+            self._end(tool_call.observation)
+            tool_call.observation = None
 
     def _start_child(
         self,
         *,
         name: str,
         as_type: str,
-        parent: Any | None = None,
+        parent: Any,
         **values: Any,
     ) -> Any | None:
         try:
-            owner = parent if parent is not None else self._observation
-            return owner.start_observation(
+            return parent.start_observation(
                 name=name,
                 as_type=as_type,
-                **{key: value for key, value in values.items() if value is not None},
+                **{
+                    key: value
+                    for key, value in values.items()
+                    if value is not None
+                },
             )
         except Exception:  # noqa: BLE001 - optional tracing must never block mining.
             return None
@@ -728,6 +601,22 @@ class ClaudeTaskTrace:
         except Exception:  # noqa: BLE001 - optional tracing must never block mining.
             return
 
+    @staticmethod
+    def _update_observation(observation: Any, **values: Any) -> None:
+        try:
+            observation.update(
+                **{
+                    key: value
+                    for key, value in values.items()
+                    if value is not None
+                }
+            )
+        except Exception:  # noqa: BLE001 - optional tracing must never block mining.
+            return
+
+    def _update(self, **values: Any) -> None:
+        self._update_observation(self._observation, **values)
+
     def _progress_metadata(self) -> dict[str, Any]:
         return {
             **self._metadata,
@@ -735,39 +624,14 @@ class ClaudeTaskTrace:
             "live_tool_calls": self._tool_call_count,
             "live_tool_results": self._tool_result_count,
             "live_terminal_events": self._terminal_count,
+            "live_permission_denials": self._permission_denial_count,
             "live_compactions": self._compact_count,
-            "live_subagents": self._subagent_count,
-            "open_subagents": len(self._open_subagents),
+            "open_tools": sum(
+                call.observation is not None
+                for call in self._tool_calls.values()
+            ),
+            "terminal": self._last_terminal,
         }
-
-    def _take_response_input(
-        self,
-        actor_key: tuple[int, str | None],
-    ) -> Any:
-        inputs = self._pending_response_inputs.pop(actor_key, [])
-        if not inputs:
-            return {
-                "attempt": actor_key[0],
-                "source": "claude-stream",
-                "request_payload_available": False,
-                **self._actor_metadata(*actor_key),
-            }
-        return inputs[0] if len(inputs) == 1 else inputs
-
-    def _update(self, **values: Any) -> None:
-        try:
-            self._observation.update(**values)
-        except Exception:  # noqa: BLE001 - optional tracing must never block mining.
-            return
-
-    @staticmethod
-    def _update_observation(observation: Any, **values: Any) -> None:
-        try:
-            observation.update(
-                **{key: value for key, value in values.items() if value is not None}
-            )
-        except Exception:  # noqa: BLE001 - optional tracing must never block mining.
-            return
 
 
 @contextmanager
@@ -776,12 +640,11 @@ def trace_claude_task(
     *,
     model_id: str,
 ) -> Iterator[ClaudeTaskTrace | None]:
-    """Trace one aggregate Claude task under the active workflow trace."""
+    """Trace Claude with the same Agent/chat/tool hierarchy as Pydantic AI."""
 
     if not trace.get_current_span().get_span_context().is_valid:
         yield None
         return
-
     langfuse = configure_tracing()
     if langfuse is None:
         yield None
@@ -793,15 +656,18 @@ def trace_claude_task(
         "task_id": task.task_id,
         "agent_name": task.agent_name,
         "output_type": task.output_type.__name__,
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": task.agent_name,
     }
+    initial_messages = [_user_text_message(task.prompt)]
     try:
-        observation = langfuse.start_observation(
-            name=f"Claude Code: {task.agent_name}",
-            as_type="generation",
-            input=redact(task.prompt),
+        manager = langfuse.start_as_current_observation(
+            name=f"{task.agent_name} run",
+            as_type="agent",
+            input=_message_payload(initial_messages),
             metadata=metadata,
-            model=model_id,
         )
+        observation = manager.__enter__()
     except Exception:  # noqa: BLE001 - optional tracing must never block mining.
         yield None
         return
@@ -816,44 +682,220 @@ def trace_claude_task(
         yield task_trace
     except BaseException as error:
         task_trace.fail(error)
-        raise
-    finally:
         task_trace.close()
+        try:
+            manager.__exit__(type(error), error, error.__traceback__)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+    else:
+        task_trace.close()
+        try:
+            manager.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def _usage_details(result: AgentRunResult[Any]) -> dict[str, int]:
+def _runtime_usage(result: AgentRunResult[Any]) -> dict[str, int]:
     usage = result.usage
     if usage is None:
         return {}
     values = {
-        "input": usage.input_tokens,
-        "output": usage.output_tokens,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
         "cache_creation_input_tokens": usage.cache_creation_input_tokens,
         "cache_read_input_tokens": usage.cache_read_input_tokens,
+        "requests": usage.requests,
+        "turns": usage.turns,
     }
-    return {name: value for name, value in values.items() if value is not None}
+    return {
+        name: value
+        for name, value in values.items()
+        if isinstance(value, int) and not isinstance(value, bool)
+    }
 
 
 def _usage_details_from_mapping(value: Any) -> dict[str, int] | None:
     if not isinstance(value, Mapping):
         return None
-    fields = {
-        "input": value.get("input_tokens"),
-        "output": value.get("output_tokens"),
-        "cache_creation_input_tokens": value.get("cache_creation_input_tokens"),
-        "cache_read_input_tokens": value.get("cache_read_input_tokens"),
+    input_tokens = _integer(value.get("input_tokens"))
+    output_tokens = _integer(value.get("output_tokens"))
+    cache_creation = _integer(value.get("cache_creation_input_tokens"))
+    cache_read = _integer(value.get("cache_read_input_tokens"))
+    values = {
+        "input": input_tokens,
+        "output": output_tokens,
+        "input_cached_tokens": cache_read,
+        "prompt_cache_hit_tokens": cache_read,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
     }
     usage = {
         name: item
-        for name, item in fields.items()
-        if isinstance(item, int) and not isinstance(item, bool)
+        for name, item in values.items()
+        if item is not None
     }
+    total = sum(
+        item
+        for item in (
+            input_tokens,
+            output_tokens,
+            cache_creation,
+            cache_read,
+        )
+        if item is not None
+    )
+    if usage:
+        usage["total"] = total
     return usage or None
+
+
+def _integer(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _parent_tool_use_id(event: Mapping[str, Any]) -> str | None:
     value = event.get("parent_tool_use_id")
     return value if isinstance(value, str) and value else None
+
+
+def _display_tool_name(value: str) -> str:
+    marker = "__"
+    if value.startswith("mcp__") and marker in value[5:]:
+        return value.rsplit(marker, 1)[-1]
+    return value
+
+
+def _user_text_message(value: Any) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "parts": [{"type": "text", "content": _string_content(value)}],
+    }
+
+
+def _assistant_message(message: Mapping[str, Any]) -> dict[str, Any]:
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else [
+        {"type": "text", "text": content}
+    ]
+    parts: list[dict[str, Any]] = []
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            parts.append(
+                {"type": "text", "content": _string_content(block)}
+            )
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            parts.append(
+                {
+                    "type": "text",
+                    "content": _string_content(block.get("text")),
+                }
+            )
+        elif block_type == "thinking":
+            parts.append(
+                {
+                    "type": "thinking",
+                    "content": _string_content(
+                        block.get("thinking", block.get("text"))
+                    ),
+                }
+            )
+        elif block_type == "tool_use":
+            parts.append(
+                {
+                    "type": "tool_call",
+                    "id": str(block.get("id") or ""),
+                    "name": _display_tool_name(
+                        str(block.get("name") or "unknown")
+                    ),
+                    "arguments": json.dumps(
+                        sanitize_json(block.get("input")),
+                        ensure_ascii=False,
+                        default=str,
+                        separators=(",", ":"),
+                    ),
+                }
+            )
+        else:
+            parts.append(
+                {
+                    "type": str(block_type or "unknown"),
+                    "content": _string_content(dict(block)),
+                }
+            )
+    output: dict[str, Any] = {"role": "assistant", "parts": parts}
+    finish_reason = message.get("stop_reason", message.get("finish_reason"))
+    if isinstance(finish_reason, str) and finish_reason:
+        output["finish_reason"] = finish_reason
+    return output
+
+
+def _merge_assistant_messages(
+    existing: Mapping[str, Any],
+    incoming: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(existing)
+    parts = [
+        dict(part) if isinstance(part, Mapping) else part
+        for part in existing.get("parts", [])
+    ]
+    identities = {
+        _part_identity(part): index
+        for index, part in enumerate(parts)
+        if isinstance(part, Mapping)
+    }
+    for part in incoming.get("parts", []):
+        if not isinstance(part, Mapping):
+            if part not in parts:
+                parts.append(part)
+            continue
+        identity = _part_identity(part)
+        if identity in identities:
+            parts[identities[identity]] = dict(part)
+        else:
+            identities[identity] = len(parts)
+            parts.append(dict(part))
+    merged["parts"] = parts
+    if incoming.get("finish_reason"):
+        merged["finish_reason"] = incoming["finish_reason"]
+    return merged
+
+
+def _part_identity(part: Mapping[str, Any]) -> tuple[str, str]:
+    part_type = str(part.get("type") or "unknown")
+    if part_type == "tool_call":
+        return part_type, str(part.get("id") or "")
+    return part_type, str(part.get("content") or "")
+
+
+def _string_content(value: Any) -> str:
+    sanitized = sanitize_json(value)
+    if isinstance(sanitized, str):
+        return sanitized
+    return json.dumps(
+        sanitized,
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
+
+
+def _message_payload(value: Any) -> Any:
+    """Redact and clip leaf strings without destroying message structure."""
+
+    sanitized = sanitize_json(value)
+    if isinstance(sanitized, Mapping):
+        return {
+            str(key): _message_payload(item)
+            for key, item in sanitized.items()
+        }
+    if isinstance(sanitized, list):
+        return [_message_payload(item) for item in sanitized]
+    if isinstance(sanitized, str):
+        return clip(sanitized, _EVENT_PAYLOAD_LIMIT)
+    return sanitized
 
 
 def _bounded_payload(value: Any) -> Any:
