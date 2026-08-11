@@ -137,7 +137,7 @@ The Rule Generator never loads the ast-grep skill or authors query text. The AST
 
 Runtime-neutral tasks can be executed by either the Pydantic AI adapter or the isolated Claude Code CLI adapter, with explicit per-phase routing and no runtime fallback. The shared synthesis layer only builds per-intent tasks, runs an injected async executor concurrently, and restores request order. A Pydantic Rule Generator delegates those tasks back to the Pydantic AI runtime. A Claude Rule Generator sends the complete plan through a phase-scoped MCP tool whose host launches one independent Claude CLI task per intent with the selected model, effort, output format, limits, and JSON Schema. Claude synthesis does not import or invoke the Pydantic AI adapter.
 
-Each Synthesizer receives separate read-only source and cases tools plus a typed `run_ast_grep_query` tool. The runner accepts only the logical target `source` or `cases`; it does not expose Bash, a command string, or an arbitrary filesystem path. Neither runtime uses a synthesis receipt or per-child semantic gate; semantic acceptance belongs to the final `VASCoreInfo` task.
+Each Synthesizer can read its complete per-VAS workspace and receives separate read-only `src` and `cases` views plus a typed `run_ast_grep_query` tool. Access remains bounded to that one VAS workspace and the ast-grep references; sibling workspaces and writes are unavailable. The runner accepts only the logical target `src` or `cases`; it does not expose Bash, a command string, or an arbitrary filesystem path. Neither runtime uses a synthesis receipt or per-child semantic gate; semantic acceptance belongs to the final `VASCoreInfo` task.
 
 ### Miner module responsibilities
 
@@ -213,11 +213,11 @@ Each phase has its own model-turn budget. Override the limits in the repository-
 ```dotenv
 MINER_MAX_TURNS_ISSUE_COLLECTION=40
 MINER_MAX_TURNS_ROOT_CAUSE=40
-MINER_MAX_TURNS_RULE_GENERATION=100
+MINER_MAX_TURNS_RULE_GENERATION=30
 MINER_MAX_TURNS_PER_ANCHOR=30
 ```
 
-The Issue Collector and Root Cause Analyzer each have an independent budget of 40 turns. The Rule Generator has a 100-turn parent budget. Each per-anchor Synthesizer run has its own 30-turn limit. A Pydantic parent aggregates child usage into its task usage; Claude CLI child runs keep independent native turn counters and are not folded into the waiting parent CLI's turn count. At most five anchor runs execute concurrently, and one synthesis request contains at most eight intents.
+The Issue Collector and Root Cause Analyzer each have an independent budget of 40 turns. The Rule Generator has an independent 30-turn parent budget, and every per-anchor Synthesizer run has its own independent 30-turn limit. Delegated Synthesizer turns do not consume the waiting Rule Generator's budget in either runtime. At most five anchor runs execute concurrently, and one synthesis request contains at most eight intents.
 
 Both runtimes treat these model-turn ceilings as request limits rather than a dollar budget. VAMINER does not calculate, collect, or report monetary cost estimates. Provider-reported cost fields are ignored; only request and token usage are retained.
 
@@ -237,7 +237,7 @@ Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable optional tracing. 
 
 Langfuse workflow traces are named with their routed runtime, for example `VAS-0001 Miner Workflow @pydantic-ai` or `VAS-0001 Miner Workflow @claude-code`. Mixed workflows list both runtime IDs. Claude phases use the same observation hierarchy as other agent runs: one `<Agent> run` `AGENT` contains interleaved `chat <model>` `GENERATION` observations and one `TOOL` observation per completed tool execution. Chat input contains the accumulated message history and visible tool catalog, and each tool keeps its arguments and result together. Terminal protocol events remain Agent metadata instead of separate child spans. MCP-hosted Synthesizers inherit the active Claude Agent's W3C trace context; the synthesis `TOOL` observation owns the delegated Claude CLI Agent runs and their model/tool descendants. Claude runtime diagnostics append child attempts, tool activity, results, and usage to the active VAS run log. Event payloads are redacted and bounded.
 
-Claude filesystem authority is phase-scoped. Root Cause Analysis may read the per-VAS workspace and may write only top-level files under `cases/`; Rule Generation may read only `cases/`. Source grounding during Rule Generation belongs exclusively to the MCP-hosted Synthesizers. A denied native tool call remains an in-session tool result for Claude to handle and is retained only as audit metadata; the outer runtime repair loop handles final structured-output failures, not tool retries. Final RCA validation keeps the declared, valid case files and deletes every undeclared file left by earlier attempts.
+Claude filesystem authority is phase-scoped. Root Cause Analysis may read the per-VAS workspace and may write only top-level files under `cases/`; Rule Generation may read only `cases/`; each Synthesizer may read its complete per-VAS workspace but cannot write it. Source grounding during Rule Generation belongs exclusively to the MCP-hosted Synthesizers. A denied native tool call remains an in-session tool result for Claude to handle and is retained only as audit metadata; the outer runtime repair loop handles final structured-output failures, not tool retries. Final RCA validation keeps the declared, valid case files and deletes every undeclared file left by earlier attempts.
 
 ### Tests
 

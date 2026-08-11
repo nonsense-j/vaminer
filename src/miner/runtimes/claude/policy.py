@@ -22,7 +22,6 @@ from ...agent.instructions import compose_instructions
 from ...agent.schema import descriptive_json_schema
 from ...models.anchors import AnchorSynthesisRequest
 from ...utils.config import GITHUB_MIRROR_ENABLED
-from ...utils.log import active_run_log_path
 from ...utils.telemetry import propagated_trace_environment
 from .artifacts import write_private
 from .config import DEFAULT_ENV_ALLOWLIST, ClaudeCodeConfig
@@ -119,6 +118,7 @@ class PolicyFiles:
     settings: Path
     mcp: Path
     compact_events: Path | None
+    synthesis_log: Path | None
 
 
 class PolicyCompiler:
@@ -197,8 +197,6 @@ class PolicyCompiler:
             assert task.context.cases_dir is not None
             return (task.context.cases_dir.resolve(),)
         if task.phase is AgentPhase.AST_GREP_SYNTHESIS:
-            assert task.context.source_root is not None
-            assert task.context.cases_dir is not None
             skill = next(
                 (item for item in task.skills if item.name == "ast-grep"),
                 None,
@@ -206,8 +204,7 @@ class PolicyCompiler:
             if skill is None:
                 raise ClaudeCodeConfigurationError("AST-Grep synthesis requires the ast-grep skill")
             return (
-                task.context.source_root.resolve(),
-                task.context.cases_dir.resolve(),
+                task.context.workspace_root.resolve(),
                 (skill.root / "references").resolve(),
             )
         return (task.context.workspace_root.resolve(),)
@@ -241,8 +238,8 @@ class PolicyCompiler:
 ## Claude Code
 
 - Locate files or matching lines with `Grep` and `Glob`, then use `Read` on the
-  smallest useful line range. ALWAYS specify the target path parameter when reading.
-- Read only under the supplied source and cases roots. Do not inspect runtime
+  smallest useful line range. ALWAYS specify the explicit root path when reading.
+- Read only under the supplied `src` and `cases` roots. Do not inspect runtime
   artifacts, logs, invocation files, or VAMiner framework source.
 - Create complete case files with `Write`.
 - `Edit` and `Bash` are unavailable.
@@ -269,10 +266,11 @@ class PolicyCompiler:
 
 ## Claude Code
 
-- Use `Read`, `Grep`, and `Glob` only within the supplied source, cases, and
-  ast-grep reference roots. ALWAYS specify the target path parameter when reading.
+- Use `Read`, `Grep`, and `Glob` only within the corresponding VAS workspace
+  root `{task.context.workspace_root.resolve()}` and the supplied ast-grep
+  reference root. ALWAYS specify the explicit root path when reading.
 - Execute queries only with `mcp__vaminer__run_ast_grep_query`, selecting the
-  logical target `cases` or `source`. The tool accepts no shell command or
+  logical target `cases` or `src`. The tool accepts no shell command or
   filesystem path.
 - `Bash`, `Edit`, `Write`, and native delegation tools are unavailable.
 - Return exactly one complete object satisfying the supplied JSON Schema.
@@ -291,8 +289,9 @@ class PolicyCompiler:
 ## Claude Code
 
 - Use `Read`, `Grep`, and `Glob` only within the cases root supplied in the task
-  payload. The source root is outside the Rule Generator's filesystem
-  authority. ALWAYS specify the `cases` path parameter when reading.
+  payload. The workspace source area is `src/`, and it is outside the Rule
+  Generator's filesystem authority. ALWAYS specify the explicit `cases` path
+  when reading.
 - `Bash`, `Edit`, `Write`, and native delegation tools are unavailable.
 - Do not inspect runtime artifacts, logs, invocation files, or VAMiner
   framework source.
@@ -353,6 +352,13 @@ class PolicyCompiler:
         compact_events = temporary_root / "compact-events.jsonl" if trace_compaction else None
         if compact_events is not None:
             write_private(compact_events, b"")
+        synthesis_log = (
+            temporary_root / "synthesis.log"
+            if policy.mcp_profile is MCPProfile.RULE_GENERATION
+            else None
+        )
+        if synthesis_log is not None:
+            write_private(synthesis_log, b"")
         return PolicyFiles(
             system_prompt=system_prompt,
             settings=self._materialize_settings(
@@ -367,8 +373,10 @@ class PolicyCompiler:
                 policy=policy,
                 executable=executable,
                 model_id=model_id,
+                synthesis_log=synthesis_log,
             ),
             compact_events=compact_events,
+            synthesis_log=synthesis_log,
         )
 
     def build_argv(
@@ -519,6 +527,7 @@ class PolicyCompiler:
         policy: ClaudeTaskPolicy,
         executable: str | None,
         model_id: str | None,
+        synthesis_log: Path | None,
     ) -> Path:
         servers: dict[str, Any] = {}
         if policy.mcp_profile is not None:
@@ -555,8 +564,8 @@ class PolicyCompiler:
                 )
                 mcp_env[SYNTHESIS_CONTEXT_ENV] = str(synthesis_context)
                 mcp_env.update(propagated_trace_environment())
-                if (run_log_path := active_run_log_path()) is not None:
-                    mcp_env[SYNTHESIS_LOG_ENV] = str(run_log_path)
+                assert synthesis_log is not None
+                mcp_env[SYNTHESIS_LOG_ENV] = str(synthesis_log)
             elif policy.mcp_profile is MCPProfile.AST_GREP_SYNTHESIS:
                 assert task.context.source_root is not None
                 assert task.context.cases_dir is not None

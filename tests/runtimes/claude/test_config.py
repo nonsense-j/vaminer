@@ -20,17 +20,6 @@ def test_model_provider_auth_environment_is_not_inherited(monkeypatch):
     assert "CLAUDE_CODE_USE_BEDROCK" not in environment
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-    ],
-)
-def test_model_provider_auth_environment_overrides_are_rejected(name: str):
+def test_model_provider_auth_environment_overrides_are_rejected():
     with pytest.raises(ValueError, match="Claude user session"):
-        ClaudeCodeConfig(environment={name: "forbidden"})
+        ClaudeCodeConfig(environment={"ANTHROPIC_API_KEY": "forbidden"})

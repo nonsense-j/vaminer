@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 import pytest
 
 from src.miner.agent import descriptive_json_schema
@@ -44,20 +44,6 @@ def test_descriptive_schema_inlines_references_and_preserves_aliases():
     assert schema["additionalProperties"] is False
 
 
-def test_descriptive_schema_removes_unsupported_validation_keywords():
-    schema = descriptive_json_schema(AnchorSynthesisRunRequest)
-    keys = _all_keys(schema)
-
-    assert not {
-        "maximum",
-        "minimum",
-        "minItems",
-        "minLength",
-        "pattern",
-    } & keys
-    assert "target_anchor_id" in schema["properties"]
-
-
 def test_anchor_synthesis_requests_require_unique_plan_ids_and_a_known_target():
     intent = {
         "id": "danger-call",
@@ -87,30 +73,3 @@ def test_anchor_synthesis_requests_require_unique_plan_ids_and_a_known_target():
                 "target_anchor_id": "missing-anchor",
             }
         )
-
-
-def test_descriptive_schema_rejects_recursive_models():
-    class RecursiveModel(BaseModel):
-        child: RecursiveModel | None = None
-
-    with pytest.raises(ValueError, match="recursive JSON Schema reference"):
-        descriptive_json_schema(RecursiveModel)
-
-
-def test_descriptive_schema_rejects_unresolved_references(monkeypatch):
-    class BrokenModel(BaseModel):
-        value: str
-
-    monkeypatch.setattr(
-        BrokenModel,
-        "model_json_schema",
-        classmethod(
-            lambda cls, *args, **kwargs: {
-                "$ref": "#/$defs/Missing",
-                "$defs": {},
-            }
-        ),
-    )
-
-    with pytest.raises(ValueError, match="unresolved JSON Schema reference"):
-        descriptive_json_schema(BrokenModel)

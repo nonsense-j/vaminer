@@ -245,9 +245,7 @@ class IssueWorkflow(_WorkflowBase):
         issue_identity = self._identity(issue_task)
         issue_cache = self._cache(issue_task, workspace.cache_dir, issue_identity)
         collection = (
-            load_collection_cache(issue_cache, workspace_root=workspace.root)
-            if self.options.use_cache
-            else None
+            load_collection_cache(issue_cache, workspace_root=workspace.root) if self.options.use_cache else None
         )
         if collection is None:
             issue_result = await self._run_task(issue_task)
@@ -268,11 +266,7 @@ class IssueWorkflow(_WorkflowBase):
         root_identity = self._identity(root_task)
         root_cache = self._cache(root_task, workspace.cache_dir, root_identity)
         root_cause = (
-            load_root_cause_cache(
-                root_cache,
-                source_root=repo_path,
-                cases_dir=workspace.cases_dir,
-            )
+            load_root_cause_cache(root_cache, source_root=repo_path, cases_dir=workspace.cases_dir)
             if self.options.use_cache
             else None
         )

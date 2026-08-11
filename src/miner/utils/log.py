@@ -42,7 +42,7 @@ logger.propagate = False
 if not any(isinstance(handler, _ConsoleHandler) for handler in logger.handlers):
     console_handler = _ConsoleHandler(sys.stdout)
     console_handler.setLevel(LOG_LEVEL)
-    console_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    console_handler.setFormatter(_RunFormatter())
     console_handler.addFilter(_ConsoleFilter())
     logger.addHandler(console_handler)
 
@@ -55,6 +55,14 @@ def log_renderable(rendered: str) -> None:
             _RAW_RECORD_ATTRIBUTE: True,
             _FILE_ONLY_RECORD_ATTRIBUTE: True,
         },
+    )
+
+
+def relay_log_renderable(rendered: str) -> None:
+    """Write an already-formatted subprocess diagnostic to file and console."""
+    logger.info(
+        rendered.rstrip("\n"),
+        extra={_RAW_RECORD_ATTRIBUTE: True},
     )
 
 

@@ -18,9 +18,9 @@ from tests.support.factories import analysis_subject, root_cause
 def test_factories_apply_phase_authority_and_conditional_fixed_diff(
     tmp_path: Path,
 ):
-    repo_path = tmp_path / "repo"
+    repo_path = tmp_path / "src" / "example" / "project"
     cases_dir = tmp_path / "cases"
-    repo_path.mkdir()
+    repo_path.mkdir(parents=True)
     cases_dir.mkdir()
     collection = IssueCollectionInfo(
         issue_id="CVE-2099-0001",
@@ -61,10 +61,24 @@ def test_factories_apply_phase_authority_and_conditional_fixed_diff(
     assert RuntimeCapability.AGENT_DELEGATION in rule_task.required_capabilities
     assert [skill.name for skill in rule_task.skills] == ["ast-grep"]
     assert json.loads(issue_task.prompt) == {"issue_input": "CVE-2099-0001"}
+    rca_prompt = json.loads(rca_task.prompt)
+    assert rca_prompt["workspace_layout"] == {
+        "src": str((tmp_path / "src").resolve()),
+        "cases": str(cases_dir.resolve()),
+    }
+    assert rca_prompt["analysis_subject"]["source_root"] == str(repo_path.resolve())
     rule_prompt = json.loads(rule_task.prompt)
     assert set(rule_prompt) == {
         "root_cause_analysis",
-        "available_directories",
+        "workspace_layout",
+        "filesystem_authority",
     }
-    assert set(rule_prompt["available_directories"]) == {"cases"}
+    assert rule_prompt["workspace_layout"] == {
+        "src": str((tmp_path / "src").resolve()),
+        "cases": str(cases_dir.resolve()),
+    }
+    assert rule_prompt["filesystem_authority"] == {
+        "src": "synthesizer_only",
+        "cases": "read_only",
+    }
     assert rule_task.input_instructions.startswith("# Input Policy\n")

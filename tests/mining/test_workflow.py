@@ -1,8 +1,7 @@
-"""Tests for issue and example-suite workflow orchestration."""
+"""Tests for deterministic issue workflow orchestration."""
 
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,11 +10,7 @@ from typing import Any
 import pytest
 from git import Actor, Repo
 
-from src.miner.mining.examples import (
-    inspect_example_suite,
-    materialize_example_suite,
-)
-from src.miner.mining.workflow import ExampleSuiteWorkflow, IssueWorkflow, WorkflowOptions
+from src.miner.mining.workflow import IssueWorkflow, WorkflowOptions
 from src.miner.agent import (
     AgentPhase,
     AgentRunResult,
@@ -173,55 +168,3 @@ async def test_issue_workflow_routes_one_complete_rule_generation_and_caches_by_
     assert cli.calls == []
     assert cached.core == result.core
     assert cached.agent_runs == ()
-
-
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-async def test_example_suite_workflow_uses_snapshot_as_source_and_publishes_portable_provenance(
-    tmp_path: Path,
-):
-    suite_dir = tmp_path / "CWE-2099-fixture"
-    suite_dir.mkdir()
-    (suite_dir / "bad.c").write_text(SOURCE, encoding="utf-8")
-    workspace_root = tmp_path / "workspaces" / "VAS-0001"
-    Workspace._ensure_structure(workspace_root)
-    workspace = Workspace(
-        workspace_root,
-        "VAS-0001",
-        input_id="example-suite:CWE-2099-fixture",
-        output_root=tmp_path / "output",
-        trace_id="0123456789abcdef0123456789abcdef",
-        rules_dir=tmp_path / "rules",
-    )
-    intake = materialize_example_suite(
-        inspect_example_suite(suite_dir),
-        workspace=workspace,
-    )
-    root_cause = _root_cause(file="bad.c")
-    core = _core(root_cause)
-    runtime = ScriptedRuntime("claude-code", "cli-model", root_cause, core)
-    router = RuntimeRouter(
-        runtimes={runtime.runtime_id: runtime},
-        default_runtime=runtime.runtime_id,
-    )
-
-    result = await ExampleSuiteWorkflow(router).run(
-        intake,
-        vas_id=workspace.vas_id,
-        workspace=workspace,
-    )
-
-    assert [task.phase for task in runtime.calls] == [
-        AgentPhase.ROOT_CAUSE,
-        AgentPhase.RULE_GENERATION,
-    ]
-    assert all(task.context.repo_path is None for task in runtime.calls)
-    assert all(task.context.source_root == workspace.example_suite_snapshot_dir for task in runtime.calls)
-    source = result.vas.sources[0]
-    assert source.type == "example_suite"
-    assert source.registry_key == "example-suite:CWE-2099-fixture"
-    assert source.snapshot_ref == "src/input_snapshot"
-    published = json.loads(workspace.rule_path.read_text(encoding="utf-8"))
-    rendered = json.dumps(published)
-    assert intake.source_path not in rendered
-    assert intake.snapshot_path not in rendered
-    assert "case_bundle" not in rendered

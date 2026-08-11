@@ -32,7 +32,7 @@ def _enforce_allowed_root(root: Path) -> None:
         raise AstGrepRunnerError("configured ast-grep roots are invalid")
     allowed = tuple(Path(item).expanduser().resolve() for item in decoded)
     if not any(root == candidate or candidate in root.parents for candidate in allowed):
-        raise AstGrepRunnerError("target directory is outside the configured source and cases roots")
+        raise AstGrepRunnerError("target directory is outside the configured src and cases roots")
 
 
 def _find_ast_grep(executable: str | None = None) -> str:

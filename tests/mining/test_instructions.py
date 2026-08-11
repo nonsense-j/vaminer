@@ -41,6 +41,7 @@ RUNTIME_MARKERS = (
     "mcp__",
     "run_ast_grep_query",
     "skill_read_file",
+    "src_read_file",
     "source_read_file",
     "scripts/runner.py",
 )
@@ -77,6 +78,21 @@ def test_cross_input_instructions_do_not_embed_input_mode_policy(name: str):
         assert marker not in text
 
 
+def test_root_cause_and_rule_generator_share_src_workspace_vocabulary():
+    root_cause_text = (INSTRUCTIONS_DIR / "root_cause_analyzer.md").read_text(
+        encoding="utf-8"
+    )
+    rule_text = (INSTRUCTIONS_DIR / "rule_generator.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "`src/`" in root_cause_text
+    assert "`cases/`" in root_cause_text
+    assert "`src/`" in rule_text
+    assert "`cases/`" in rule_text
+    assert "`source_root`" not in rule_text
+
+
 def test_ast_grep_skill_is_generic_structural_query_mechanics():
     text = AST_GREP_SKILL.read_text(encoding="utf-8")
 
@@ -98,7 +114,7 @@ def test_ast_grep_skill_is_generic_structural_query_mechanics():
 def test_runtime_adapters_append_only_their_binding_after_shared_input_policy(
     tmp_path: Path,
 ):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()
@@ -128,10 +144,12 @@ def test_runtime_adapters_append_only_their_binding_after_shared_input_policy(
     assert "## Claude Code" not in pydantic
     assert "## Claude Code" in claude
     assert "## Pydantic AI" not in claude
+    for compiled in (pydantic, claude):
+        assert "workspace source area is `src/`" in compiled
 
 
 def test_synthesizer_has_shared_task_but_runtime_native_binding(tmp_path: Path):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()
@@ -173,5 +191,8 @@ def test_synthesizer_has_shared_task_but_runtime_native_binding(tmp_path: Path):
         assert compiled.count("# Runtime Binding") == 1
     assert "## Pydantic AI" in pydantic
     assert "## Claude Code" not in pydantic
+    assert "workspace_read_file" in pydantic
     assert "## Claude Code" in claude
     assert "## Pydantic AI" not in claude
+    assert str(tmp_path.resolve()) in claude
+    assert "logical target `cases` or `src`" in claude

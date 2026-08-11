@@ -289,6 +289,13 @@ def _rule_input_instructions(subject: AnalysisSubject) -> str:
 """
 
 
+def _workspace_layout(workspace_root: Path, cases_dir: Path) -> dict[str, str]:
+    return {
+        "src": (workspace_root / "src").resolve().as_posix(),
+        "cases": cases_dir.resolve().as_posix(),
+    }
+
+
 def make_issue_collection_task(
     issue_input: str,
     *,
@@ -357,6 +364,7 @@ def make_root_cause_task(
                 "fixed_revision_available": collection.fixed_commit is not None,
             },
             "analysis_subject": subject.model_dump(mode="json"),
+            "workspace_layout": _workspace_layout(workspace_root, cases_dir),
         },
         indent=2,
     )
@@ -431,6 +439,7 @@ def make_example_suite_root_cause_task(
                 "manifest_path": intake.manifest_path,
             },
             "analysis_subject": subject.model_dump(mode="json"),
+            "workspace_layout": _workspace_layout(workspace_root, cases_dir),
         },
         indent=2,
     )
@@ -483,8 +492,10 @@ def make_rule_generation_task(
     prompt = json.dumps(
         {
             "root_cause_analysis": root_cause.model_dump(mode="json"),
-            "available_directories": {
-                "cases": cases_dir.resolve().as_posix(),
+            "workspace_layout": _workspace_layout(workspace_root, cases_dir),
+            "filesystem_authority": {
+                "src": "synthesizer_only",
+                "cases": "read_only",
             },
         },
         indent=2,

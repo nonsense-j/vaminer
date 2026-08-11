@@ -8,6 +8,7 @@ allowed to become implicit instructions.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from collections.abc import Sequence
@@ -22,7 +23,7 @@ from ...agent.contracts import (
     RuntimeArtifacts,
 )
 from ...agent.schema import descriptive_json_schema
-from ...utils.log import logger
+from ...utils.log import logger, relay_log_renderable
 from .artifacts import ArtifactStore, AttemptArtifacts, write_private
 from .config import ClaudeCodeConfig
 from .errors import (
@@ -45,6 +46,42 @@ from .protocol import (
     validate_output,
 )
 from .telemetry import ClaudeTaskTrace, trace_claude_task
+
+
+async def _relay_synthesis_log(
+    path: Path,
+    finished: asyncio.Event,
+) -> None:
+    """Stream MCP-hosted Synthesizer diagnostics through the parent logger."""
+
+    pending = bytearray()
+    try:
+        with path.open("rb") as source:
+            while True:
+                pending.extend(source.read())
+                while (newline := pending.find(b"\n")) >= 0:
+                    raw_line = bytes(pending[:newline])
+                    del pending[: newline + 1]
+                    relay_log_renderable(
+                        raw_line.decode("utf-8", errors="replace").rstrip("\r")
+                    )
+                if finished.is_set():
+                    if pending:
+                        relay_log_renderable(
+                            bytes(pending).decode("utf-8", errors="replace")
+                        )
+                    return
+                try:
+                    await asyncio.wait_for(finished.wait(), timeout=0.05)
+                except TimeoutError:
+                    pass
+    except OSError:
+        logger.debug(
+            "Failed to relay Synthesizer diagnostics from %s",
+            path,
+            exc_info=True,
+        )
+
 
 class ClaudeCodeRuntime:
     """Execute one :class:`AgentTask` with an isolated Claude Code CLI process."""
@@ -168,6 +205,8 @@ class ClaudeCodeRuntime:
                 attempt_artifacts.append(persisted)
                 if policy_files.compact_events is not None:
                     write_private(policy_files.compact_events, b"")
+                if policy_files.synthesis_log is not None:
+                    write_private(policy_files.synthesis_log, b"")
                 if task_trace is not None:
                     task_trace.start_attempt(prompt, attempt=attempt)
                 event_handler = (
@@ -196,6 +235,17 @@ class ClaudeCodeRuntime:
                 remaining_timeout = deadline - monotonic()
                 if remaining_timeout <= 0:
                     raise ClaudeCodeTimeoutError(timeout_seconds)
+                relay_finished = asyncio.Event()
+                relay_task = (
+                    asyncio.create_task(
+                        _relay_synthesis_log(
+                            policy_files.synthesis_log,
+                            relay_finished,
+                        )
+                    )
+                    if policy_files.synthesis_log is not None
+                    else None
+                )
                 try:
                     process = await process_runner.run(
                         attempt_argv,
@@ -209,6 +259,10 @@ class ClaudeCodeRuntime:
                     )
                 except ClaudeCodeTimeoutError as exc:
                     raise ClaudeCodeTimeoutError(timeout_seconds) from exc
+                finally:
+                    if relay_task is not None:
+                        relay_finished.set()
+                        await relay_task
                 stream_monitor.finish()
                 if (
                     persisted.stderr_path is not None

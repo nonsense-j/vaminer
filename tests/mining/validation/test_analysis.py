@@ -7,7 +7,7 @@ from tests.support.factories import SOURCE, root_cause
 
 
 def test_root_cause_snippet_does_not_require_exact_source_substring(tmp_path):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()
@@ -28,7 +28,7 @@ def test_root_cause_snippet_does_not_require_exact_source_substring(tmp_path):
 
 
 def test_root_cause_validation_deletes_undeclared_case_files(tmp_path):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()

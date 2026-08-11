@@ -51,7 +51,7 @@ def _request(rca, *, include_guard: bool = False) -> AnchorSynthesisRequest:
 
 
 def test_grounding_policy_is_input_specific_child_task_data(tmp_path):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()
@@ -97,7 +97,7 @@ def test_grounding_policy_is_input_specific_child_task_data(tmp_path):
 
 
 async def test_shared_delegator_fans_out_and_preserves_plan_order(tmp_path):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()

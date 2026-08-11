@@ -52,7 +52,7 @@ def _validate_read(
                 None,
             )
             denied_location = (
-                f"the source_root folder ({restricted_root})"
+                f"the src area ({restricted_root})"
                 if restricted_root is not None
                 else str(path)
             )

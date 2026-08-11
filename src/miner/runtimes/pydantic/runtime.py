@@ -137,32 +137,6 @@ def _model_id(model: Model | str) -> str:
     return str(getattr(model, "model_id", None) or getattr(model, "model_name", None) or type(model).__name__)
 
 
-def _merge_runtime_usage(
-    parent: RunUsage,
-    child: RuntimeUsage | None,
-) -> None:
-    """Merge a normalized child run back into the Pydantic parent budget."""
-
-    if child is None:
-        return
-    values = {
-        "requests": child.requests,
-        "input_tokens": child.input_tokens,
-        "output_tokens": child.output_tokens,
-        "cache_write_tokens": child.cache_creation_input_tokens,
-        "cache_read_tokens": child.cache_read_input_tokens,
-    }
-    parent.incr(
-        RunUsage(
-            **{
-                name: value
-                for name, value in values.items()
-                if value is not None
-            }
-        )
-    )
-
-
 def _deps(task: AgentTask[Any]) -> MinerContext:
     context = task.context
     return MinerContext(
@@ -200,6 +174,8 @@ def _runtime_binding(task: AgentTask[Any]) -> str:
 
 - Locate files or matching lines with `search_files` and `find_files`, then use
   `read_file` with the smallest useful `offset` and `limit`.
+- Paths are relative to the VAS workspace: source code is under `src/`, and
+  generated examples are under `cases/`.
 - Create complete case files with `write_file`.
 {diff_binding}
 - Submit the final object through the active structured-output contract.
@@ -210,7 +186,8 @@ def _runtime_binding(task: AgentTask[Any]) -> str:
 ## Pydantic AI
 
 - Use `find_files`, `search_files`, and `read_file` only within the cases root.
-  The source root is not exposed to the Rule Generator.
+  The workspace source area is `src/`, but it is not exposed to the Rule
+  Generator.
 - Submit one complete `AnchorSynthesisRequest` through
   `synthesize_ast_grep_anchors`. The tool returns typed results in request
   order.
@@ -221,12 +198,15 @@ def _runtime_binding(task: AgentTask[Any]) -> str:
 
 ## Pydantic AI
 
-- Inspect source only with `source_find_files`, `source_search_files`, and
-  `source_read_file`. Inspect generated cases only with the corresponding
+- Inspect any read-only file in the corresponding VAS workspace with
+  `workspace_find_files`, `workspace_search_files`, and `workspace_read_file`.
+  Paths passed to these tools are relative to the VAS workspace root.
+- Inspect `src` only with `src_find_files`, `src_search_files`, and
+  `src_read_file`. Inspect generated cases only with the corresponding
   `cases_*` tools.
 - Read detailed ast-grep syntax references with `skill_read_file`.
 - Execute queries only with `run_ast_grep_query`, selecting the logical target
-  `cases` or `source`. The tool accepts no shell command or filesystem path.
+  `cases` or `src`. The tool accepts no shell command or filesystem path.
 - Submit one result through the active structured-output contract.
 """
     raise PydanticAIRuntimeConfigurationError(f"unsupported phase: {task.phase.value}")
@@ -350,8 +330,6 @@ class PydanticAIRuntime:
                 """Delegate every intent and return structurally typed child results."""
 
                 batch = await synthesis_delegator.synthesize(request)
-                for child_run in batch.runs:
-                    _merge_runtime_usage(ctx.usage, child_run.usage)
                 ctx.deps.subagent_events.extend(batch.events)
                 return list(batch.results)
 
@@ -380,7 +358,7 @@ class PydanticAIRuntime:
                 )
 
             async def run_ast_grep_query(
-                target: Literal["source", "cases"],
+                target: Literal["src", "cases"],
                 language: str,
                 query_type: Literal["pattern", "rule"],
                 query: str,
@@ -394,7 +372,7 @@ class PydanticAIRuntime:
                         "sample_size must be between 1 and "
                         f"{MINER_AST_GREP_MAX_SAMPLE_SIZE}"
                     )
-                target_root = source_root if target == "source" else cases_dir
+                target_root = source_root if target == "src" else cases_dir
                 return await asyncio.to_thread(
                     run_ast_grep,
                     target_root,
@@ -410,9 +388,14 @@ class PydanticAIRuntime:
             toolsets.extend(
                 (
                     _workspace_files(
+                        task.context.workspace_root,
+                        writable=False,
+                        prefix="workspace",
+                    ),
+                    _workspace_files(
                         source_root,
                         writable=False,
-                        prefix="source",
+                        prefix="src",
                     ),
                     _workspace_files(
                         cases_dir,

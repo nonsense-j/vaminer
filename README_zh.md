@@ -137,7 +137,7 @@ Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Sy
 
 运行时无关的任务可以由 Pydantic AI 适配器或隔离的 Claude Code CLI 适配器执行；每个阶段都显式路由，并且不会在运行时之间回退。共享合成层只构造逐 intent 子任务、通过注入的异步 executor 并发执行，并恢复请求顺序。Pydantic Rule Generator 把这些任务委派回 Pydantic AI Runtime；Claude Rule Generator 则把完整计划交给阶段专属 MCP 工具，由 MCP 宿主使用所选 model、effort、output format、限制和 JSON Schema，为每个 intent 启动一个独立 Claude CLI 任务。Claude 合成流程不会导入或调用 Pydantic AI adapter。
 
-每个 Synthesizer 只获得相互独立的只读 source/cases 工具和类型化的 `run_ast_grep_query` 工具。Runner 只接受逻辑目标 `source` 或 `cases`，不暴露 Bash、命令字符串或任意文件系统路径。两个 Runtime 都不使用合成回执或逐子 Agent 语义门；语义验收统一由最终 `VASCoreInfo` 任务负责。
+每个 Synthesizer 可以读取其完整的单个 VAS workspace，并获得相互独立的只读 `src`/`cases` 视图和类型化的 `run_ast_grep_query` 工具。访问范围仍限定在该 VAS workspace 和 ast-grep references 内，不能访问兄弟 workspace，也不能写入。Runner 只接受逻辑目标 `src` 或 `cases`，不暴露 Bash、命令字符串或任意文件系统路径。两个 Runtime 都不使用合成回执或逐子 Agent 语义门；语义验收统一由最终 `VASCoreInfo` 任务负责。
 
 ### Miner 模块职责
 
@@ -213,11 +213,11 @@ Issue Collector 的延迟加载 `web-search` 和 `web-fetch` Capability 使用�
 ```dotenv
 MINER_MAX_TURNS_ISSUE_COLLECTION=40
 MINER_MAX_TURNS_ROOT_CAUSE=40
-MINER_MAX_TURNS_RULE_GENERATION=100
+MINER_MAX_TURNS_RULE_GENERATION=30
 MINER_MAX_TURNS_PER_ANCHOR=30
 ```
 
-Issue Collector 和 Root Cause Analyzer 各自拥有 40 Turns 的独立预算。Rule Generator 的父级预算为 100 Turns。每个逐锚点 Synthesizer 运行拥有独立的 30 Turns 上限。Pydantic 父 Agent 会把子运行用量合并到任务用量；Claude CLI 子运行保留各自的原生 Turn 计数，不计入正在等待的父 CLI Turn 计数。最多并行运行 5 个锚点，一次合成请求最多包含 8 个意图。
+Issue Collector 和 Root Cause Analyzer 各自拥有 40 Turns 的独立预算。Rule Generator 拥有独立的 30 Turns 父级预算，每个逐锚点 Synthesizer 运行也拥有各自独立的 30 Turns 上限。在两个 Runtime 中，委派的 Synthesizer Turns 都不会消耗正在等待的 Rule Generator 预算。最多并行运行 5 个锚点，一次合成请求最多包含 8 个意图。
 
 两个 Runtime 都将这些模型 Turn 上限作为请求次数限制，不设置美元预算。VAMiner 不计算、收集或报告金额成本估算；Provider 返回的费用字段会被忽略，只保留请求数和 Token 用量。
 
@@ -237,7 +237,7 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 Langfuse 工作流 Trace 名称会包含实际路由的 Runtime，例如 `VAS-0001 Miner Workflow @pydantic-ai` 或 `VAS-0001 Miner Workflow @claude-code`；混合工作流会列出两个 Runtime ID。Claude Phase 采用与其他 Agent 运行一致的 observation 层级：一个 `<Agent> run` `AGENT` 下交错排列 `chat <model>` `GENERATION` 和每次完整工具执行对应的 `TOOL`。Chat 输入包含累计消息历史和可见工具目录；同一个 TOOL 同时保存参数和结果。终止协议事件只作为 Agent metadata，不再单独生成子 span。MCP 宿主内的 Synthesizer 会继承当前 Claude Agent 的 W3C trace context；合成 TOOL 会成为委派的 Claude CLI Agent 运行及其 model/tool 子节点的父节点。Claude Runtime 诊断会把子任务 attempt、工具活动、结果和用量追加到当前 VAS run log。事件负载会脱敏并限制大小。
 
-Claude 文件权限按 Phase 隔离：Root Cause Analysis 可以读取单个 VAS 工作区，并且只能写入 `cases/` 顶层；Rule Generation 只能读取 `cases/`。Rule Generation 的源码 grounding 只由 MCP 宿主内的 Synthesizer 完成。原生工具拒绝会作为当前会话内的工具结果交给 Claude 自行处理，并仅保留为审计元数据；Runtime 外层修复循环只处理最终结构化输出失败，不承担工具重试。最终 RCA 校验会保留声明且符合规范的 case 文件，并删除之前 attempt 遗留的所有未声明文件。
+Claude 文件权限按 Phase 隔离：Root Cause Analysis 可以读取单个 VAS 工作区，并且只能写入 `cases/` 顶层；Rule Generation 只能读取 `cases/`；每个 Synthesizer 可以读取其完整的单个 VAS 工作区，但不能写入。Rule Generation 的源码 grounding 只由 MCP 宿主内的 Synthesizer 完成。原生工具拒绝会作为当前会话内的工具结果交给 Claude 自行处理，并仅保留为审计元数据；Runtime 外层修复循环只处理最终结构化输出失败，不承担工具重试。最终 RCA 校验会保留声明且符合规范的 case 文件，并删除之前 attempt 遗留的所有未声明文件。
 
 ### 测试
 

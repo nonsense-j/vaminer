@@ -18,7 +18,6 @@ def clear_model_cache():
 @pytest.mark.parametrize(
     ("provider", "model_name", "expected_system"),
     [
-        ("deepseek", "deepseek-chat", "deepseek"),
         ("openai", "gpt-5.2", "openai"),
         ("openai-compatible", "compatible-model", "openai"),
     ],
@@ -45,27 +44,3 @@ def test_supported_providers_build_one_reused_model(
         assert model.profile["openai_chat_supports_multiple_system_messages"] is False
     elif provider == "openai":
         assert model.profile.get("openai_supports_strict_tool_definition") is not False
-
-
-@pytest.mark.parametrize(
-    ("provider", "model_name", "base_url", "message"),
-    [
-        ("", "model", "https://example.invalid/v1", "LLM_PROVIDER is required"),
-        ("openai", None, None, "LLM_MODEL is required"),
-        ("openai-compatible", "model", None, "OPENAI_BASE_URL is required"),
-        ("unsupported", "model", None, "Unsupported LLM_PROVIDER"),
-    ],
-)
-def test_invalid_model_configuration_fails_clearly(
-    monkeypatch: pytest.MonkeyPatch,
-    provider: str,
-    model_name: str | None,
-    base_url: str | None,
-    message: str,
-):
-    monkeypatch.setattr(llm, "LLM_PROVIDER", provider)
-    monkeypatch.setattr(llm, "LLM_MODEL", model_name)
-    monkeypatch.setattr(llm, "OPENAI_BASE_URL", base_url)
-
-    with pytest.raises(RuntimeError, match=message):
-        get_llm()

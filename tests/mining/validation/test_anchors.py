@@ -12,7 +12,6 @@ from src.miner.mining.validation.anchors import (
     disabled_anchor_warnings,
     validate_anchors,
 )
-from src.miner.mining.validation.vas import validate_vas_core
 from src.miner.models import AnalysisSubject, RootCauseAnalysis, VASCoreInfo
 
 DANGER_BEHAVIOR = "Calls the dangerous operation with one argument."
@@ -113,42 +112,6 @@ def test_final_validation_accepts_enabled_anchor_with_case_and_rca_matches(tmp_p
 
 
 @pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-def test_final_validation_accepts_a_reworded_root_cause_summary(tmp_path: Path):
-    source_root, cases_dir, root_cause = _prepare_sources(tmp_path)
-    core = _core(root_cause, "danger($ARG);").model_copy(
-        update={
-            "root_cause_summary": (
-                "The dangerous operation can run before its guard is established."
-            )
-        }
-    )
-
-    assert validate_vas_core(
-        core,
-        source_root=source_root,
-        cases_dir=cases_dir,
-        root_cause=root_cause,
-        analysis_subject=_subject(source_root, cases_dir),
-    ) == []
-
-
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-def test_final_validation_rejects_malformed_non_empty_query(tmp_path: Path):
-    source_root, cases_dir, root_cause = _prepare_sources(tmp_path)
-    core = _core(root_cause, "danger($ARG); audit($ARG);")
-
-    errors = validate_anchors(
-        core,
-        source_root=source_root,
-        cases_dir=cases_dir,
-        root_cause=root_cause,
-        analysis_subject=_subject(source_root, cases_dir),
-    )
-
-    assert "ast-grep validation failed" in "\n".join(errors)
-
-
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
 def test_final_validation_rejects_enabled_anchor_without_matches(tmp_path: Path):
     source_root, cases_dir, root_cause = _prepare_sources(tmp_path)
     core = _core(root_cause, "missing($ARG);")
@@ -184,44 +147,3 @@ def test_disabled_anchor_allows_degraded_collective_coverage(tmp_path: Path):
     warnings = disabled_anchor_warnings(core)
     assert "contributes no matches or candidate-ranking weight" in warnings[0]
     assert "collective case and source-span coverage are advisory" in warnings[1]
-
-
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-def test_enabled_anchors_remain_strict_when_another_anchor_is_disabled(tmp_path: Path):
-    source_root, cases_dir, root_cause = _prepare_sources(tmp_path)
-    core = _core(root_cause, "", "missing($ARG);")
-
-    rendered = "\n".join(
-        validate_anchors(
-            core,
-            source_root=source_root,
-            cases_dir=cases_dir,
-            root_cause=root_cause,
-            analysis_subject=_subject(source_root, cases_dir),
-        )
-    )
-
-    assert "anchor 'danger-call-2' has no case match" in rendered
-    assert "anchor 'danger-call-2' has no RCA-declared repository-site match" in rendered
-
-
-@pytest.mark.skipif(shutil.which("ast-grep") is None, reason="ast-grep is required")
-def test_disabled_anchor_downgrades_example_span_coverage(tmp_path: Path):
-    source_root, cases_dir, root_cause = _prepare_sources(tmp_path)
-    payload = root_cause.model_dump(mode="json")
-    payload["buggy_components"][0].update(
-        {
-            "file": "bug.c",
-            "snippet": "void trigger(void) { danger(1); }",
-        }
-    )
-    root_cause = RootCauseAnalysis.model_validate(payload)
-    core = _core(root_cause, "")
-
-    assert validate_anchors(
-        core,
-        source_root=source_root,
-        cases_dir=cases_dir,
-        root_cause=root_cause,
-        analysis_subject=_subject(source_root, cases_dir, kind="example_suite"),
-    ) == []

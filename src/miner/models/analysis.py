@@ -30,7 +30,10 @@ class BuggyComponent(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    file: str = Field(..., description="Source-root-relative path")
+    file: str = Field(
+        ...,
+        description="Path relative to the analyzed repository or snapshot under workspace src/",
+    )
     start_line: int = Field(..., ge=1)
     end_line: int = Field(..., ge=1)
     role: str = Field(..., description="Concise role of this location in the defect")
@@ -70,7 +73,10 @@ class AnalysisSubject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["issue", "example_suite"] = Field(..., description="Source family")
-    source_root: str = Field(..., description="Workspace-contained source root")
+    source_root: str = Field(
+        ...,
+        description="Analyzed repository or snapshot root within the workspace src area",
+    )
     cases_dir: str = Field(..., description="Workspace-contained generated cases directory")
     grounding_policy: Literal["repo_evidence", "bad_span_coverage"] = Field(
         ...,

@@ -320,7 +320,7 @@ def _register_ast_grep_synthesis_tools(
     assert settings.cases_dir is not None
 
     async def run_ast_grep_query(
-        target: Literal["source", "cases"],
+        target: Literal["src", "cases"],
         language: str,
         query_type: Literal["pattern", "rule"],
         query: str,
@@ -336,7 +336,7 @@ def _register_ast_grep_synthesis_tools(
             )
         target_root = (
             settings.source_root
-            if target == "source"
+            if target == "src"
             else settings.cases_dir
         )
         return await asyncio.to_thread(

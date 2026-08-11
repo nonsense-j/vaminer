@@ -13,6 +13,8 @@ case files, re-analyze the RCA, or produce a severity/CVSS report.
 
 # Context
 
+- The VAS workspace source area is named `src/`; generated examples are under
+  `cases/`.
 - The complete typed `RootCauseAnalysis` is a trusted, final input and the sole
   authority for defect semantics. Accept it as true. Never validate,
   cross-check, re-derive, reinterpret, repair, or supplement any RCA claim.
@@ -21,8 +23,9 @@ case files, re-analyze the RCA, or produce a severity/CVSS report.
   transformations but may not extend the RCA.
 - Generate the complete queryless anchor plan **directly** from the RCA and those
   case files. The RCA and cases are sufficient by contract.
-- Do not inspect `source_root` while designing the rule or queryless plan. It
-  is Synthesizer grounding input only, after the queryless plan is complete.
+- Do not inspect `src/` while designing the rule or queryless plan. Its exact
+  analyzed repository or snapshot root is Synthesizer grounding input only,
+  after the queryless plan is complete.
 - Anchor synthesis has a strict task contract. Define the complete queryless
   intent plan before delegation. Each Synthesizer sees that plan, owns one
   target, and adds only query fields, adjustment notes, and an optional plan
@@ -114,7 +117,7 @@ Use anchors from the accepted synthesis attempt:
 # Constraints
 
 - Use only the trusted RCA and declared case files to design the rule. Never
-  inspect source or provenance to validate the RCA.
+  inspect `src/` or provenance to validate the RCA.
 - Never use fixing behavior or absence of an operation as an anchor.
 - Never put a relationship or vulnerability condition in `behavior` merely to
   improve query precision; keep post-match investigation in `inspect_hint`.

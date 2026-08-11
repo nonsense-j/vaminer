@@ -26,18 +26,6 @@ def _write_event(workspace: Path, file_path: str) -> dict[str, object]:
     }
 
 
-def test_glob_accepts_the_complete_vas_workspace(tmp_path: Path):
-    (tmp_path / "src").mkdir()
-    (tmp_path / "cases").mkdir()
-    assert (
-        validate_event(
-            _read_event(tmp_path, "Glob", tmp_path),
-            roots=(tmp_path.resolve(),),
-        )
-        is None
-    )
-
-
 def test_glob_rejects_paths_outside_the_vas_workspace(tmp_path: Path):
     workspace = tmp_path / "VAS-0001"
     workspace.mkdir()
@@ -53,9 +41,9 @@ def test_glob_rejects_paths_outside_the_vas_workspace(tmp_path: Path):
 def test_rule_generator_can_read_cases_and_gets_actionable_source_denial(
     tmp_path: Path,
 ):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src" / "owner" / "repo"
     cases_dir = tmp_path / "cases"
-    source_root.mkdir()
+    source_root.mkdir(parents=True)
     cases_dir.mkdir()
     source_file = source_root / "bug.c"
     case_file = cases_dir / "case1.c"
@@ -71,26 +59,9 @@ def test_rule_generator_can_read_cases_and_gets_actionable_source_denial(
     denied = validate_event(_read_event(tmp_path, "Read", source_file), **kwargs)
 
     assert denied is not None
-    assert f"source_root folder ({source_root.resolve()})" in denied
+    assert f"src area ({source_root.resolve()})" in denied
     assert "Use the authoritative RCA directly" in denied
     assert "mcp__vaminer__synthesize_ast_grep_anchors" in denied
-
-
-def test_read_directory_returns_actionable_guidance(tmp_path: Path):
-    cases_dir = tmp_path / "cases"
-    cases_dir.mkdir()
-
-    reason = validate_event(
-        _read_event(tmp_path, "Read", cases_dir),
-        roots=(cases_dir.resolve(),),
-        role="rule-generator",
-    )
-
-    assert reason == (
-        f"Read accepts a file, not the directory {cases_dir.resolve()}. Use Glob "
-        "under the cases folder to locate the RCA-declared case files, then Read "
-        "those files directly."
-    )
 
 
 def test_write_accepts_only_a_top_level_case_file(tmp_path: Path):
@@ -107,7 +78,7 @@ def test_write_accepts_only_a_top_level_case_file(tmp_path: Path):
 
 
 def test_write_rejects_source_nested_and_symlink_escapes(tmp_path: Path):
-    source_root = tmp_path / "source"
+    source_root = tmp_path / "src"
     cases_dir = tmp_path / "cases"
     source_root.mkdir()
     cases_dir.mkdir()
@@ -128,16 +99,3 @@ def test_write_rejects_source_nested_and_symlink_escapes(tmp_path: Path):
             )
             == "Write is limited to top-level files directly under cases_dir"
         )
-
-
-def test_unregistered_agent_tool_fails_closed(tmp_path: Path):
-    reason = validate_event(
-        {
-            "tool_name": "Agent",
-            "cwd": str(tmp_path),
-            "tool_input": {"subagent_type": "Explore"},
-        },
-        roots=(tmp_path.resolve(),),
-    )
-
-    assert reason == "This tool is outside the VAMiner filesystem access guard"

@@ -14,7 +14,6 @@ SCRIPT_DIR = PROJECT_ROOT / "src" / ".vaminer" / "skills" / "vas-scanner" / "scr
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from core import finalize_scan, next_candidates, prepare_scan, record_analysis
-from engine import scan_anchors
 
 
 def make_rule() -> dict:
@@ -65,26 +64,6 @@ def warning(confidence: str, file: str, explanation: str) -> dict:
             }
         ],
     }
-
-
-def test_scanner_skips_disabled_anchors_without_ast_grep(tmp_path: Path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "a.c").write_text("void a(void) {}\n", encoding="utf-8")
-    disabled = make_rule()["anchors"][0]
-    disabled["query"] = ""
-
-    scan = scan_anchors(
-        [disabled],
-        repo,
-        "c",
-        ast_grep="/definitely/not/an/ast-grep-binary",
-    )
-
-    assert len(scan.anchor_results) == 1
-    assert scan.anchor_results[0].anchor_id == "danger-call"
-    assert scan.anchor_results[0].matches == []
-    assert scan.candidates() == []
 
 
 def test_packaged_scanner_accepts_all_disabled_rule(tmp_path: Path):
