@@ -1,476 +1,333 @@
-"""Runtime-neutral task specifications for the deterministic Miner phases."""
+"""Closed Phase Authority and task construction for Miner Agents."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
-
-from pydantic import BaseModel
 
 from ..agent.contracts import (
     AgentPhase,
     AgentTask,
-    FileAccess,
-    OutputValidator,
+    AnchorSynthesisAuthority,
+    IssueCollectionAuthority,
+    PhaseDefinition,
+    RootCauseAuthority,
+    RuleGenerationAuthority,
     RunLimits,
-    RuntimeCapability,
-    SkillSpec,
-    TaskContext,
-    WorkspacePolicy,
 )
+from ..models.analysis import GroundingPolicy, RootCauseAnalysis
+from ..models.anchors import (
+    AnchorIntent,
+    AnchorPlan,
+    AnchorSynthesisDelta,
+)
+from ..models.issue import IssueCollectionInfo
+from ..models.vas import VASCoreInfo
 from ..utils.config import (
     MINER_MAX_TURNS_ISSUE_COLLECTION,
     MINER_MAX_TURNS_PER_ANCHOR,
     MINER_MAX_TURNS_ROOT_CAUSE,
     MINER_MAX_TURNS_RULE_GENERATION,
 )
-from ..models.analysis import AnalysisSubject, RootCauseAnalysis
-from ..models.anchors import (
-    AnchorIntent,
-    AnchorSynthesisRequest,
-    AnchorSynthesisRunRequest,
-    AnchorSynthesisRunResult,
-)
-from ..models.issue import IssueCollectionInfo
-from ..models.vas import VASCoreInfo
 from .examples import ExampleSuiteIntake
 from .validation.analysis import validate_issue_checkout, validate_root_cause_analysis
 from .validation.vas import validate_vas_core
 
 _MINER_DIR = Path(__file__).resolve().parents[1]
 _INSTRUCTIONS_DIR = _MINER_DIR / "instructions"
-_SKILLS_DIR = _MINER_DIR / "skills"
-
-ISSUE_COLLECTION_LIMITS = RunLimits(
-    request_limit=MINER_MAX_TURNS_ISSUE_COLLECTION,
-    output_retries=2,
-)
-ROOT_CAUSE_LIMITS = RunLimits(
-    request_limit=MINER_MAX_TURNS_ROOT_CAUSE,
-    output_retries=2,
-)
-RULE_GENERATION_LIMITS = RunLimits(
-    request_limit=MINER_MAX_TURNS_RULE_GENERATION,
-    output_retries=2,
-)
-DEFAULT_SYNTHESIZER_LIMITS = RunLimits(
-    request_limit=MINER_MAX_TURNS_PER_ANCHOR,
-    output_retries=2,
-)
+AST_GREP_SKILL_ROOT = _MINER_DIR / "skills" / "ast-grep"
 
 
 def _instructions(name: str) -> str:
     return (_INSTRUCTIONS_DIR / name).read_text(encoding="utf-8")
 
 
-@dataclass(frozen=True)
-class PhaseSpec[OutputT: BaseModel]:
-    """Static semantic contract shared by all adapters for one phase."""
-
-    phase: AgentPhase
-    agent_name: str
-    description: str
-    instructions: str
-    output_type: type[OutputT]
-    required_capabilities: frozenset[RuntimeCapability]
-    limits: RunLimits
-    skills: tuple[SkillSpec, ...] = ()
+def _validate_issue_collection(
+    value: IssueCollectionInfo,
+    authority: object,
+    workspace_root: Path,
+) -> list[str]:
+    if not isinstance(authority, IssueCollectionAuthority):  # pragma: no cover - AgentTask enforces this.
+        return ["Issue Collection output received the wrong Phase Authority"]
+    return validate_issue_checkout(value, workspace_root=workspace_root)
 
 
-ISSUE_COLLECTION_SPEC = PhaseSpec(
-    phase=AgentPhase.ISSUE_COLLECTION,
-    agent_name="Issue Collector",
-    description="Collects issue evidence, resolves commits, and prepares the repository checkout.",
-    instructions=_instructions("issue_collector.md"),
-    output_type=IssueCollectionInfo,
-    required_capabilities=frozenset(
-        {
-            RuntimeCapability.STRUCTURED_OUTPUT,
-            RuntimeCapability.ISSUE_RESEARCH,
-            RuntimeCapability.WEB_RESEARCH,
-            RuntimeCapability.REPOSITORY_CHECKOUT,
-        }
-    ),
-    limits=ISSUE_COLLECTION_LIMITS,
-)
-
-ROOT_CAUSE_SPEC = PhaseSpec(
-    phase=AgentPhase.ROOT_CAUSE,
-    agent_name="Root Cause Analyzer",
-    description="Finds the code-level root cause and writes persistent minimal cases.",
-    instructions=_instructions("root_cause_analyzer.md"),
-    output_type=RootCauseAnalysis,
-    required_capabilities=frozenset(
-        {
-            RuntimeCapability.STRUCTURED_OUTPUT,
-            RuntimeCapability.WORKSPACE_READ,
-            RuntimeCapability.WORKSPACE_WRITE,
-        }
-    ),
-    limits=ROOT_CAUSE_LIMITS,
-)
-
-RULE_GENERATION_SPEC = PhaseSpec(
-    phase=AgentPhase.RULE_GENERATION,
-    agent_name="Rule Generator",
-    description=(
-        "Produces the complete variant-analysis checking specification and rules "
-        "for detecting code issues corresponding to the authoritative RCA; "
-        "delegates only executable query synthesis."
-    ),
-    instructions=_instructions("rule_generator.md"),
-    output_type=VASCoreInfo,
-    required_capabilities=frozenset(
-        {
-            RuntimeCapability.STRUCTURED_OUTPUT,
-            RuntimeCapability.WORKSPACE_READ,
-            RuntimeCapability.AST_GREP,
-            RuntimeCapability.SKILLS,
-            RuntimeCapability.AGENT_DELEGATION,
-        }
-    ),
-    limits=RULE_GENERATION_LIMITS,
-    skills=(SkillSpec(name="ast-grep", root=_SKILLS_DIR / "ast-grep"),),
-)
-
-AST_GREP_SYNTHESIS_SPEC = PhaseSpec(
-    phase=AgentPhase.AST_GREP_SYNTHESIS,
-    agent_name="AST-Grep Synthesizer",
-    description=(
-        "Compiles one target structural intent from a complete read-only plan "
-        "into one ast-grep anchor."
-    ),
-    instructions=_instructions("ast_grep_synthesizer.md"),
-    output_type=AnchorSynthesisRunResult,
-    required_capabilities=frozenset(
-        {
-            RuntimeCapability.STRUCTURED_OUTPUT,
-            RuntimeCapability.WORKSPACE_READ,
-            RuntimeCapability.AST_GREP,
-            RuntimeCapability.SKILLS,
-        }
-    ),
-    limits=DEFAULT_SYNTHESIZER_LIMITS,
-    skills=(SkillSpec(name="ast-grep", root=_SKILLS_DIR / "ast-grep"),),
-)
-
-PHASE_SPECS = MappingProxyType(
-    {
-        spec.phase: spec
-        for spec in (
-            ISSUE_COLLECTION_SPEC,
-            ROOT_CAUSE_SPEC,
-            RULE_GENERATION_SPEC,
-            AST_GREP_SYNTHESIS_SPEC,
-        )
-    }
-)
-
-
-def _issue_output_errors(value: IssueCollectionInfo, context: TaskContext) -> list[str]:
-    return validate_issue_checkout(value, workspace_root=context.workspace_root)
-
-
-def _root_cause_output_errors(value: RootCauseAnalysis, context: TaskContext) -> list[str]:
-    errors: list[str] = []
-    if context.source_root is None:
-        errors.append("source_root is required to validate root-cause output")
-    if context.cases_dir is None:
-        errors.append("cases_dir is required to validate root-cause output")
-    if errors:
-        return errors
-    assert context.source_root is not None
-    assert context.cases_dir is not None
+def _validate_root_cause(
+    value: RootCauseAnalysis,
+    authority: object,
+    _workspace_root: Path,
+) -> list[str]:
+    if not isinstance(authority, RootCauseAuthority):  # pragma: no cover - AgentTask enforces this.
+        return ["RCA output received the wrong Phase Authority"]
     return validate_root_cause_analysis(
         value,
-        source_root=context.source_root,
-        cases_dir=context.cases_dir,
+        source_root=authority.source_root,
+        cases_dir=authority.cases_dir,
     )
 
 
-def _rule_output_errors(value: VASCoreInfo, context: TaskContext) -> list[str]:
-    errors: list[str] = []
-    if context.source_root is None:
-        errors.append("source_root is required to validate rule output")
-    if context.cases_dir is None:
-        errors.append("cases_dir is required to validate rule output")
-    if context.root_cause is None:
-        errors.append("root_cause is required to validate rule output")
-    if errors:
-        return errors
-    assert context.source_root is not None
-    assert context.cases_dir is not None
-    assert context.root_cause is not None
+def _validate_rule_generation(
+    value: VASCoreInfo,
+    authority: object,
+    _workspace_root: Path,
+) -> list[str]:
+    if not isinstance(authority, RuleGenerationAuthority):  # pragma: no cover - AgentTask enforces this.
+        return ["Rule Generation output received the wrong Phase Authority"]
     return validate_vas_core(
         value,
-        source_root=context.source_root,
-        cases_dir=context.cases_dir,
-        root_cause=context.root_cause,
-        analysis_subject=context.analysis_subject,
+        source_root=authority.source_root,
+        cases_dir=authority.cases_dir,
+        root_cause=authority.root_cause,
+        grounding_policy=authority.grounding_policy,
     )
 
 
-def _task[OutputT: BaseModel](
-    spec: PhaseSpec[OutputT],
+def _validate_anchor_synthesis(
+    value: AnchorSynthesisDelta,
+    authority: object,
+    _workspace_root: Path,
+) -> tuple[str, ...]:
+    if not isinstance(authority, AnchorSynthesisAuthority):  # pragma: no cover - AgentTask enforces this.
+        return ("Anchor Synthesis output received the wrong Phase Authority",)
+    intent = next(
+        (item for item in authority.plan.intents if item.id == authority.target_anchor_id),
+        None,
+    )
+    if intent is None:  # pragma: no cover - task factory constructs both together.
+        return (f"unknown target intent {authority.target_anchor_id!r}",)
+    if value.target_anchor_id != intent.id or value.query_weight > intent.behavior_weight:
+        return (f"synthesis output drifted from target intent {intent.id!r}",)
+    return ()
+
+
+ISSUE_COLLECTION = PhaseDefinition(
+    phase=AgentPhase.ISSUE_COLLECTION,
+    agent_name="Issue Collector",
+    description="Collect issue evidence, resolve revisions, and prepare one verified checkout.",
+    instructions=_instructions("issue_collector.md"),
+    output_type=IssueCollectionInfo,
+    tools=(
+        "fetch_cve",
+        "fetch_github_issue",
+        "parse_commit",
+        "clone_repo",
+        "search_commit_by_tag",
+        "search_commit_by_time",
+        "web_search",
+        "web_fetch",
+    ),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_ISSUE_COLLECTION, output_retries=2),
+    validator=_validate_issue_collection,
+)
+
+ROOT_CAUSE = PhaseDefinition(
+    phase=AgentPhase.ROOT_CAUSE,
+    agent_name="Root Cause Analyzer",
+    description="Establish the causal chain and write the declared Case Artifacts.",
+    instructions=_instructions("root_cause_analyzer.md"),
+    output_type=RootCauseAnalysis,
+    tools=(
+        "list_src_files",
+        "search_src_files",
+        "read_src_file",
+        "list_case_artifacts",
+        "read_case_artifact",
+        "write_case_artifact",
+    ),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_ROOT_CAUSE, output_retries=2),
+    validator=_validate_root_cause,
+)
+
+RULE_GENERATION = PhaseDefinition(
+    phase=AgentPhase.RULE_GENERATION,
+    agent_name="Rule Generator",
+    description="Own rule semantics and a complete queryless Anchor Plan.",
+    instructions=_instructions("rule_generator.md"),
+    output_type=VASCoreInfo,
+    tools=("list_case_artifacts", "read_case_artifact", "synthesize_anchor_plan"),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_RULE_GENERATION, output_retries=2),
+    validator=_validate_rule_generation,
+)
+
+AST_GREP_SYNTHESIS = PhaseDefinition(
+    phase=AgentPhase.AST_GREP_SYNTHESIS,
+    agent_name="AST-Grep Synthesizer",
+    description="Compile one target intent into query-only fields.",
+    instructions=_instructions("ast_grep_synthesizer.md"),
+    output_type=AnchorSynthesisDelta,
+    tools=(
+        "list_src_files",
+        "search_src_files",
+        "read_src_file",
+        "list_case_artifacts",
+        "read_case_artifact",
+        "list_skill_resources",
+        "read_skill_resource",
+        "run_ast_grep_query",
+    ),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_PER_ANCHOR, output_retries=2),
+    validator=_validate_anchor_synthesis,
+)
+
+PHASE_DEFINITIONS = MappingProxyType(
+    {definition.phase: definition for definition in (ISSUE_COLLECTION, ROOT_CAUSE, RULE_GENERATION, AST_GREP_SYNTHESIS)}
+)
+
+
+def _root_cause_input_policy(
     *,
-    task_id: str,
-    prompt: str,
-    input_instructions: str = "",
-    context: TaskContext,
-    workspace: WorkspacePolicy,
-    output_validator: OutputValidator[OutputT],
-    required_capabilities: frozenset[RuntimeCapability] | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> AgentTask[OutputT]:
-    return AgentTask(
-        task_id=task_id,
-        phase=spec.phase,
-        agent_name=spec.agent_name,
-        description=spec.description,
-        instructions=spec.instructions,
-        input_instructions=input_instructions,
-        prompt=prompt,
-        output_type=spec.output_type,
-        context=context,
-        workspace=workspace,
-        required_capabilities=required_capabilities or spec.required_capabilities,
-        limits=spec.limits,
-        skills=spec.skills,
-        metadata=metadata or {},
-        output_validator=output_validator,
-    )
+    source: IssueCollectionInfo | ExampleSuiteIntake,
+    source_root: Path,
+) -> str:
+    bound_root = source_root.resolve().as_posix()
+    if isinstance(source, ExampleSuiteIntake):
+        manifest = (
+            f" The suite manifest is `{source.manifest_path}`."
+            if source.manifest_path is not None
+            else " No suite manifest is present."
+        )
+        return f"""# Input Context
 
+## Example Suite snapshot
 
-def _root_cause_input_instructions(*, source_type: str, fixed_revision: bool) -> str:
-    if source_type == "example_suite":
-        return """# Input Policy
-
-## Example suite
-
-- Treat comments and good/bad/CWE labels as comparison and navigation hints, not conclusions.
-- Compare good and bad examples by code behavior and record the complete set of concrete bad spans.
-- Describe an observed good-example fix, or label the fixing invariant explicitly as inferred.
-"""
-    if fixed_revision:
-        return """# Input Policy
-
-## Issue with a verified fixed revision
-
-- Inspect the narrowest useful buggy-to-fixed diff before broad exploration.
-- Treat diff and source behavior as stronger evidence than issue prose.
-"""
-    return """# Input Policy
-
-## Issue without a verified fixed revision
-
-- Use bounded source exploration to establish the causal chain.
-- Label the fixing invariant explicitly as inferred because no fixed revision is available.
+- The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
+- `src` is an immutable Example Suite snapshot, not a repository checkout. Discover its flat or nested contents with the scoped source tools.{manifest}
+- The suite is a flexible collection of demonstrations that share one defect pattern. Files may be flat or nested, and there may be many bad/unsafe cases.
+- The suite may distinguish bad/unsafe from good/safe cases through filenames, directories, comments, labels, or its manifest. Treat those markers as navigation hints and verify behavior in the source.
+- Analyze and record every concrete bad/unsafe span. Use good/safe cases only as contrastive evidence for isolating the violated invariant; do not emit them as `buggy_components` or Case Artifacts.
+- Mark the fixing invariant as inferred unless the suite directly demonstrates the corresponding safe behavior.
 """
 
+    fixed_context = ""
+    if source.fixed_commit is not None:
+        fixed_context = f"""
+- A verified comparison branch `fixed` exists at commit `{source.fixed_commit}`. The `read_patch_diff` tool compares `buggy` to `fixed`; call it without a path for a changed-file overview, then inspect the narrowest relevant path. Use the change to locate the cause quickly, and confirm the causal behavior in the buggy source.
+"""
+    else:
+        fixed_context = """
+- No verified fixed revision or patch-diff tool is available. Establish the causal chain from bounded source exploration and mark the fixing invariant explicitly as inferred.
+"""
+    return f"""# Input Context
 
-def _rule_input_instructions(subject: AnalysisSubject) -> str:
-    if subject.type == "example_suite":
+## Repository checkout
+
+- The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
+- `src` is a verified Git repository checkout. Its active `buggy` branch is commit `{source.buggy_commit}`; source reads therefore show the affected revision.
+{fixed_context}"""
+
+
+def _rule_input_policy(grounding: GroundingPolicy) -> str:
+    if grounding is GroundingPolicy.BAD_SPAN_COVERAGE:
         return """# Input Policy
 
-## Example-suite grounding
+## Example Suite grounding
 
-- Design intents from the RCA-declared bad spans.
-- The finalized anchor batch must collectively cover every RCA-declared bad span.
+- Design intents from RCA-declared bad spans.
+- The accepted Anchor Plan must collectively cover every declared bad span.
 """
     return """# Input Policy
 
 ## Issue grounding
 
-- Design intents from the RCA-declared repository spans.
-- Every synthesized query must overlap its applicable RCA-declared repository span.
+- Design intents from RCA-declared repository spans.
+- Every enabled synthesized query must overlap an applicable declared span.
 """
 
 
-def _workspace_layout(workspace_root: Path, cases_dir: Path) -> dict[str, str]:
+def _workspace_layout(workspace_root: Path, source_root: Path, cases_dir: Path) -> dict[str, str]:
     return {
-        "src": (workspace_root / "src").resolve().as_posix(),
+        "workspace": workspace_root.resolve().as_posix(),
+        "src": source_root.resolve().as_posix(),
         "cases": cases_dir.resolve().as_posix(),
     }
 
 
 def make_issue_collection_task(
-    issue_input: str,
+    issue_reference: str,
     *,
     workspace_root: Path,
-    output_root: Path | None = None,
-    input_id: str | None = None,
-    trace_id: str | None = None,
     task_id: str | None = None,
 ) -> AgentTask[IssueCollectionInfo]:
-    """Build one evidence collection and checkout task."""
-
-    issue_input = issue_input.strip()
-    if not issue_input:
-        raise ValueError("issue_input must be non-empty")
-    return _task(
-        ISSUE_COLLECTION_SPEC,
-        task_id=task_id or f"issue-collection:{issue_input}",
-        prompt=json.dumps({"issue_input": issue_input}, ensure_ascii=False, indent=2),
-        context=TaskContext(
-            workspace_root=workspace_root,
-            output_root=output_root,
-            input_id=input_id,
-            trace_id=trace_id,
-        ),
-        workspace=WorkspacePolicy(
-            cwd=workspace_root,
-            native_workspace_access=FileAccess.NONE,
-            allow_network=True,
-        ),
-        output_validator=_issue_output_errors,
-        metadata={"issue_input": issue_input},
+    reference = issue_reference.strip()
+    if not reference:
+        raise ValueError("issue_reference must be non-empty")
+    return AgentTask(
+        task_id=task_id or f"issue-collection:{reference}",
+        definition=ISSUE_COLLECTION,
+        authority=IssueCollectionAuthority(reference),
+        prompt=json.dumps({"issue_reference": reference}, ensure_ascii=False, indent=2),
+        workspace_root=workspace_root,
     )
 
 
 def make_root_cause_task(
-    collection: IssueCollectionInfo,
-    *,
-    workspace_root: Path,
-    repo_path: Path,
-    cases_dir: Path,
-    output_root: Path | None = None,
-    input_id: str | None = None,
-    trace_id: str | None = None,
-    task_id: str | None = None,
-) -> AgentTask[RootCauseAnalysis]:
-    """Build one issue-backed RCA task over a real Git checkout."""
-
-    subject = AnalysisSubject(
-        type="issue",
-        source_root=repo_path.resolve().as_posix(),
-        cases_dir=cases_dir.resolve().as_posix(),
-        grounding_policy="repo_evidence",
-        provenance={
-            "issue_id": collection.issue_id,
-            "repo_url": collection.repo_url,
-            "buggy_commit": collection.buggy_commit,
-            "fixed_commit": collection.fixed_commit,
-        },
-    )
-    prompt = json.dumps(
-        {
-            "intake": {
-                "type": "issue",
-                "issue_summary": collection.issue_summary,
-                "issue_details": collection.issue_details,
-                "fixed_revision_available": collection.fixed_commit is not None,
-            },
-            "analysis_subject": subject.model_dump(mode="json"),
-            "workspace_layout": _workspace_layout(workspace_root, cases_dir),
-        },
-        indent=2,
-    )
-    capabilities = set(ROOT_CAUSE_SPEC.required_capabilities)
-    if collection.fixed_commit is not None:
-        capabilities.add(RuntimeCapability.FIXED_DIFF)
-    return _task(
-        ROOT_CAUSE_SPEC,
-        task_id=task_id or "root-cause",
-        prompt=prompt,
-        input_instructions=_root_cause_input_instructions(
-            source_type="issue",
-            fixed_revision=collection.fixed_commit is not None,
-        ),
-        context=TaskContext(
-            workspace_root=workspace_root,
-            output_root=output_root,
-            input_id=input_id,
-            trace_id=trace_id,
-            source_root=repo_path,
-            repo_path=repo_path,
-            cases_dir=cases_dir,
-            analysis_subject=subject,
-        ),
-        workspace=WorkspacePolicy(
-            cwd=workspace_root,
-            native_workspace_access=FileAccess.READ_WRITE,
-        ),
-        required_capabilities=frozenset(capabilities),
-        output_validator=_root_cause_output_errors,
-        metadata={
-            "source_type": "issue",
-            "fixed_revision_available": collection.fixed_commit is not None,
-        },
-    )
-
-
-def make_example_suite_root_cause_task(
-    intake: ExampleSuiteIntake,
+    source: IssueCollectionInfo | ExampleSuiteIntake,
     *,
     workspace_root: Path,
     source_root: Path,
     cases_dir: Path,
-    output_root: Path | None = None,
-    input_id: str | None = None,
-    trace_id: str | None = None,
+    grounding_policy: GroundingPolicy,
     task_id: str | None = None,
 ) -> AgentTask[RootCauseAnalysis]:
-    """Build one RCA task over a copied example-suite snapshot."""
-
-    portable_provenance = {
-        "registry_key": intake.registry_key,
-        "suite_name": intake.suite_name,
-        "content_digest": intake.content_digest,
-        "snapshot_ref": intake.snapshot_ref,
-        "files": [item.model_dump(mode="json") for item in intake.files],
-    }
-    subject = AnalysisSubject(
-        type="example_suite",
-        source_root=source_root.resolve().as_posix(),
-        cases_dir=cases_dir.resolve().as_posix(),
-        grounding_policy="bad_span_coverage",
-        provenance=portable_provenance,
+    is_issue = isinstance(source, IssueCollectionInfo)
+    fixed_revision = is_issue and source.fixed_commit is not None
+    repo_path = source_root if is_issue else None
+    if is_issue:
+        intake: dict[str, object] = {
+            "type": "issue",
+            "source_layout": "repository_checkout",
+            "issue_id": source.issue_id,
+            "issue_summary": source.issue_summary,
+            "issue_details": source.issue_details,
+            "repo_url": source.repo_url,
+            "buggy_commit": source.buggy_commit,
+            "fixed_commit": source.fixed_commit,
+            "fixed_revision_available": fixed_revision,
+        }
+    else:
+        intake = {
+            "type": "example_suite",
+            "source_layout": "example_suite_snapshot",
+            "registry_key": source.registry_key,
+            "suite_name": source.suite_name,
+            "content_digest": source.content_digest,
+            "snapshot_ref": source.snapshot_ref,
+            "file_count": source.file_count,
+            "source_file_count": len(source.source_files),
+            "manifest_path": source.manifest_path,
+        }
+    authority = RootCauseAuthority(
+        source_root=source_root,
+        cases_dir=cases_dir,
+        grounding_policy=grounding_policy,
+        repo_path=repo_path,
+        fixed_diff=bool(fixed_revision),
     )
-    prompt = json.dumps(
-        {
-            "intake": {
-                "type": "example_suite",
-                **portable_provenance,
-                "language": intake.language.value,
-                "source_files": intake.source_files,
-                "manifest_path": intake.manifest_path,
+    return AgentTask(
+        task_id=task_id or ("root-cause" if is_issue else f"example-suite-root-cause:{source.suite_name}"),
+        definition=ROOT_CAUSE,
+        authority=authority,
+        prompt=json.dumps(
+            {
+                "intake": intake,
+                "grounding_policy": grounding_policy.value,
+                "src_tools": {
+                    "root": source_root.resolve().as_posix(),
+                    "path_arguments": "relative_to_root",
+                },
+                "workspace_layout": _workspace_layout(workspace_root, source_root, cases_dir),
             },
-            "analysis_subject": subject.model_dump(mode="json"),
-            "workspace_layout": _workspace_layout(workspace_root, cases_dir),
-        },
-        indent=2,
-    )
-    return _task(
-        ROOT_CAUSE_SPEC,
-        task_id=task_id or f"example-suite-root-cause:{intake.suite_name}",
-        prompt=prompt,
-        input_instructions=_root_cause_input_instructions(
-            source_type="example_suite",
-            fixed_revision=False,
+            ensure_ascii=False,
+            indent=2,
         ),
-        context=TaskContext(
-            workspace_root=workspace_root,
-            output_root=output_root,
-            input_id=input_id,
-            trace_id=trace_id,
+        workspace_root=workspace_root,
+        input_policy=_root_cause_input_policy(
+            source=source,
             source_root=source_root,
-            repo_path=None,
-            cases_dir=cases_dir,
-            analysis_subject=subject,
         ),
-        workspace=WorkspacePolicy(
-            cwd=workspace_root,
-            native_workspace_access=FileAccess.READ_WRITE,
-        ),
-        output_validator=_root_cause_output_errors,
-        metadata={
-            "source_type": "example_suite",
-            "example_suite": portable_provenance,
-            "fixed_revision_available": False,
-        },
+        extra_tools=("read_patch_diff",) if authority.fixed_diff else (),
     )
 
 
@@ -479,152 +336,97 @@ def make_rule_generation_task(
     *,
     workspace_root: Path,
     source_root: Path,
-    repo_path: Path | None,
     cases_dir: Path,
-    analysis_subject: AnalysisSubject,
-    output_root: Path | None = None,
-    input_id: str | None = None,
-    trace_id: str | None = None,
+    grounding_policy: GroundingPolicy,
     task_id: str | None = None,
 ) -> AgentTask[VASCoreInfo]:
-    """Build a complete variant-analysis specification task with query delegation."""
-
-    prompt = json.dumps(
-        {
-            "root_cause_analysis": root_cause.model_dump(mode="json"),
-            "workspace_layout": _workspace_layout(workspace_root, cases_dir),
-            "filesystem_authority": {
-                "src": "synthesizer_only",
-                "cases": "read_only",
-            },
-        },
-        indent=2,
+    authority = RuleGenerationAuthority(
+        source_root=source_root,
+        cases_dir=cases_dir,
+        grounding_policy=grounding_policy,
+        root_cause=root_cause,
     )
-    return _task(
-        RULE_GENERATION_SPEC,
+    return AgentTask(
         task_id=task_id or "rule-generation",
-        prompt=prompt,
-        input_instructions=_rule_input_instructions(analysis_subject),
-        context=TaskContext(
-            workspace_root=workspace_root,
-            output_root=output_root,
-            input_id=input_id,
-            trace_id=trace_id,
-            source_root=source_root,
-            repo_path=repo_path,
-            cases_dir=cases_dir,
-            root_cause=root_cause,
-            analysis_subject=analysis_subject,
-        ),
-        workspace=WorkspacePolicy(
-            cwd=workspace_root,
-            native_workspace_access=FileAccess.READ_ONLY,
-        ),
-        output_validator=_rule_output_errors,
-        metadata={
-            "source_type": analysis_subject.type,
-            "synthesizer_limits": {
-                "request_limit": DEFAULT_SYNTHESIZER_LIMITS.request_limit,
-                "output_retries": DEFAULT_SYNTHESIZER_LIMITS.output_retries,
+        definition=RULE_GENERATION,
+        authority=authority,
+        prompt=json.dumps(
+            {
+                "authoritative_root_cause": root_cause.model_dump(mode="json"),
+                "workspace_layout": _workspace_layout(workspace_root, source_root, cases_dir),
+                "authority": {"src": "synthesizer_only", "cases": "read_only"},
             },
-        },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        workspace_root=workspace_root,
+        input_policy=_rule_input_policy(grounding_policy),
     )
-
-
-def _synthesis_grounding(subject: AnalysisSubject) -> dict[str, str]:
-    if subject.grounding_policy == "repo_evidence":
-        requirement = (
-            "Confirm that the target query overlaps at least one applicable "
-            "source span declared by the authoritative root-cause analysis."
-        )
-    else:
-        requirement = (
-            "Confirm that the target query matches at least one applicable bad "
-            "source span declared by the authoritative root-cause analysis; "
-            "do not use a good-example-only site as grounding."
-        )
-    return {
-        "policy": subject.grounding_policy,
-        "requirement": requirement,
-    }
 
 
 def make_ast_grep_synthesis_task(
-    request: AnchorSynthesisRequest,
+    plan: AnchorPlan,
     intent: AnchorIntent,
     *,
     workspace_root: Path,
     source_root: Path,
-    repo_path: Path | None,
     cases_dir: Path,
-    analysis_subject: AnalysisSubject,
-    output_root: Path | None = None,
-    input_id: str | None = None,
-    trace_id: str | None = None,
-    model_hint: str | None = None,
+    grounding_policy: GroundingPolicy,
+    root_cause: RootCauseAnalysis,
     task_id: str | None = None,
-    skill: SkillSpec | None = None,
-    limits: RunLimits = DEFAULT_SYNTHESIZER_LIMITS,
-) -> AgentTask[AnchorSynthesisRunResult]:
-    """Build one runtime-neutral, per-intent AST-Grep Synthesizer task."""
-
-    run_request = AnchorSynthesisRunRequest(
-        root_cause=request.root_cause,
-        summary=request.summary,
-        anchor_plan=request.anchor_intents,
-        target_anchor_id=intent.id,
+    limits: RunLimits | None = None,
+) -> AgentTask[AnchorSynthesisDelta]:
+    position = next(
+        (index for index, item in enumerate(plan.intents, start=1) if item.id == intent.id),
+        None,
     )
-    selected_skill = skill or AST_GREP_SYNTHESIS_SPEC.skills[0]
-    prompt = json.dumps(
-        {
-            "anchor_synthesis_run_request": run_request.model_dump(mode="json"),
-            "grounding": _synthesis_grounding(analysis_subject),
-        },
-        ensure_ascii=False,
+    if position is None:
+        raise ValueError(f"intent {intent.id!r} is not present in the Anchor Plan")
+    authority = AnchorSynthesisAuthority(
+        source_root=source_root,
+        cases_dir=cases_dir,
+        grounding_policy=grounding_policy,
+        root_cause=root_cause,
+        plan=plan,
+        target_anchor_id=intent.id,
+        skill_root=AST_GREP_SKILL_ROOT,
+    )
+    requirement = (
+        "Match at least one applicable RCA-declared bad span."
+        if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
+        else "Overlap at least one applicable RCA-declared repository span."
     )
     return AgentTask(
         task_id=task_id or f"ast-grep-synthesis:{intent.id}",
-        phase=AST_GREP_SYNTHESIS_SPEC.phase,
-        agent_name=AST_GREP_SYNTHESIS_SPEC.agent_name,
-        description=AST_GREP_SYNTHESIS_SPEC.description,
-        instructions=AST_GREP_SYNTHESIS_SPEC.instructions,
-        prompt=prompt,
-        output_type=AST_GREP_SYNTHESIS_SPEC.output_type,
-        context=TaskContext(
-            workspace_root=workspace_root,
-            output_root=output_root,
-            input_id=input_id,
-            trace_id=trace_id,
-            source_root=source_root,
-            repo_path=repo_path,
-            cases_dir=cases_dir,
-            root_cause=request.root_cause,
-            analysis_subject=analysis_subject,
+        definition=replace(
+            AST_GREP_SYNTHESIS,
+            agent_name=f"AST-Grep Synthesizer [{position}/{len(plan.intents)}]",
         ),
-        workspace=WorkspacePolicy(
-            cwd=workspace_root,
-            native_workspace_access=FileAccess.READ_ONLY,
+        authority=authority,
+        prompt=json.dumps(
+            {
+                "request": {
+                    "root_cause": root_cause.model_dump(mode="json"),
+                    "plan": plan.model_dump(mode="json"),
+                    "target_anchor_id": intent.id,
+                },
+                "grounding": {"policy": grounding_policy.value, "requirement": requirement},
+            },
+            ensure_ascii=False,
+            indent=2,
         ),
-        required_capabilities=AST_GREP_SYNTHESIS_SPEC.required_capabilities,
-        limits=limits,
-        skills=(selected_skill,),
-        model_hint=model_hint,
-        metadata={"target_anchor_id": intent.id},
+        workspace_root=workspace_root,
+        limit_override=limits,
     )
 
 
 __all__ = [
-    "AST_GREP_SYNTHESIS_SPEC",
-    "DEFAULT_SYNTHESIZER_LIMITS",
-    "ISSUE_COLLECTION_SPEC",
-    "ISSUE_COLLECTION_LIMITS",
-    "PHASE_SPECS",
-    "ROOT_CAUSE_SPEC",
-    "ROOT_CAUSE_LIMITS",
-    "RULE_GENERATION_SPEC",
-    "RULE_GENERATION_LIMITS",
-    "PhaseSpec",
-    "make_example_suite_root_cause_task",
+    "AST_GREP_SKILL_ROOT",
+    "AST_GREP_SYNTHESIS",
+    "ISSUE_COLLECTION",
+    "PHASE_DEFINITIONS",
+    "ROOT_CAUSE",
+    "RULE_GENERATION",
     "make_ast_grep_synthesis_task",
     "make_issue_collection_task",
     "make_root_cause_task",

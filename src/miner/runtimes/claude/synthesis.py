@@ -1,38 +1,44 @@
-"""Claude-native configuration for delegated AST-Grep Synthesizer CLI runs."""
+"""Ephemeral Claude MCP context for host-owned Anchor synthesis."""
 
 from __future__ import annotations
 
-import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from ...agent.contracts import AgentTask, RuntimeCapability
-from ...models.anchors import AnchorSynthesisRequest, AnchorSynthesisRunResult
-from ..shared.synthesis import (
-    AnchorSynthesisContext,
-    AnchorSynthesisDelegator,
+from ...agent.contracts import AgentTask, RuleGenerationAuthority
+from ...models.analysis import GroundingPolicy, RootCauseAnalysis
+from ...models.anchors import AnchorPlan, AnchorSynthesisResult
+from ...mining.synthesis import (
+    AnchorPlanError,
+    AnchorSynthesisLimitError,
+    AnchorSynthesisSession,
 )
-from .config import DEFAULT_ENV_ALLOWLIST, ClaudeCodeConfig
+from ...utils.log import RuntimeLog
+from ...utils.workspace import atomic_write_json
+from .config import ClaudeCodeConfig
+from .process import clip, redact
 
-ClaudeSynthesisHandler = Callable[
-    [AnchorSynthesisRequest],
-    Awaitable[list[AnchorSynthesisRunResult]],
-]
+ClaudeSynthesisHandler = Callable[[AnchorPlan], Awaitable[list[AnchorSynthesisResult]]]
 
 
 class ClaudeSynthesisHostContext(BaseModel):
-    """Private payload used by the Rule Generator MCP delegation host."""
+    """Minimal private payload needed to launch same-runtime child Agents."""
 
     model_config = ConfigDict(extra="forbid")
 
-    synthesis: AnchorSynthesisContext
+    workspace_root: Path
+    source_root: Path
+    cases_dir: Path
+    grounding_policy: GroundingPolicy
+    root_cause: RootCauseAnalysis
+    receipt_path: Path
+    failure_path: Path
     executable: str
     model: str | None = None
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
-    output_format: Literal["json", "stream-json"] = "stream-json"
     project_root: Path
     mcp_python: Path | None = None
     default_timeout_seconds: float
@@ -41,9 +47,6 @@ class ClaudeSynthesisHostContext(BaseModel):
     max_stderr_bytes: int
     max_repair_attempts: int
     max_repair_payload_chars: int
-    artifact_root: Path | None = None
-    environment: dict[str, str] = Field(default_factory=dict)
-    capabilities: list[RuntimeCapability]
 
     @classmethod
     def from_parent(
@@ -51,25 +54,23 @@ class ClaudeSynthesisHostContext(BaseModel):
         task: AgentTask[Any],
         config: ClaudeCodeConfig,
         *,
-        executable: str | None = None,
-        model_id: str | None = None,
-    ) -> "ClaudeSynthesisHostContext":
-        """Capture the selected Claude runtime without provider-specific secrets."""
-
-        environment = {
-            name: value
-            for name in DEFAULT_ENV_ALLOWLIST
-            if name != "GITHUB_TOKEN"
-            and (value := os.environ.get(name)) is not None
-        }
-        environment.update(config.environment)
-        environment.pop("GITHUB_TOKEN", None)
+        receipt_path: Path,
+        failure_path: Path,
+        executable: str,
+        model_id: str,
+    ) -> ClaudeSynthesisHostContext:
+        authority = cast(RuleGenerationAuthority, task.authority)
         return cls(
-            synthesis=AnchorSynthesisContext.from_task(task),
-            executable=executable or os.fspath(config.executable),
-            model=model_id or task.model_hint or config.model,
+            workspace_root=task.workspace_root,
+            source_root=authority.source_root,
+            cases_dir=authority.cases_dir,
+            grounding_policy=authority.grounding_policy,
+            root_cause=authority.root_cause,
+            receipt_path=receipt_path,
+            failure_path=failure_path,
+            executable=executable,
+            model=model_id,
             effort=config.effort,
-            output_format=config.output_format,
             project_root=config.project_root,
             mcp_python=config.mcp_python,
             default_timeout_seconds=config.default_timeout_seconds,
@@ -78,19 +79,13 @@ class ClaudeSynthesisHostContext(BaseModel):
             max_stderr_bytes=config.max_stderr_bytes,
             max_repair_attempts=config.max_repair_attempts,
             max_repair_payload_chars=config.max_repair_payload_chars,
-            artifact_root=config.artifact_root,
-            environment=environment,
-            capabilities=sorted(config.capabilities, key=lambda item: item.value),
         )
 
     def runtime_config(self) -> ClaudeCodeConfig:
-        """Recreate only Claude adapter configuration for child CLI processes."""
-
         return ClaudeCodeConfig(
             executable=self.executable,
             model=self.model,
             effort=self.effort,
-            output_format=self.output_format,
             project_root=self.project_root,
             mcp_python=self.mcp_python,
             default_timeout_seconds=self.default_timeout_seconds,
@@ -99,42 +94,48 @@ class ClaudeSynthesisHostContext(BaseModel):
             max_stderr_bytes=self.max_stderr_bytes,
             max_repair_attempts=self.max_repair_attempts,
             max_repair_payload_chars=self.max_repair_payload_chars,
-            artifact_root=self.artifact_root,
-            environment=self.environment,
-            capabilities=frozenset(self.capabilities),
         )
 
 
 def load_claude_synthesis_handler(path: Path) -> ClaudeSynthesisHandler:
-    """Load one private host payload and return a Claude-CLI-only handler."""
-
     try:
-        context = ClaudeSynthesisHostContext.model_validate_json(
-            path.read_text(encoding="utf-8")
-        )
+        context = ClaudeSynthesisHostContext.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"invalid Claude synthesis context: {exc}") from exc
 
-    # Imported lazily to avoid the runtime -> policy -> MCP import cycle.
     from .runtime import ClaudeCodeRuntime
 
-    runtime = ClaudeCodeRuntime(context.runtime_config())
-    delegator = AnchorSynthesisDelegator(
-        context=context.synthesis,
-        execute=runtime.run,
+    runtime = ClaudeCodeRuntime(
+        context.runtime_config(),
+        runtime_log=RuntimeLog(emit_console=False),
     )
+    authority = RuleGenerationAuthority(
+        source_root=context.source_root,
+        cases_dir=context.cases_dir,
+        grounding_policy=context.grounding_policy,
+        root_cause=context.root_cause,
+    )
+    session = AnchorSynthesisSession(authority, workspace_root=context.workspace_root, execute=runtime.run)
 
-    async def synthesize(
-        request: AnchorSynthesisRequest,
-    ) -> list[AnchorSynthesisRunResult]:
-        batch = await delegator.synthesize(request)
-        return list(batch.results)
+    async def synthesize(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
+        try:
+            results = await session.synthesize(plan)
+        except (AnchorPlanError, AnchorSynthesisLimitError):
+            raise
+        except Exception as exc:
+            atomic_write_json(
+                context.failure_path,
+                {
+                    "type": type(exc).__name__,
+                    "message": redact(clip(str(exc), 2_000)),
+                },
+            )
+            raise
+        assert session.receipt is not None
+        atomic_write_json(context.receipt_path, session.receipt.model_dump(mode="json"))
+        return results
 
     return synthesize
 
 
-__all__ = [
-    "ClaudeSynthesisHandler",
-    "ClaudeSynthesisHostContext",
-    "load_claude_synthesis_handler",
-]
+__all__ = ["ClaudeSynthesisHandler", "ClaudeSynthesisHostContext", "load_claude_synthesis_handler"]

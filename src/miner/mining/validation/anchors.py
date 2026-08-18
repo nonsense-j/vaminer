@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from ...anchors.scanner import AnchorMatch, AnchorScanError, scan_anchors
-from ...models.analysis import AnalysisSubject, RootCauseAnalysis
+from ...anchors.scanner import AnchorMatch, AnchorQueryError, scan_anchors
+from ...models.analysis import GroundingPolicy, RootCauseAnalysis
 from ...models.vas import VASCoreInfo
 from .analysis import (
     root_cause_source_spans,
@@ -89,7 +89,7 @@ def _format_missing_case_evidence(cases_dir: Path, missing_cases: Sequence[str])
 def _format_rca_target_evidence(
     root_cause: RootCauseAnalysis,
     *,
-    analysis_subject: AnalysisSubject,
+    grounding_policy: GroundingPolicy,
 ) -> str:
     """Render the bounded set of source sites accepted by grounding validation."""
     all_components = root_cause_source_spans(root_cause)
@@ -105,7 +105,7 @@ def _format_rca_target_evidence(
         rendered.append(f"... <{omitted} RCA components omitted>")
     label = (
         "accepted RCA bad-span target sites"
-        if analysis_subject.type == "example_suite"
+        if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
         else "accepted RCA repository target sites"
     )
     return f"{label} (match must overlap at least one):\n" + "\n\n".join(rendered)
@@ -158,28 +158,28 @@ def validate_anchors(
     source_root: Path | None = None,
     cases_dir: Path,
     root_cause: RootCauseAnalysis,
-    analysis_subject: AnalysisSubject,
+    grounding_policy: GroundingPolicy,
 ) -> list[str]:
     """Run ast-grep and validate every enabled anchor in the final VAS."""
     source_path = source_root or repo_path
     if source_path is None:
         return ["source_root or repo_path is required to validate anchors"]
-    errors = validate_root_cause_analysis(
-        root_cause,
-        source_root=source_path,
-        cases_dir=cases_dir,
-    )
-    if errors:
-        return errors
-
-    anchor_ids = [anchor.id for anchor in value.anchors]
-    if len(anchor_ids) != len(set(anchor_ids)):
-        errors.append("anchor ids must be unique")
+    errors: list[str] = []
     if value.language != root_cause.language:
         errors.append(
             f"rule language {value.language.value} does not match RCA language "
             f"{root_cause.language.value}"
         )
+    errors.extend(
+        validate_root_cause_analysis(
+            root_cause,
+            source_root=source_path,
+            cases_dir=cases_dir,
+        )
+    )
+    anchor_ids = [anchor.id for anchor in value.anchors]
+    if len(anchor_ids) != len(set(anchor_ids)):
+        errors.append("anchor ids must be unique")
     if errors:
         return errors
 
@@ -192,10 +192,10 @@ def validate_anchors(
     try:
         case_scan = scan_anchors(serialized, cases_dir, root_cause.language.value)
         source_scan = scan_anchors(serialized, source_path, root_cause.language.value)
-    except (AnchorScanError, FileNotFoundError, ValueError, OSError) as exc:
+    except AnchorQueryError as exc:
         return [
             f"ast-grep validation failed: {exc}",
-            _format_rca_target_evidence(root_cause, analysis_subject=analysis_subject),
+            _format_rca_target_evidence(root_cause, grounding_policy=grounding_policy),
         ]
 
     case_files = sorted(
@@ -232,7 +232,7 @@ def validate_anchors(
                 )
             )
 
-    if analysis_subject.type == "example_suite":
+    if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE:
         uncovered_spans = [
             f"{span.file}:{span.start_line}-{span.end_line}"
             for span in root_cause_source_spans(root_cause)
@@ -252,7 +252,7 @@ def validate_anchors(
                     + ", ".join(uncovered_spans),
                     _format_rca_target_evidence(
                         root_cause,
-                        analysis_subject=analysis_subject,
+                        grounding_policy=grounding_policy,
                     ),
                 )
             )
@@ -283,7 +283,7 @@ def validate_anchors(
                         ),
                         _format_rca_target_evidence(
                             root_cause,
-                            analysis_subject=analysis_subject,
+                            grounding_policy=grounding_policy,
                         ),
                     )
                 )

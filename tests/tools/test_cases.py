@@ -43,3 +43,19 @@ def test_case_artifacts_are_bounded_and_top_level_only(tmp_path: Path):
         write_case_artifact(cases, "notes.c", "bad\n")
     with pytest.raises(ValueError, match="non-empty"):
         write_case_artifact(cases, "case2.c", " \n")
+
+
+def test_case_read_past_eof_returns_recovery_information(tmp_path: Path):
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    (cases / "case1.c").write_text("line1\nline2\n", encoding="utf-8")
+
+    assert read_case_artifact(cases, "case1.c", start_line=120, end_line=160) == {
+        "path": "case1.c",
+        "content": "",
+        "start_line": 120,
+        "end_line": 2,
+        "total_lines": 2,
+        "truncated": False,
+        "message": "start_line 120 is past EOF; case1.c has 2 lines; no content was returned",
+    }

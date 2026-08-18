@@ -1,17 +1,17 @@
 """Runtime-neutral Miner models."""
 
 from .analysis import (
-    AnalysisSubject,
     AstGrepLanguage,
     BuggyComponent,
+    GroundingPolicy,
     RootCauseAnalysis,
 )
 from .anchors import (
     Anchor,
     AnchorIntent,
-    AnchorSynthesisRequest,
-    AnchorSynthesisRunRequest,
-    AnchorSynthesisRunResult,
+    AnchorPlan,
+    AnchorSynthesisDelta,
+    AnchorSynthesisResult,
     QueryType,
 )
 from .issue import (
@@ -25,6 +25,7 @@ from .vas import (
     ExampleSuiteVASSource,
     IssueCategory,
     IssueVASSource,
+    RuleGenerationDraft,
     Scenarios,
     VASCoreInfo,
     VASFull,
@@ -32,17 +33,17 @@ from .vas import (
 )
 
 __all__ = [
-    "AnalysisSubject",
     "Anchor",
     "AnchorIntent",
-    "AnchorSynthesisRequest",
-    "AnchorSynthesisRunRequest",
-    "AnchorSynthesisRunResult",
+    "AnchorPlan",
+    "AnchorSynthesisDelta",
+    "AnchorSynthesisResult",
     "AstGrepLanguage",
     "BuggyComponent",
     "CommitRawInfo",
     "ExampleSuiteFileMetadata",
     "ExampleSuiteVASSource",
+    "GroundingPolicy",
     "IssueCategory",
     "IssueCollectionInfo",
     "IssueRawInfo",
@@ -50,6 +51,7 @@ __all__ = [
     "QueryType",
     "RepoCheckout",
     "RootCauseAnalysis",
+    "RuleGenerationDraft",
     "Scenarios",
     "VASCoreInfo",
     "VASFull",

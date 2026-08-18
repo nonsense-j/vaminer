@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import subprocess
@@ -11,16 +10,16 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from git import GitCommandError, Repo
-from ..utils.config import GITHUB_MIRROR_ENABLED
+
 from ..models.issue import RepoCheckout
+from ..utils.config import GITHUB_MIRROR_ENABLED
 
 GITHUB_URL = "https://github.com/"
 GHFAST_GITHUB_URL = "https://ghfast.top/https://github.com/"
 SAFE_PATH_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
-MAX_REPO_READ_BYTES = 512 * 1024
-MAX_REPO_READ_LINES = 200
-MAX_REPO_SEARCH_RESULTS = 100
-MAX_REPO_SEARCH_BYTES = 512 * 1024
+MAX_REPO_ERROR_CHARS = 2_000
+MAX_REPO_DIFF_BYTES = 512 * 1024
+MAX_REPO_DIFF_STAT_FILES = 100
 
 
 def _parse_repo_url(url: str) -> tuple[str, str]:
@@ -122,185 +121,76 @@ def clone_repository(
     )
 
 
+def _bounded_process_error(label: str, stderr: str, returncode: int) -> RuntimeError:
+    detail = stderr.strip()[:MAX_REPO_ERROR_CHARS]
+    return RuntimeError(detail or f"{label} exited with {returncode}")
+
+
 def read_patch_diff_from_repo(
     repo_path: Path,
     path: str | None = None,
     *,
     timeout_seconds: float = 30,
 ) -> str:
-    """Read the ``buggy`` to ``fixed`` diff from one verified checkout."""
+    """Read the ``buggy`` to ``fixed`` diff from one verified checkout.
+
+    This tool is already rooted at the repository checkout. ``path`` may be a
+    file or directory relative to that root; do not include the workspace
+    checkout prefix. When omitted or resolved to the root, return a compact
+    diffstat. Otherwise return the full patch for that scope. Oversized output
+    is rejected with a request to narrow the path.
+    """
     repo_path = Path(repo_path).resolve()
     if not repo_path.is_dir():
         raise ValueError(f"repo_path is not an existing directory: {repo_path}")
-    command = ["git", "diff", "--no-ext-diff", "buggy", "fixed", "--"]
-    if path:
-        candidate = (repo_path / path).resolve()
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+
+    relative = Path(path) if path else None
+    if relative is not None and relative.is_absolute():
+        raise ValueError("diff path must be relative")
+    if relative is not None:
+        candidate = (repo_path / relative).resolve()
         try:
             relative = candidate.relative_to(repo_path)
         except ValueError as exc:
             raise ValueError(f"diff path must stay inside the repository: {path}") from exc
+        if relative == Path("."):
+            relative = None
+
+    command = ["git", "diff", "--no-ext-diff"]
+    if relative is None:
+        command.extend(("--stat", f"--stat-count={MAX_REPO_DIFF_STAT_FILES}"))
+    command.extend(("buggy", "fixed", "--"))
+    if relative is not None:
         command.append(relative.as_posix())
 
-    completed = subprocess.run(
-        command,
-        cwd=repo_path,
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or f"git diff exited with {completed.returncode}"
-        raise RuntimeError(detail)
-    return completed.stdout or f"No differences found between buggy and fixed{' for ' + path if path else '' }."
-
-
-def _repository_file_path(repo_path: Path, path: str) -> Path:
-    """Resolve one repository-relative regular file without escaping checkout."""
-    root = Path(repo_path).resolve()
-    if not root.is_dir():
-        raise ValueError(f"repo_path is not an existing directory: {root}")
-    if not path or Path(path).is_absolute():
-        raise ValueError("repository file path must be relative")
-    target = (root / path).resolve()
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"repository file must stay inside the checkout: {path}") from exc
-    original = root / path
-    if original.is_symlink():
-        raise ValueError(f"repository file must not be a symbolic link: {path}")
-    if not target.is_file():
-        raise ValueError(f"repository file does not exist: {path}")
-    return target
-
-
-def read_repository_file(
-    repo_path: Path,
-    path: str,
-    *,
-    start_line: int = 1,
-    end_line: int | None = None,
-    max_lines: int = MAX_REPO_READ_LINES,
-) -> dict[str, object]:
-    """Read a bounded line range from a repository-relative source file."""
-    target = _repository_file_path(repo_path, path)
-    if start_line < 1 or max_lines < 1:
-        raise ValueError("start_line and max_lines must be positive")
-    if target.stat().st_size > MAX_REPO_READ_BYTES:
-        raise ValueError(f"repository file exceeds the {MAX_REPO_READ_BYTES}-byte read limit: {path}")
-    lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
-    if start_line > len(lines):
-        raise ValueError(f"start_line {start_line} exceeds {path} length ({len(lines)} lines)")
-    resolved_end = min(len(lines), end_line if end_line is not None else start_line + max_lines - 1)
-    if resolved_end < start_line or resolved_end - start_line + 1 > max_lines:
-        raise ValueError(f"requested line range exceeds the {max_lines}-line read limit")
-    return {
-        "path": Path(path).as_posix(),
-        "content": "".join(lines[start_line - 1 : resolved_end]),
-        "start_line": start_line,
-        "end_line": resolved_end,
-        "total_lines": len(lines),
-        "truncated": resolved_end < len(lines),
-    }
-
-
-def search_repository_files(
-    repo_path: Path,
-    pattern: str,
-    *,
-    path: str | None = None,
-    max_results: int = MAX_REPO_SEARCH_RESULTS,
-) -> dict[str, object]:
-    """Run a bounded regex search over repository source files."""
-    root = Path(repo_path).resolve()
-    if not root.is_dir():
-        raise ValueError(f"repo_path is not an existing directory: {root}")
-    pattern = pattern.strip()
-    if not pattern or len(pattern) > 500:
-        raise ValueError("search pattern must be between 1 and 500 characters")
-    if max_results < 1 or max_results > MAX_REPO_SEARCH_RESULTS:
-        raise ValueError(f"max_results must be between 1 and {MAX_REPO_SEARCH_RESULTS}")
-    target = root
-    if path:
-        candidate = (root / path).resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError as exc:
-            raise ValueError(f"search path must stay inside the checkout: {path}") from exc
-        if not candidate.is_dir():
-            raise ValueError(f"search path is not a directory: {path}")
-        target = candidate
-
-    command = [
-        "rg",
-        "--json",
-        "--hidden",
-        "--glob",
-        "!.git/**",
-        "--color",
-        "never",
-        pattern,
-        str(target),
-    ]
     try:
         completed = subprocess.run(
             command,
-            cwd=root,
+            cwd=repo_path,
             text=True,
             capture_output=True,
-            timeout=20,
+            timeout=timeout_seconds,
             check=False,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError("repository search requires rg") from exc
-    if len(completed.stdout.encode("utf-8", errors="replace")) > MAX_REPO_SEARCH_BYTES:
-        raise ValueError(f"repository search output exceeds the {MAX_REPO_SEARCH_BYTES}-byte limit")
-    if completed.returncode not in (0, 1):
-        raise RuntimeError(completed.stderr.strip() or f"rg exited with {completed.returncode}")
-
-    matches: list[dict[str, object]] = []
-    for line in completed.stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") != "match":
-            continue
-        data = event.get("data")
-        if not isinstance(data, dict):
-            continue
-        path_data = data.get("path")
-        line_number = data.get("line_number")
-        lines_data = data.get("lines")
-        if not isinstance(path_data, dict) or not isinstance(line_number, int) or not isinstance(lines_data, dict):
-            continue
-        absolute = path_data.get("text")
-        text = lines_data.get("text")
-        if not isinstance(absolute, str) or not isinstance(text, str):
-            continue
-        try:
-            relative = Path(absolute).resolve().relative_to(root).as_posix()
-        except ValueError:
-            continue
-        matches.append({"file": relative, "line": line_number, "text": text.rstrip("\n")})
-        if len(matches) >= max_results:
-            break
-    return {
-        "pattern": pattern,
-        "path": Path(path).as_posix() if path else ".",
-        "matches": matches,
-        "truncated": len(matches) >= max_results,
-    }
+        raise RuntimeError("repository diff requires git on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"repository diff timed out after {timeout_seconds:g} seconds") from exc
+    if completed.returncode != 0:
+        raise _bounded_process_error("git diff", completed.stderr, completed.returncode)
+    if len(completed.stdout.encode("utf-8", errors="replace")) > MAX_REPO_DIFF_BYTES:
+        raise ValueError(
+            f"repository diff output exceeds the {MAX_REPO_DIFF_BYTES}-byte limit; use a narrower path"
+        )
+    scope = f" for {relative.as_posix()}" if relative is not None else ""
+    return completed.stdout or f"No differences found between buggy and fixed{scope}."
 
 
 __all__ = [
-    "MAX_REPO_READ_BYTES",
-    "MAX_REPO_READ_LINES",
-    "MAX_REPO_SEARCH_BYTES",
-    "MAX_REPO_SEARCH_RESULTS",
+    "MAX_REPO_DIFF_BYTES",
+    "MAX_REPO_DIFF_STAT_FILES",
     "clone_repository",
     "read_patch_diff_from_repo",
-    "read_repository_file",
-    "search_repository_files",
 ]

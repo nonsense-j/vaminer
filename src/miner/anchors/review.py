@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..models.analysis import AnalysisSubject, RootCauseAnalysis
-from ..models.vas import VASCoreInfo
-from ..mining.validation.anchors import disabled_anchor_warnings
 from ..mining.validation.analysis import root_cause_source_spans
+from ..mining.validation.anchors import disabled_anchor_warnings
+from ..models.analysis import GroundingPolicy, RootCauseAnalysis
+from ..models.vas import VASCoreInfo
 from ..utils.log import logger
 from .scanner import AnchorRunResult, AnchorScanResult, scan_anchors
 
@@ -24,7 +24,7 @@ def review_anchors(
     context_lines: int = 1,
     source_label: str = "Repository",
     root_cause: RootCauseAnalysis | None = None,
-    analysis_subject: AnalysisSubject | None = None,
+    grounding_policy: GroundingPolicy | None = None,
 ) -> str:
     """Scan cases and repository, render their anchor results, and optionally save the report."""
     anchors = [anchor.model_dump(mode="json", by_alias=True) for anchor in core.anchors]
@@ -52,8 +52,7 @@ def review_anchors(
             )
         if (
             root_cause is not None
-            and analysis_subject is not None
-            and analysis_subject.type == "example_suite"
+            and grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
         ):
             uncovered_spans = [
                 f"{span.file}:{span.start_line}-{span.end_line}"

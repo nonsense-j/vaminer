@@ -9,31 +9,29 @@
       "repo_url": "https://github.com/curl/curl",
       "buggy_commit": "006977859dcc4b8670878bd669276d778a2715bb",
       "fixed_commit": "2b0994c29a721c91c572cff7808c572a24d251eb",
-      "root_cause_summary": "Missing lowercasing of domain strings before PSL comparison bypasses public suffix check"
+      "root_cause_summary": "In lib/cookie.c, the Public Suffix List (PSL) acceptability check passes the raw request hostname and the cookie's Domain attribute (e.g. `co.UK`) straight to libpsl's `psl_is_cookie_domain_acceptable` without first lowercasing them. libpsl stores PSL entries in lowercase and matches them case-sensitively, so a mixed-case cookie domain that is actually a PSL-protected suffix (e.g. `co.uk`) is not recognized as one, the \"super cookie\" is accepted and stored, and curl later sends it to unrelated origins."
     }
   ],
-  "summary": "Cookie domain PSL verification calls `psl_is_cookie_domain_acceptable()` without lowercasing the domain arguments first. Since PSL entries are lowercase and libpsl comparison is case-sensitive, a mixed-case cookie domain (e.g., \"co.UK\") bypasses the public suffix check, allowing a \"super cookie\" that leaks to all domains under the same TLD.",
+  "summary": "In a C cookie engine, the Public Suffix List acceptability check (psl_is_cookie_domain_acceptable) must receive lowercase-normalized request hostname and cookie Domain attribute. libpsl stores its PSL entries in lowercase and compares case-sensitively, so passing the raw, possibly mixed-case strings (e.g. 'co.UK') lets a PSL-protected suffix such as 'co.uk' pass the check, the super cookie is stored, and it is later sent to unrelated origins.",
   "scenarios": {
     "unsafe": [
-      "Calling `psl_is_cookie_domain_acceptable()` with domain strings that may contain uppercase characters without prior lowercasing, allowing mixed-case domains (e.g., \"co.UK\", \"example.AT\") to bypass the case-sensitive PSL comparison.",
-      "A wrapper function that directly delegates to `psl_is_cookie_domain_acceptable()` without normalizing case on either the host domain or cookie domain arguments.",
-      "Passing a mixed-case cookie domain attribute alongside a lowercase host domain to the PSL check function, where the case mismatch defeats the public suffix restriction."
+      "A cookie engine passes the raw, possibly mixed-case request hostname and cookie Domain attribute directly to the Public Suffix List acceptability check (e.g. psl_is_cookie_domain_acceptable) without lowercase-normalizing them; because libpsl stores PSL entries in lowercase and compares case-sensitively, a mixed-case spelling of a protected suffix (e.g. 'co.UK' instead of 'co.uk') is not recognized as protected, the super cookie is accepted and stored, and is later sent to unrelated origins.",
+      "Strings compared against the lowercase PSL table are not guaranteed to be all-lowercase at the PSL comparison site, so the case-sensitive lookup fails to reject a cookie whose Domain attribute is a PSL-protected suffix expressed in mixed case."
     ],
     "safe": [
-      "Domain strings are lowercased via `Curl_strntolower()` (or equivalent) before being passed to `psl_is_cookie_domain_acceptable()`, ensuring case-insensitive matching against the lowercase PSL entries.",
-      "Both the host domain and cookie domain are normalized to lowercase in local buffers before the PSL comparison call, so mixed-case cookie domains cannot bypass the public suffix check.",
-      "A case-insensitive comparison or normalization wrapper is interposed between the domain sources and the `psl_is_cookie_domain_acceptable()` call."
+      "The request hostname and cookie Domain attribute are lowercase-normalized (e.g. via Curl_strntolower into bounded local buffers) before being passed to the PSL acceptability check, so mixed-case spellings of protected suffixes still match the lowercase PSL entry and the super cookie is correctly rejected.",
+      "The hostname and cookie domain are already guaranteed to be all-lowercase before the PSL comparison (normalized earlier in the pipeline or inherently lowercase), preserving correct case-sensitive matching against the lowercase PSL database."
     ]
   },
   "anchors": [
     {
-      "id": "psl-is-cookie-domain-acceptable-call",
+      "id": "psl-acceptability-raw-domain",
       "behavior_weight": 5,
-      "query_weight": 5,
+      "query_weight": 4,
       "type": "pattern",
-      "query": "psl_is_cookie_domain_acceptable($CTX, $DOMAIN, $COOKIE_DOMAIN)",
-      "behavior": "Calling `psl_is_cookie_domain_acceptable()` with a PSL context pointer and two domain string arguments (host domain and cookie domain) to check cookie domain acceptability against the Public Suffix List.",
-      "inspect_hint": "Check whether the domain arguments are lowercased before being passed to this function. Missing lowercasing means mixed-case domains (e.g., 'co.UK') bypass the case-sensitive PSL comparison, allowing cookie injection across origin boundaries."
+      "query": "psl_is_cookie_domain_acceptable($PSL, $HOST, $COOKIE)",
+      "behavior": "The request hostname and the cookie's Domain attribute are passed unchanged (no lowercasing transformation applied to either argument) as the second and third arguments of a psl_is_cookie_domain_acceptable call.",
+      "inspect_hint": "libpsl stores its Public Suffix List entries in lowercase and matches case-sensitively, so a mixed-case protected suffix such as 'co.UK' will not match 'co.uk' and the super cookie is accepted. Confirm that both the cookie domain and the request hostname are lowercased (e.g. via Curl_strntolower into local buffers) before the PSL comparison."
     }
   ]
 }

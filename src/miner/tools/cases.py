@@ -58,7 +58,11 @@ def read_case_artifact(
     end_line: int | None = None,
     max_lines: int = MAX_CASE_READ_LINES,
 ) -> dict[str, Any]:
-    """Read a bounded line range from one case artifact."""
+    """Read a bounded line range from one case artifact.
+
+    A start position past EOF returns empty content together with the artifact
+    length and a recovery message.
+    """
     target = _case_artifact_path(cases_dir, path)
     if not target.is_file():
         raise ValueError(f"case artifact does not exist: {path}")
@@ -73,18 +77,32 @@ def read_case_artifact(
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     total_lines = len(lines)
     if total_lines == 0:
-        if start_line != 1 or end_line not in {None, 0, 1}:
-            raise ValueError(f"requested line range is outside empty case artifact: {path}")
-        return {
+        result: dict[str, Any] = {
             "path": path,
             "content": "",
-            "start_line": 1,
+            "start_line": start_line,
             "end_line": 0,
             "total_lines": 0,
             "truncated": False,
         }
+        if start_line != 1 or end_line not in {None, 0, 1}:
+            result["message"] = (
+                f"requested range starts past EOF; {path} is empty; no content was returned"
+            )
+        return result
     if start_line > total_lines:
-        raise ValueError(f"start_line {start_line} exceeds {path} length ({total_lines} lines)")
+        return {
+            "path": path,
+            "content": "",
+            "start_line": start_line,
+            "end_line": total_lines,
+            "total_lines": total_lines,
+            "truncated": False,
+            "message": (
+                f"start_line {start_line} is past EOF; {path} has {total_lines} lines; "
+                "no content was returned"
+            ),
+        }
 
     resolved_end = min(total_lines, end_line if end_line is not None else start_line + max_lines - 1)
     if resolved_end < start_line:

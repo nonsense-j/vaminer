@@ -14,6 +14,24 @@ class AnchorScanError(RuntimeError):
     """Raised when deterministic anchor scanning cannot safely continue."""
 
 
+class AnchorExecutionError(AnchorScanError):
+    """Raised when the scanner binary, process, or result protocol fails."""
+
+
+class AnchorQueryError(AnchorScanError):
+    """Raised when ast-grep rejects model-authored query syntax or semantics."""
+
+
+QUERY_ERROR_MARKERS = (
+    "pattern contains an error node",
+    "cannot parse rule",
+    "not a valid ast-grep rule",
+    "fail to parse yaml as ruleconfig",
+    "failed to parse pattern",
+    "invalid pattern",
+)
+
+
 @dataclass(frozen=True)
 class AnchorMatch:
     anchor_id: str
@@ -128,7 +146,7 @@ def find_ast_grep(explicit: str | None = None) -> str:
         binary = shutil.which(name)
         if binary:
             return binary
-    raise AnchorScanError("ast-grep is required but was not found on PATH")
+    raise AnchorExecutionError("ast-grep is required but was not found on PATH")
 
 
 def has_top_level_key(query: str, key: str) -> bool:
@@ -153,19 +171,19 @@ def parse_ast_grep_output(stdout: str, anchor_id: str) -> list[dict[str, Any]]:
     try:
         value = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise AnchorScanError(
+        raise AnchorExecutionError(
             f"anchor {anchor_id!r} returned invalid JSON: {exc}"
         ) from exc
     if isinstance(value, dict):
         value = [value]
     if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
-        raise AnchorScanError(f"anchor {anchor_id!r} returned an unexpected JSON shape")
+        raise AnchorExecutionError(f"anchor {anchor_id!r} returned an unexpected JSON shape")
     return value
 
 
 def relative_source_path(root: Path, file_value: Any, anchor_id: str) -> str:
     if not isinstance(file_value, str) or not file_value:
-        raise AnchorScanError(f"anchor {anchor_id!r} returned a match without a file")
+        raise AnchorExecutionError(f"anchor {anchor_id!r} returned a match without a file")
     file_path = Path(file_value)
     if not file_path.is_absolute():
         file_path = root / file_path
@@ -173,7 +191,7 @@ def relative_source_path(root: Path, file_value: Any, anchor_id: str) -> str:
     try:
         relative = resolved.relative_to(root)
     except ValueError as exc:
-        raise AnchorScanError(
+        raise AnchorExecutionError(
             f"anchor {anchor_id!r} returned a file outside the scan root: {file_value}"
         ) from exc
     return relative.as_posix()
@@ -188,7 +206,7 @@ def run_anchor(
     if not str(anchor["query"]).strip():
         return AnchorRunResult(anchor=dict(anchor), matches=[])
     if ast_grep is None:
-        raise AnchorScanError("ast-grep is required for enabled anchors but was not found on PATH")
+        raise AnchorExecutionError("ast-grep is required for enabled anchors but was not found on PATH")
 
     query_type = anchor["type"]
     if query_type == "pattern":
@@ -212,16 +230,32 @@ def run_anchor(
             str(root),
         ]
     else:
-        raise ValueError(f"unsupported anchor type: {query_type!r}")
+        raise AnchorQueryError(f"unsupported anchor type: {query_type!r}")
 
-    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AnchorExecutionError("ast-grep timed out after 60 seconds") from exc
+    except OSError as exc:
+        raise AnchorExecutionError(f"ast-grep could not start: {exc}") from exc
     if completed.returncode not in {0, 1} or completed.stderr.strip():
         detail = (
             completed.stderr.strip()
             or completed.stdout.strip()
             or f"exit code {completed.returncode}"
         )
-        raise AnchorScanError(f"anchor {anchor['id']!r} failed: {detail}")
+        error_type = (
+            AnchorQueryError
+            if any(marker in detail.lower() for marker in QUERY_ERROR_MARKERS)
+            else AnchorExecutionError
+        )
+        raise error_type(f"anchor {anchor['id']!r} failed: {detail}")
 
     matches = []
     for raw in parse_ast_grep_output(completed.stdout, anchor["id"]):
@@ -257,7 +291,7 @@ def scan_anchors(
 ) -> AnchorScanResult:
     root = root.resolve()
     if not root.is_dir():
-        raise FileNotFoundError(f"scan root does not exist: {root}")
+        raise AnchorExecutionError(f"scan root does not exist: {root}")
     ordered = sorted_anchors(anchors)
     binary = (
         find_ast_grep(ast_grep)

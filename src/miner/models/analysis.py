@@ -1,7 +1,6 @@
 """Root Cause Analysis models."""
 
 from enum import StrEnum
-from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,6 +22,13 @@ class AstGrepLanguage(StrEnum):
     SWIFT = "swift"
     TSX = "tsx"
     TYPESCRIPT = "typescript"
+
+
+class GroundingPolicy(StrEnum):
+    """Deterministic source acceptance selected by an Input Adapter."""
+
+    REPOSITORY_EVIDENCE = "repo_evidence"
+    BAD_SPAN_COVERAGE = "bad_span_coverage"
 
 
 class BuggyComponent(BaseModel):
@@ -65,28 +71,3 @@ class RootCauseAnalysis(BaseModel):
         min_length=1,
         description="Bare caseN or caseN_varM filenames directly under the cases root",
     )
-
-
-class AnalysisSubject(BaseModel):
-    """Source-neutral handoff from RCA into rule generation and anchor synthesis."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    type: Literal["issue", "example_suite"] = Field(..., description="Source family")
-    source_root: str = Field(
-        ...,
-        description="Analyzed repository or snapshot root within the workspace src area",
-    )
-    cases_dir: str = Field(..., description="Workspace-contained generated cases directory")
-    grounding_policy: Literal["repo_evidence", "bad_span_coverage"] = Field(
-        ...,
-        description="Deterministic anchor grounding policy",
-    )
-    provenance: dict[str, Any] = Field(default_factory=dict, description="Source-specific provenance")
-
-    @model_validator(mode="after")
-    def validate_grounding_policy(self) -> "AnalysisSubject":
-        expected = "repo_evidence" if self.type == "issue" else "bad_span_coverage"
-        if self.grounding_policy != expected:
-            raise ValueError(f"{self.type} subjects require {expected}")
-        return self

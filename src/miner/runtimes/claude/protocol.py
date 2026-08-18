@@ -1,916 +1,406 @@
-"""Decode Claude's subprocess protocol and validate structured responses."""
+"""Single-pass Claude stream-json decoder and normalized diagnostics."""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import suppress
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from pydantic import BaseModel, ValidationError
 
-from ...agent.contracts import AgentTask, OutputT, RuntimeUsage
-from ...utils.log import logger
-from .artifacts import clip, redact, sanitize_json
-from .config import ClaudeCodeConfig
+from ...agent.contracts import RuntimeEventType, RuntimeLogEvent, RuntimeUsage
+from ...utils.log import RuntimeLog, safe_log_value
 from .errors import (
     ClaudeCodeConfigurationError,
     ClaudeCodeProcessError,
     ClaudeCodeProtocolError,
-    ClaudeCodeProviderError,
-    ClaudeCodeRequestLimitError,
 )
-from .process import ProcessResult
+from .process import ProcessResult, clip, redact
 
-_MAX_LOGGED_OUTPUT_CHARS = 12_000
-
-
-@dataclass(frozen=True)
-class ParsedOutput:
-    """One normalized Claude terminal response and its streamed evidence."""
-
-    terminal: Mapping[str, Any]
-    events: tuple[Mapping[str, Any], ...]
-    structured_output: Any
-    structured_candidates: tuple[Any, ...]
-    final_text: str | None
-    usage: RuntimeUsage | None
-    session_id: str | None
-    model_id: str | None
-    permission_denials: tuple[Any, ...]
-    output_errors: tuple[str, ...]
+_EVENT_CHARS = 1_000
+_EVENT_LINES = 15
 
 
-@dataclass
-class RequestCounter:
-    """Track observable Claude model responses across repair attempts."""
-
-    limit: int | None
-    seen_message_ids: set[tuple[str | None, str]] = field(default_factory=set)
-    anonymous_requests: int = 0
-
-    @property
-    def count(self) -> int:
-        return len(self.seen_message_ids) + self.anonymous_requests
-
-    def observe(self, event: Mapping[str, Any]) -> bool:
-        if event.get("type") != "assistant":
-            return False
-        message = event.get("message")
-        message_id = message.get("id") if isinstance(message, Mapping) else None
-        if isinstance(message_id, str) and message_id:
-            parent_tool_use_id = event.get("parent_tool_use_id")
-            actor_id = (
-                parent_tool_use_id
-                if isinstance(parent_tool_use_id, str) and parent_tool_use_id
-                else None
-            )
-            dedupe_key = (actor_id, message_id)
-            if dedupe_key in self.seen_message_ids:
-                return False
-            self.seen_message_ids.add(dedupe_key)
-        else:
-            self.anonymous_requests += 1
-        if self.limit is not None and self.count > self.limit:
-            raise ClaudeCodeRequestLimitError(self.limit, observed=self.count)
-        return True
-
-    def reconcile_attempt(self, *, previous_count: int, reported_turns: int | None) -> None:
-        """Account for responses absent from the selected output protocol."""
-
-        if reported_turns is None:
-            return
-        observed_this_attempt = self.count - previous_count
-        self.anonymous_requests += max(0, reported_turns - observed_this_attempt)
-        if self.limit is not None and self.count > self.limit:
-            raise ClaudeCodeRequestLimitError(self.limit, observed=self.count)
+@dataclass(frozen=True, slots=True)
+class DecodedClaudeRun:
+    output: BaseModel | None
+    usage: RuntimeUsage
+    events: tuple[RuntimeLogEvent, ...]
+    validation_errors: tuple[str, ...] = ()
+    candidate: Any = None
 
 
-@dataclass
-class StreamMonitor:
-    """Emit bounded progress logs while enforcing the task request limit."""
-
-    task_id: str
-    attempt: int
-    counter: RequestCounter
-    event_handler: Callable[[Mapping[str, Any]], None] | None = None
-    compact_events_path: Path | None = None
-    seen_tool_use_ids: set[tuple[str | None, str]] = field(default_factory=set)
-    subagent_types: dict[str, str] = field(default_factory=dict)
-    _compact_event_offset: int = field(default=0, init=False)
-
-    def observe_line(self, line: str) -> None:
-        self._drain_compact_events()
+def _bounded(value: Any) -> str:
+    safe = safe_log_value(value)
+    if isinstance(safe, str):
+        text = safe
+    else:
         try:
-            event = json.loads(line)
+            text = json.dumps(safe, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            text = str(safe)
+    text = redact(text)
+    lines = text.splitlines()
+    if len(lines) > _EVENT_LINES:
+        text = "\n".join(lines[:_EVENT_LINES]) + "\n... [truncated]"
+    return clip(text, _EVENT_CHARS)
+
+
+def _emit(
+    events: list[RuntimeLogEvent],
+    kind: RuntimeEventType,
+    content: Any,
+    *,
+    agent_name: str,
+    runtime_log: RuntimeLog,
+    detail: str | None = None,
+) -> None:
+    safe = _bounded(content)
+    if kind == "output":
+        events.append(RuntimeLogEvent(type=kind, content=safe))
+    else:
+        events.append(
+            runtime_log.event(
+                agent_name,
+                kind,
+                safe,
+                detail=detail,
+            )
+        )
+
+
+def _content_events(
+    event: dict[str, Any],
+    events: list[RuntimeLogEvent],
+    *,
+    agent_name: str,
+    runtime_log: RuntimeLog,
+) -> None:
+    message = event.get("message")
+    blocks = message.get("content") if isinstance(message, dict) else event.get("content")
+    if not isinstance(blocks, list):
+        return
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "thinking":
+            _emit(
+                events,
+                "thinking",
+                block.get("thinking") or block.get("text") or "",
+                agent_name=agent_name,
+                runtime_log=runtime_log,
+            )
+        elif block_type == "text":
+            _emit(
+                events,
+                "message",
+                block.get("text") or "",
+                agent_name=agent_name,
+                runtime_log=runtime_log,
+            )
+        elif block_type == "tool_use":
+            tool_name = str(block.get("name") or "unknown")
+            tool_id = str(block.get("id") or "unknown")
+            _emit(
+                events,
+                "tool.call",
+                block.get("input") or {},
+                agent_name=agent_name,
+                runtime_log=runtime_log,
+                detail=f"{tool_name}:{tool_id}",
+            )
+        elif block_type == "tool_result":
+            _emit(
+                events,
+                "tool.result",
+                block.get("content"),
+                agent_name=agent_name,
+                runtime_log=runtime_log,
+                detail=str(block.get("tool_use_id") or "unknown"),
+            )
+
+
+def _result_payload(event: dict[str, Any]) -> dict[str, Any] | None:
+    payload = event.get("structured_output")
+    if payload is not None:
+        return payload if isinstance(payload, dict) else None
+    payload = event.get("result")
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        try:
+            parsed = json.loads(payload)
         except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _validation_errors(exc: ValidationError) -> tuple[str, ...]:
+    errors: list[str] = []
+    for item in exc.errors(include_url=False):
+        location = ".".join(str(part) for part in item.get("loc", ())) or "output"
+        errors.append(f"{location}: {item.get('msg', 'invalid value')}")
+    return tuple(errors)
+
+
+def _native_output_errors(event: dict[str, Any]) -> tuple[str, ...]:
+    raw = event.get("errors")
+    if raw is None:
+        return ("Claude Code exhausted its native structured-output retry limit",)
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ClaudeCodeProtocolError("Claude structured-output errors must be an array of strings")
+    errors = tuple(redact(item.strip()) for item in raw if item.strip())
+    return errors or ("Claude Code exhausted its native structured-output retry limit",)
+
+
+class ClaudeStreamDecoder:
+    """Incrementally render JSONL events, then validate the terminal result."""
+
+    def __init__(
+        self,
+        *,
+        output_type: type[BaseModel],
+        agent_name: str = "Claude Code",
+        runtime_log: RuntimeLog | None = None,
+        expected_mcp_server: str | None = None,
+        expected_mcp_tools: tuple[str, ...] = (),
+        session_mode: Literal["fresh", "resumed"] = "fresh",
+    ) -> None:
+        self.output_type = output_type
+        self.agent_name = agent_name
+        self.runtime_log = runtime_log or RuntimeLog()
+        self.expected_mcp_server = expected_mcp_server
+        self.expected_mcp_tools = expected_mcp_tools
+        self.session_mode = session_mode
+        self.events: list[RuntimeLogEvent] = []
+        self.result_event: dict[str, Any] | None = None
+        self.parsed_count = 0
+        self.line_number = 0
+        self.error: ClaudeCodeProtocolError | None = None
+
+    def _validate_init(self, event: dict[str, Any]) -> None:
+        if self.expected_mcp_server is None:
+            return
+        raw_servers = event.get("mcp_servers")
+        servers = raw_servers if isinstance(raw_servers, list) else []
+        status = next(
+            (
+                item.get("status")
+                for item in servers
+                if isinstance(item, dict) and item.get("name") == self.expected_mcp_server
+            ),
+            None,
+        )
+        if status != "connected":
+            state = status if isinstance(status, str) and status else "missing"
+            raise ClaudeCodeConfigurationError(
+                f"Claude Code MCP server {self.expected_mcp_server!r} is {state}; expected connected"
+            )
+
+        raw_tools = event.get("tools")
+        available = {item for item in raw_tools if isinstance(item, str)} if isinstance(raw_tools, list) else set()
+        missing = sorted(set(self.expected_mcp_tools) - available)
+        if missing:
+            raise ClaudeCodeConfigurationError(
+                "Claude Code did not expose required MCP tools: " + ", ".join(missing)
+            )
+
+    def feed_line(self, raw: str) -> None:
+        """Decode and render one line as soon as the subprocess emits it."""
+        self.line_number += 1
+        if self.error is not None or not raw.strip():
+            return
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            self.error = ClaudeCodeProtocolError(
+                f"Claude stream line {self.line_number} is not JSON: {_bounded(raw)}"
+            )
             return
         if not isinstance(event, dict):
             return
-
-        if self.counter.observe(event):
-            limit = self.counter.limit if self.counter.limit is not None else "unbounded"
-            actor, parent_tool_use_id = self._actor(event)
-            logger.info(
-                "Claude model request observed: task=%s attempt=%s requests=%s/%s "
-                "actor=%s parent_tool_use_id=%s",
-                self.task_id,
-                self.attempt,
-                self.counter.count,
-                limit,
-                actor,
-                parent_tool_use_id,
+        self.parsed_count += 1
+        event_type = str(event.get("type") or "")
+        if event_type in {"assistant", "user"}:
+            _content_events(
+                event,
+                self.events,
+                agent_name=self.agent_name,
+                runtime_log=self.runtime_log,
             )
-
-        actor, parent_tool_use_id = self._actor(event)
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, Mapping) else None
-        if isinstance(content, list):
-            for block in content:
-                if not isinstance(block, Mapping) or block.get("type") != "tool_use":
-                    continue
-                tool_use_id = block.get("id")
-                tool_key = (
-                    str(tool_use_id)
-                    if tool_use_id
-                    else json.dumps(block, sort_keys=True, default=str)
-                )
-                dedupe_key = (parent_tool_use_id, tool_key)
-                if dedupe_key in self.seen_tool_use_ids:
-                    continue
-                self.seen_tool_use_ids.add(dedupe_key)
-                tool_name = str(block.get("name") or "unknown")
-                if tool_name in {"Agent", "Task"} and isinstance(tool_use_id, str):
-                    tool_input = block.get("input")
-                    agent_type = (
-                        tool_input.get("subagent_type")
-                        if isinstance(tool_input, Mapping)
-                        else None
-                    )
-                    normalized_type = (
-                        str(agent_type) if agent_type else "unknown"
-                    )
-                    self.subagent_types[tool_use_id] = normalized_type
-                    logger.info(
-                        "Claude subagent spawned: task=%s attempt=%s "
-                        "subagent=%s parent_tool_use_id=%s",
-                        self.task_id,
-                        self.attempt,
-                        normalized_type,
-                        tool_use_id,
-                    )
-                logger.info(
-                    "Claude tool call observed: task=%s attempt=%s tool=%s "
-                    "actor=%s parent_tool_use_id=%s",
-                    self.task_id,
-                    self.attempt,
-                    tool_name,
-                    actor,
-                    parent_tool_use_id,
-                )
-        self._observe_event(event)
-
-    def finish(self) -> None:
-        """Forward compact hook events that arrived with the final CLI output."""
-
-        self._drain_compact_events()
-
-    def _drain_compact_events(self) -> None:
-        if self.event_handler is None or self.compact_events_path is None:
-            return
-        try:
-            with self.compact_events_path.open("rb") as handle:
-                handle.seek(self._compact_event_offset)
-                pending = handle.read()
-        except OSError:
-            return
-        if not pending:
-            return
-
-        consumed = 0
-        for raw_line in pending.splitlines(keepends=True):
-            if not raw_line.endswith((b"\n", b"\r")):
-                break
-            consumed += len(raw_line)
-            try:
-                event = json.loads(raw_line)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if not isinstance(event, dict):
-                continue
-            actor, parent_tool_use_id = self._actor(event)
-            logger.info(
-                "Claude context compacted: task=%s attempt=%s actor=%s "
-                "parent_tool_use_id=%s trigger=%s",
-                self.task_id,
-                self.attempt,
-                actor,
-                parent_tool_use_id,
-                event.get("trigger"),
+        elif event_type in {"compact", "compaction"} or event.get("subtype") in {"compact", "compaction"}:
+            _emit(
+                self.events,
+                "compaction",
+                event.get("summary") or event,
+                agent_name=self.agent_name,
+                runtime_log=self.runtime_log,
             )
-            self._forward_event(event, label="compact")
-        self._compact_event_offset += consumed
-
-    def _observe_event(self, event: Mapping[str, Any]) -> None:
-        if event.get("type") == "result":
-            actor, parent_tool_use_id = self._actor(event)
-            output = event.get("structured_output")
-            if output is None:
-                output = event.get("result")
-            if isinstance(output, str):
-                rendered_output = redact(output)
+        elif event_type == "result":
+            self.result_event = event
+            if event.get("is_error") or event.get("subtype") not in {None, "success"}:
+                _emit(
+                    self.events,
+                    "error",
+                    event.get("result") or event,
+                    agent_name=self.agent_name,
+                    runtime_log=self.runtime_log,
+                )
             else:
-                rendered_output = json.dumps(
-                    sanitize_json(output),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
+                _emit(
+                    self.events,
+                    "output",
+                    _result_payload(event) or event.get("result") or "completed",
+                    agent_name=self.agent_name,
+                    runtime_log=self.runtime_log,
                 )
-            logger.info(
-                "Claude terminal output: task=%s attempt=%s turns=%s reason=%s "
-                "structured=%s output=%s actor=%s parent_tool_use_id=%s "
-                "permission_denials=%s",
-                self.task_id,
-                self.attempt,
-                event.get("num_turns"),
-                event.get("terminal_reason"),
-                event.get("structured_output") is not None,
-                clip(rendered_output, _MAX_LOGGED_OUTPUT_CHARS),
-                actor,
-                parent_tool_use_id,
-                len(event.get("permission_denials") or []),
-            )
-        elif event.get("type") == "user":
-            actor, parent_tool_use_id = self._actor(event)
-            message = event.get("message")
-            content = message.get("content") if isinstance(message, Mapping) else None
-            if isinstance(content, list):
-                for block in content:
-                    if (
-                        not isinstance(block, Mapping)
-                        or block.get("type") != "tool_result"
-                    ):
-                        continue
-                    tool_use_id = block.get("tool_use_id")
-                    if (
-                        isinstance(tool_use_id, str)
-                        and tool_use_id in self.subagent_types
-                    ):
-                        actor = f"subagent:{self.subagent_types[tool_use_id]}"
-                        parent_tool_use_id = tool_use_id
-                    logger.info(
-                        "Claude tool result observed: task=%s attempt=%s "
-                        "tool_use_id=%s error=%s actor=%s parent_tool_use_id=%s",
-                        self.task_id,
-                        self.attempt,
-                        tool_use_id,
-                        bool(block.get("is_error")),
-                        actor,
-                        parent_tool_use_id,
-                    )
-        elif event.get("type") in {"task_notification", "task_result"}:
-            actor, parent_tool_use_id = self._actor(event)
-            logger.info(
-                "Claude subagent lifecycle observed: task=%s attempt=%s actor=%s "
-                "parent_tool_use_id=%s event=%s task_id=%s status=%s",
-                self.task_id,
-                self.attempt,
-                actor,
-                parent_tool_use_id,
-                event.get("type"),
-                event.get("task_id"),
-                event.get("status"),
-            )
-        self._forward_event(event, label="stream")
-
-    def _actor(self, event: Mapping[str, Any]) -> tuple[str, str | None]:
-        parent_tool_use_id = event.get("parent_tool_use_id")
-        if isinstance(parent_tool_use_id, str) and parent_tool_use_id:
-            agent_type = self.subagent_types.get(parent_tool_use_id, "unknown")
-            return f"subagent:{agent_type}", parent_tool_use_id
-        agent_type = event.get("agent_type")
-        if isinstance(agent_type, str) and agent_type:
-            return f"subagent:{agent_type}", None
-        if event.get("type") in {"task_notification", "task_result"}:
-            task_id = event.get("task_id")
-            if isinstance(task_id, str) and task_id in self.subagent_types:
-                return f"subagent:{self.subagent_types[task_id]}", task_id
-            return "subagent:unknown", None
-        return "parent", None
-
-    def _forward_event(self, event: Mapping[str, Any], *, label: str) -> None:
-        if self.event_handler is not None:
-            try:
-                self.event_handler(event)
-            except Exception:  # noqa: BLE001 - optional tracing must never stop Claude.
-                logger.debug(
-                    "Claude %s event handler failed: task=%s attempt=%s",
-                    label,
-                    self.task_id,
-                    self.attempt,
-                    exc_info=True,
-                )
-
-
-class ProtocolDecoder:
-    """Normalize Claude JSON modes and classify protocol/provider failures."""
-
-    def __init__(self, config: ClaudeCodeConfig) -> None:
-        self._config = config
-
-    def decode(
-        self,
-        process: ProcessResult,
-        *,
-        configured_model: str | None,
-        turn_limit: int | None = None,
-    ) -> ParsedOutput:
-        stdout = process.stdout.decode("utf-8", errors="replace")
-        stderr = process.stderr.decode("utf-8", errors="replace")
-        events: list[Mapping[str, Any]] = []
-
-        if self._config.output_format == "json":
-            try:
-                decoded = json.loads(stdout)
-            except json.JSONDecodeError as exc:
-                if process.returncode != 0:
-                    self._raise_process_or_provider(process.returncode, stdout, stderr)
-                raise ClaudeCodeProtocolError(
-                    f"Claude Code did not emit valid JSON: {redact(clip(stdout or stderr, 1000))}"
-                ) from exc
-            if not isinstance(decoded, dict):
-                raise ClaudeCodeProtocolError("Claude Code JSON output must be an object")
-            events.append(decoded)
-            terminal = decoded
-        else:
-            for line_number, line in enumerate(stdout.splitlines(), start=1):
-                if not line.strip():
-                    continue
-                try:
-                    decoded = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    if process.returncode != 0 and not events:
-                        self._raise_process_or_provider(process.returncode, stdout, stderr)
-                    raise ClaudeCodeProtocolError(
-                        "invalid stream-json event on line "
-                        f"{line_number}: {redact(clip(line, 500))}"
-                    ) from exc
-                if not isinstance(decoded, dict):
-                    raise ClaudeCodeProtocolError(
-                        f"stream-json event {line_number} must be an object"
-                    )
-                events.append(decoded)
-            terminal = next(
-                (event for event in reversed(events) if event.get("type") == "result"),
-                None,
-            )
-            if terminal is None:
-                if process.returncode != 0:
-                    self._raise_process_or_provider(process.returncode, stdout, stderr)
-                raise ClaudeCodeProtocolError(
-                    "stream-json output did not contain a terminal result event"
-                )
-
-        raw_permission_denials = terminal.get("permission_denials") or []
-        if not isinstance(raw_permission_denials, (list, tuple)):
-            raise ClaudeCodeProtocolError(
-                "Claude Code permission_denials must be an array"
-            )
-        permission_denials = tuple(
-            sanitize_json(item) for item in raw_permission_denials
-        )
-        if permission_denials:
-            logger.warning(
-                "Claude Code reported recoverable tool denials: count=%s; "
-                "continuing terminal and structured-output validation",
-                len(permission_denials),
-            )
-
-        structured = terminal.get("structured_output")
-        event_candidates = _structured_output_candidates(events)
-        output_errors: tuple[str, ...] = ()
-        if (
-            terminal.get("terminal_reason") == "budget_exhausted"
-            or terminal.get("subtype") == "error_max_budget_usd"
-        ):
-            raise ClaudeCodeProviderError(
-                "Claude Code reported an upstream budget exhaustion",
-                category="budget",
-            )
-        if (
-            terminal.get("terminal_reason") == "max_turns"
-            or terminal.get("subtype") == "error_max_turns"
-        ):
-            observed = _optional_int(terminal.get("num_turns")) or turn_limit or 1
-            raise ClaudeCodeRequestLimitError(turn_limit or observed, observed=observed)
-        if (
-            terminal.get("terminal_reason") == "structured_output_retry_exhausted"
-            or terminal.get("subtype") == "error_max_structured_output_retries"
-        ):
-            output_errors = _structured_output_errors(terminal)
-        if terminal.get("stop_reason") == "max_tokens":
-            raise ClaudeCodeProtocolError(
-                "Claude Code terminal response hit its output-token limit"
-            )
-        if not output_errors and (
-            terminal.get("is_error") or terminal.get("terminal_reason") == "api_error"
-        ):
-            self._raise_provider_error(terminal, stderr)
-        if process.returncode != 0 and not output_errors:
-            self._raise_process_or_provider(
-                process.returncode,
-                stdout,
-                stderr,
-                terminal=terminal,
-            )
-        self.validate_initialization(events)
-
-        final_value = terminal.get("result")
-        final_text = final_value if isinstance(final_value, str) else None
-        candidates = _dedupe_candidates(
-            ([structured] if structured is not None else []) + list(event_candidates)
-        )
-
-        usage_value = terminal.get("usage")
-        usage = None
-        if isinstance(usage_value, dict):
-            raw_model_usage = terminal.get("modelUsage")
-            model_usage = (
-                sanitize_json(raw_model_usage)
-                if isinstance(raw_model_usage, Mapping)
-                else {}
-            )
-            aggregate_input = _sum_model_usage_int(raw_model_usage, "inputTokens")
-            aggregate_output = _sum_model_usage_int(raw_model_usage, "outputTokens")
-            aggregate_cache_creation = _sum_model_usage_int(
-                raw_model_usage,
-                "cacheCreationInputTokens",
-            )
-            aggregate_cache_read = _sum_model_usage_int(
-                raw_model_usage,
-                "cacheReadInputTokens",
-            )
-            usage = RuntimeUsage(
-                requests=_optional_int(terminal.get("num_turns")),
-                turns=_optional_int(terminal.get("num_turns")),
-                input_tokens=(
-                    aggregate_input
-                    if aggregate_input is not None
-                    else _optional_int(usage_value.get("input_tokens"))
-                ),
-                output_tokens=(
-                    aggregate_output
-                    if aggregate_output is not None
-                    else _optional_int(usage_value.get("output_tokens"))
-                ),
-                cache_creation_input_tokens=(
-                    aggregate_cache_creation
-                    if aggregate_cache_creation is not None
-                    else _optional_int(usage_value.get("cache_creation_input_tokens"))
-                ),
-                cache_read_input_tokens=(
-                    aggregate_cache_read
-                    if aggregate_cache_read is not None
-                    else _optional_int(usage_value.get("cache_read_input_tokens"))
-                ),
-                duration_ms=_optional_int(terminal.get("duration_ms")),
-                model_usage=model_usage,
-            )
-
-        model_id = _model_from_usage(terminal.get("modelUsage")) or configured_model
-        session_id = terminal.get("session_id")
-        return ParsedOutput(
-            terminal=terminal,
-            events=tuple(events),
-            structured_output=structured,
-            structured_candidates=candidates,
-            final_text=final_text,
-            usage=usage,
-            session_id=session_id if isinstance(session_id, str) else None,
-            model_id=model_id,
-            permission_denials=permission_denials,
-            output_errors=output_errors,
-        )
-
-    @staticmethod
-    def validate_initialization(
-        events: Sequence[Mapping[str, Any]],
-    ) -> None:
-        """Reject plugin and MCP initialization failures without later success."""
-
-        successful_mcp_servers = _successful_mcp_servers(events)
-        for event in events:
-            if event.get("type") != "system" or event.get("subtype") != "init":
-                continue
-            plugin_errors = event.get("plugin_errors") or []
-            if plugin_errors:
-                raise ClaudeCodeConfigurationError(
-                    f"Claude Code reported {len(plugin_errors)} plugin initialization error(s)"
-                )
-            mcp_servers = event.get("mcp_servers") or []
-            failed = [
-                server
-                for server in mcp_servers
-                if isinstance(server, dict)
-                and str(server.get("status") or "").lower()
-                not in {"", "connected", "pending", "starting", "initializing"}
-                and str(server.get("name") or "") not in successful_mcp_servers
-            ]
-            if failed:
-                names = ", ".join(
-                    str(server.get("name", "unknown")) for server in failed
-                )
-                raise ClaudeCodeConfigurationError(
-                    f"Claude Code failed to connect MCP server(s): {names}"
-                )
-
-    @staticmethod
-    def _raise_provider_error(
-        terminal: Mapping[str, Any],
-        stderr: str,
-    ) -> None:
-        status = _optional_int(terminal.get("api_error_status"))
-        result = terminal.get("result")
-        message = result if isinstance(result, str) else stderr or "unknown provider failure"
-        raise ClaudeCodeProviderError(
-            redact(clip(message, 2000)),
-            category=_provider_category(message, status),
-            status_code=status,
-        )
-
-    @staticmethod
-    def _raise_process_or_provider(
-        returncode: int,
-        stdout: str,
-        stderr: str,
-        *,
-        terminal: Mapping[str, Any] | None = None,
-    ) -> None:
-        status = _optional_int(terminal.get("api_error_status")) if terminal else None
-        terminal_result = terminal.get("result") if terminal else None
-        message = terminal_result if isinstance(terminal_result, str) else stderr or stdout
-        category = _provider_category(message, status)
-        if category != "unknown" or status is not None:
-            raise ClaudeCodeProviderError(
-                redact(clip(message, 2000)),
-                category=category,
-                status_code=status,
-            )
-        safe_stderr = redact(clip(stderr, 2000))
-        raise ClaudeCodeProcessError(
-            f"Claude Code exited with status {returncode}: {safe_stderr or 'no stderr'}",
-            returncode=returncode,
-            stderr=safe_stderr,
-        )
-
-
-def validate_output(
-    task: AgentTask[OutputT],
-    parsed: ParsedOutput,
-) -> tuple[OutputT | None, tuple[str, ...], str]:
-    """Validate only Claude's authoritative terminal structured output."""
-
-    candidate_text = _output_repair_candidate(parsed)
-    if parsed.output_errors:
-        return None, parsed.output_errors, candidate_text
-
-    payload = parsed.structured_output
-    if payload is None:
-        return None, ("structured_output is missing",), candidate_text
-
-    try:
-        output = task.output_type.model_validate(payload)
-    except ValidationError as exc:
-        errors = tuple(
-            _format_validation_error(item)
-            for item in exc.errors(include_url=False)
-        )
-        return None, errors, candidate_text
-
-    try:
-        errors = task.validate_output(output)
-    except Exception as exc:
-        raise ClaudeCodeProtocolError(
-            f"task output validator raised: {redact(str(exc))}"
-        ) from exc
-    if errors:
-        return None, tuple(errors), candidate_text
-    return output, (), candidate_text
-
-
-def aggregate_attempt_usage(
-    attempts: Sequence[tuple[ParsedOutput, ProcessResult]],
-    *,
-    requests: int,
-) -> RuntimeUsage:
-    """Combine native usage from every schema-repair attempt."""
-
-    usages = [parsed.usage for parsed, _ in attempts if parsed.usage is not None]
-    model_usage: dict[str, Any] = {}
-    for usage in usages:
-        assert usage is not None
-        _merge_numeric_usage(model_usage, usage.model_usage)
-    return RuntimeUsage(
-        requests=requests,
-        turns=requests,
-        input_tokens=sum_optional([usage.input_tokens for usage in usages]),
-        output_tokens=sum_optional([usage.output_tokens for usage in usages]),
-        cache_creation_input_tokens=sum_optional(
-            [usage.cache_creation_input_tokens for usage in usages]
-        ),
-        cache_read_input_tokens=sum_optional(
-            [usage.cache_read_input_tokens for usage in usages]
-        ),
-        duration_ms=sum(process.duration_ms for _, process in attempts),
-        model_usage=model_usage,
-    )
-
-
-def validate_model_identity(
-    attempts: Sequence[tuple[ParsedOutput, ProcessResult]],
-) -> tuple[str, ...]:
-    """Reject parent/child or repair attempts that report multiple models."""
-
-    observed = {
-        str(model_id)
-        for parsed, _ in attempts
-        if parsed.usage is not None
-        for model_id in parsed.usage.model_usage
-        if str(model_id).strip()
-    }
-    if len(observed) > 1:
-        raise ClaudeCodeConfigurationError(
-            "Claude parent/subagent model identity drifted within one task: "
-            + ", ".join(sorted(observed))
-        )
-    return tuple(sorted(observed))
-
-
-def subagent_events(events: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Extract a portable audit trail for native agent delegation."""
-
-    recorded: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for event in events:
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, Mapping) else None
-        if isinstance(content, list):
-            for block in content:
-                if not isinstance(block, Mapping) or block.get("type") != "tool_use":
-                    continue
-                if block.get("name") not in {"Agent", "Task"}:
-                    continue
-                event_id = str(
-                    block.get("id")
-                    or json.dumps(block, sort_keys=True, default=str)
-                )
-                if event_id in seen:
-                    continue
-                seen.add(event_id)
-                tool_input = block.get("input")
-                parent_tool_use_id = event.get("parent_tool_use_id")
-                recorded.append(
-                    {
-                        "event": "spawn",
-                        "id": event_id,
-                        "actor": (
-                            "subagent"
-                            if isinstance(parent_tool_use_id, str)
-                            and parent_tool_use_id
-                            else "parent"
-                        ),
-                        "parent_tool_use_id": (
-                            parent_tool_use_id
-                            if isinstance(parent_tool_use_id, str)
-                            else None
-                        ),
-                        "agent_type": (
-                            tool_input.get("subagent_type")
-                            if isinstance(tool_input, Mapping)
-                            else None
-                        ),
-                    }
-                )
-        if event.get("type") in {"task_notification", "task_result"}:
-            recorded.append(
+        elif event_type == "system" and event.get("subtype") == "init":
+            self._validate_init(event)
+            _emit(
+                self.events,
+                "message",
                 {
-                    "event": str(event.get("type")),
-                    "actor": "subagent",
-                    "parent_tool_use_id": event.get("parent_tool_use_id"),
-                    "agent_type": event.get("agent_type"),
-                    "task_id": event.get("task_id"),
-                    "status": event.get("status"),
-                }
+                    "model": event.get("model"),
+                    "session": self.session_mode,
+                    "mcp": self.expected_mcp_server,
+                },
+                agent_name=self.agent_name,
+                runtime_log=self.runtime_log,
             )
-    return recorded
+        elif event_type == "error":
+            _emit(
+                self.events,
+                "error",
+                event,
+                agent_name=self.agent_name,
+                runtime_log=self.runtime_log,
+            )
 
+    def finish(self, process: ProcessResult) -> DecodedClaudeRun:
+        """Validate the buffered terminal state after the subprocess exits."""
+        if process.returncode != 0:
+            detail = redact(clip(process.stderr or process.stdout, 2_000))
+            raise ClaudeCodeProcessError(
+                f"Claude Code exited with {process.returncode}: {detail}",
+                returncode=process.returncode,
+                stderr=detail,
+            )
+        if self.error is not None:
+            raise self.error
+        if self.parsed_count == 0:
+            raise ClaudeCodeProtocolError(
+                "Claude Code emitted no stream-json events: " + redact(clip(process.stderr, 1_000))
+            )
+        if self.result_event is None:
+            raise ClaudeCodeProtocolError("Claude Code stream ended without a terminal result event")
 
-def sum_optional(values: Sequence[int | None]) -> int | None:
-    """Sum optional integers when at least one value is present."""
+        native_output_failure = (
+            self.result_event.get("terminal_reason") == "structured_output_retry_exhausted"
+            or self.result_event.get("subtype") == "error_max_structured_output_retries"
+        )
+        if not native_output_failure and (
+            self.result_event.get("is_error")
+            or self.result_event.get("subtype") not in {None, "success"}
+        ):
+            raise ClaudeCodeProtocolError(
+                "Claude Code returned an error result: "
+                + _bounded(self.result_event.get("result") or self.result_event)
+            )
+        usage_data = self.result_event.get("usage", {})
+        if not isinstance(usage_data, dict):
+            usage_data = {}
+        turns = self.result_event.get("num_turns")
+        usage = RuntimeUsage(
+            requests=turns if isinstance(turns, int) else None,
+            turns=turns if isinstance(turns, int) else None,
+            input_tokens=(
+                usage_data.get("input_tokens") if isinstance(usage_data.get("input_tokens"), int) else None
+            ),
+            output_tokens=(
+                usage_data.get("output_tokens") if isinstance(usage_data.get("output_tokens"), int) else None
+            ),
+            cache_creation_input_tokens=(
+                usage_data.get("cache_creation_input_tokens")
+                if isinstance(usage_data.get("cache_creation_input_tokens"), int)
+                else None
+            ),
+            cache_read_input_tokens=(
+                usage_data.get("cache_read_input_tokens")
+                if isinstance(usage_data.get("cache_read_input_tokens"), int)
+                else None
+            ),
+            duration_ms=process.duration_ms,
+        )
 
-    present = [value for value in values if value is not None]
-    return sum(present) if present else None
+        candidate = self.result_event.get("structured_output")
+        if candidate is None:
+            candidate = self.result_event.get("result")
+        if native_output_failure:
+            return DecodedClaudeRun(
+                output=None,
+                usage=usage,
+                events=tuple(self.events),
+                validation_errors=_native_output_errors(self.result_event),
+                candidate=candidate,
+            )
 
-
-def _merge_numeric_usage(target: dict[str, Any], value: Mapping[str, Any]) -> None:
-    additive = {
-        "cacheCreationInputTokens",
-        "cacheReadInputTokens",
-        "inputTokens",
-        "outputTokens",
-        "webSearchRequests",
-    }
-    for key, item in value.items():
-        if isinstance(item, Mapping):
-            nested = target.setdefault(str(key), {})
-            if isinstance(nested, dict):
-                _merge_numeric_usage(nested, item)
-            continue
-        if isinstance(item, bool):
-            target[str(key)] = item
-        elif isinstance(item, (int, float)):
-            if key in additive:
-                target[str(key)] = target.get(str(key), 0) + item
-            elif key not in target:
-                target[str(key)] = item
-        elif key not in target:
-            target[str(key)] = item
-
-
-def _structured_output_candidates(
-    events: Sequence[Mapping[str, Any]],
-) -> tuple[Any, ...]:
-    candidates: list[Any] = []
-    for event in events:
-        if event.get("type") != "assistant":
-            continue
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, Mapping) else None
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if (
-                isinstance(block, Mapping)
-                and block.get("type") == "tool_use"
-                and block.get("name") == "StructuredOutput"
-                and isinstance(block.get("input"), Mapping)
-            ):
-                candidates.append(dict(block["input"]))
-    return tuple(candidates[-8:])
-
-
-def _dedupe_candidates(candidates: Sequence[Any]) -> tuple[Any, ...]:
-    deduped: list[Any] = []
-    seen: set[str] = set()
-    for candidate in candidates:
+        structured = _result_payload(self.result_event)
+        if structured is None:
+            message = (
+                "Claude terminal result is not valid JSON"
+                if isinstance(candidate, str) and candidate.strip()
+                else "Claude terminal result did not contain a structured output object"
+            )
+            return DecodedClaudeRun(
+                output=None,
+                usage=usage,
+                events=tuple(self.events),
+                validation_errors=(message,),
+                candidate=candidate,
+            )
         try:
-            key = json.dumps(candidate, sort_keys=True, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            key = repr(candidate)
-        if key not in seen:
-            seen.add(key)
-            deduped.append(candidate)
-    return tuple(deduped)
-
-
-def _successful_mcp_servers(
-    events: Sequence[Mapping[str, Any]],
-) -> set[str]:
-    tool_servers: dict[str, str] = {}
-    successful: set[str] = set()
-    for event in events:
-        message = event.get("message")
-        content = message.get("content") if isinstance(message, Mapping) else None
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, Mapping):
-                continue
-            if block.get("type") == "tool_use":
-                tool_use_id = block.get("id")
-                name = block.get("name")
-                if not isinstance(tool_use_id, str) or not isinstance(name, str):
-                    continue
-                parts = name.split("__", 2)
-                if len(parts) == 3 and parts[0] == "mcp" and parts[1]:
-                    tool_servers[tool_use_id] = parts[1]
-            elif block.get("type") == "tool_result":
-                tool_use_id = block.get("tool_use_id")
-                server = (
-                    tool_servers.get(tool_use_id)
-                    if isinstance(tool_use_id, str)
-                    else None
-                )
-                if server is None or block.get("is_error") is True:
-                    continue
-                result_content = block.get("content")
-                if (
-                    isinstance(result_content, str)
-                    and "<tool_use_error>" in result_content
-                ):
-                    continue
-                successful.add(server)
-    return successful
-
-
-def _format_validation_error(error: Mapping[str, Any]) -> str:
-    location = ".".join(str(item) for item in error.get("loc", ())) or "output"
-    return f"{location}: {error.get('msg', 'invalid value')}"
-
-
-def _candidate_text(payload: Any, final_text: str | None) -> str:
-    if payload is not None:
-        with suppress(TypeError, ValueError):
-            return json.dumps(payload, ensure_ascii=False, indent=2)
-    return final_text or ""
-
-
-def _output_repair_candidate(parsed: ParsedOutput) -> str:
-    """Render diagnostics without promoting a non-terminal candidate to output."""
-
-    if parsed.structured_output is not None:
-        return _candidate_text(parsed.structured_output, parsed.final_text)
-    if parsed.final_text:
-        return parsed.final_text
-    if parsed.structured_candidates:
-        return _candidate_text(parsed.structured_candidates[-1], None)
-    return ""
-
-
-def _structured_output_errors(terminal: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return model-visible errors from Claude's native output retry loop."""
-
-    raw_errors = terminal.get("errors")
-    if raw_errors is None:
-        return ("Claude Code exhausted its native structured-output retry limit",)
-    if not isinstance(raw_errors, (list, tuple)):
-        raise ClaudeCodeProtocolError(
-            "Claude Code structured-output errors must be an array"
+            output = self.output_type.model_validate(structured)
+        except ValidationError as exc:
+            return DecodedClaudeRun(
+                output=None,
+                usage=usage,
+                events=tuple(self.events),
+                validation_errors=_validation_errors(exc),
+                candidate=structured,
+            )
+        return DecodedClaudeRun(
+            output=output,
+            usage=usage,
+            events=tuple(self.events),
+            candidate=structured,
         )
-    if any(not isinstance(item, str) for item in raw_errors):
-        raise ClaudeCodeProtocolError(
-            "Claude Code structured-output errors must contain only strings"
-        )
-    errors = tuple(redact(item.strip()) for item in raw_errors if item.strip())
-    return errors or (
-        "Claude Code exhausted its native structured-output retry limit",
+
+
+def decode_claude_stream(
+    process: ProcessResult,
+    *,
+    output_type: type[BaseModel],
+    agent_name: str = "Claude Code",
+    runtime_log: RuntimeLog | None = None,
+    expected_mcp_server: str | None = None,
+    expected_mcp_tools: tuple[str, ...] = (),
+    session_mode: Literal["fresh", "resumed"] = "fresh",
+) -> DecodedClaudeRun:
+    """Decode a completed process through the incremental decoder."""
+    decoder = ClaudeStreamDecoder(
+        output_type=output_type,
+        agent_name=agent_name,
+        runtime_log=runtime_log,
+        expected_mcp_server=expected_mcp_server,
+        expected_mcp_tools=expected_mcp_tools,
+        session_mode=session_mode,
     )
+    for raw in process.stdout.splitlines():
+        decoder.feed_line(raw)
+    return decoder.finish(process)
 
 
-def _provider_category(message: str, status_code: int | None) -> str:
-    normalized = message.lower()
-    if status_code in (401, 403) or any(
-        marker in normalized
-        for marker in (
-            "not logged in",
-            "authentication",
-            "api key",
-            "unauthorized",
-            "forbidden",
-        )
-    ):
-        return "authentication"
-    if any(marker in normalized for marker in ("credit", "balance", "billing", "quota")):
-        return "credits"
-    if status_code == 429 or any(
-        marker in normalized for marker in ("rate limit", "too many requests")
-    ):
-        return "rate_limit"
-    if status_code == 404 or (
-        "model" in normalized
-        and any(marker in normalized for marker in ("not exist", "access", "unavailable"))
-    ):
-        return "model_unavailable"
-    if "upstream" in normalized or (status_code is not None and status_code >= 500):
-        return "upstream"
-    if "api_error" in normalized or "provider" in normalized:
-        return "provider"
-    return "unknown"
-
-
-def _model_from_usage(value: Any) -> str | None:
-    if not isinstance(value, dict) or not value:
-        return None
-    first = next(iter(value))
-    return first if isinstance(first, str) else None
-
-
-def _sum_model_usage_int(value: Any, key: str) -> int | None:
-    if not isinstance(value, Mapping):
-        return None
-    numbers = [
-        item[key]
-        for item in value.values()
-        if isinstance(item, Mapping)
-        and isinstance(item.get(key), int)
-        and not isinstance(item.get(key), bool)
-    ]
-    return sum(numbers) if numbers else None
-
-
-def _optional_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    return value if isinstance(value, int) else None
+__all__ = ["ClaudeStreamDecoder", "DecodedClaudeRun", "decode_claude_stream"]

@@ -4,8 +4,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .analysis import RootCauseAnalysis
-
 
 class QueryType(StrEnum):
     PATTERN = "pattern"
@@ -98,61 +96,31 @@ class AnchorIntent(BaseModel):
     )
 
 
-class AnchorSynthesisRequest(BaseModel):
-    """Complete synthesis request for every anchor intent."""
+class AnchorPlan(BaseModel):
+    """Complete queryless plan submitted by the Rule Generator."""
 
     model_config = ConfigDict(extra="forbid")
 
-    root_cause: RootCauseAnalysis
-    summary: str
-    anchor_intents: list[AnchorIntent] = Field(..., min_length=1, max_length=8)
+    summary: str = Field(..., min_length=1)
+    intents: list[AnchorIntent] = Field(..., min_length=1, max_length=8)
 
     @model_validator(mode="after")
-    def validate_unique_intent_ids(self) -> "AnchorSynthesisRequest":
-        ids = [intent.id for intent in self.anchor_intents]
+    def validate_unique_intent_ids(self) -> "AnchorPlan":
+        ids = [intent.id for intent in self.intents]
         if len(ids) != len(set(ids)):
             raise ValueError("anchor intent ids must be unique")
         return self
 
 
-class AnchorSynthesisRunRequest(BaseModel):
-    """One target anchor plus the complete read-only plan passed to a Synthesizer."""
+class AnchorSynthesisDelta(BaseModel):
+    """Query-only fields returned by one contract-bound Synthesizer."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    root_cause: RootCauseAnalysis
-    summary: str
-    anchor_plan: list[AnchorIntent] = Field(
-        ...,
-        min_length=1,
-        max_length=8,
-        description=(
-            "Complete ordered anchor plan; sibling intents provide behavior-boundary "
-            "and overlap context only"
-        ),
-    )
-    target_anchor_id: str = Field(
-        ...,
-        pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$",
-        description="Id of the one anchor intent to synthesize in this run",
-    )
-
-    @model_validator(mode="after")
-    def validate_target_anchor(self) -> "AnchorSynthesisRunRequest":
-        ids = [intent.id for intent in self.anchor_plan]
-        if len(ids) != len(set(ids)):
-            raise ValueError("anchor plan ids must be unique")
-        if self.target_anchor_id not in ids:
-            raise ValueError("target_anchor_id must identify an intent in anchor_plan")
-        return self
-
-
-class AnchorSynthesisRunResult(BaseModel):
-    """One structurally valid anchor returned by a contract-bound Synthesizer."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    anchor: Anchor
+    target_anchor_id: str = Field(..., pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
+    query_type: QueryType = Field(..., alias="type")
+    query: str
+    query_weight: int = Field(..., ge=1, le=5)
     adjustments: list[str]
     plan_suggestion: str = Field(
         ...,
@@ -161,3 +129,13 @@ class AnchorSynthesisRunResult(BaseModel):
             "intents; normally an empty string"
         ),
     )
+
+
+class AnchorSynthesisResult(BaseModel):
+    """Host-assembled Anchor plus advisory synthesis notes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchor: Anchor
+    adjustments: list[str]
+    plan_suggestion: str

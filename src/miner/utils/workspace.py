@@ -11,8 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from ..models.vas import VASFull
+from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .log import logger
 
 
@@ -125,7 +125,6 @@ class Workspace:
         output/
             miner/VAS-XXXX/<input-id>/       # Caches and review output
             logs/miner/VAS-XXXX/<input-id>/  # Per-trace workflow logs
-            artifacts/<runtime>/<input-id>/  # Per-trace runtime diagnostics
         src/.vaminer/skills/vas-scanner/rules/
             VAS-XXXX.json                    # Final VAS specification
     """
@@ -295,10 +294,6 @@ class Workspace:
     def anchor_review_path(self) -> Path:
         self.run_output_dir.mkdir(parents=True, exist_ok=True)
         return self.run_output_dir / "anchor_review.md"
-
-    @property
-    def artifact_root(self) -> Path:
-        return self.output_root / "artifacts"
 
     @property
     def example_suite_snapshot_dir(self) -> Path:

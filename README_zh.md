@@ -55,6 +55,14 @@ uv run python -m src.miner.main CVE-2024-XXXX
 uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
+也可以传入一个 Example Suite 目录。目录名（通常类似 CVE ID）用作 registry identity；目录内部可以平铺或包含任意层级的子目录，所有示例应共同表达同一个缺陷模式：
+
+```bash
+uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
+```
+
+在业务输入层，Miner 只要求该路径是非空目录，并且递归后至少包含一个可识别的源码文件。它不限制示例数量、目录布局或源码语言数量，也不要求 manifest。good/bad 信息可以通过文件名、目录名、注释、标签或可选 manifest 表达，并由 RCA 阶段结合源码行为判断。为保证生成的快照不会越过输入目录，符号链接和特殊文件系统条目仍不接收。
+
 如果需要复用上一次执行中仍然有效的结果，可添加 `--use-cache`：
 
 ```bash
@@ -82,12 +90,8 @@ output/
 ├── miner/VAS-XXXX/<input-id>/
 │   ├── caches/                         # Issue Collection、RCA、Rule Generation 三种缓存
 │   └── anchor_review.md
-├── logs/miner/VAS-XXXX/<input-id>/
-│   └── <trace-id>__<runtime>.log
-└── artifacts/claude-code/<input-id>/<trace-id>/
-    ├── issue-collection/
-    ├── root-cause/
-    └── rule-generation/
+└── logs/miner/VAS-XXXX/<input-id>/
+    └── <trace-id>__<runtime>.log
 ```
 
 启用 Langfuse 时，`<trace-id>` 就是整个 workflow 的 Langfuse Trace ID；未启用时，VAMINER 会生成相同格式的本地 ID。可以通过 `VAMINER_OUTPUT_DIR` 或 `--output-dir` 整体调整 `output/` 的位置。
@@ -129,26 +133,26 @@ Miner 按照以下确定性顺序执行：
 1. **问题收集（Issue Collection）**：收集问题描述、仓库来源以及有缺陷和已修复的 Commit。
 2. **根因分析（Root Cause Analysis）**：确定具体缺陷行为和修复模式，并提取最小原始用例及其变体。
 3. **规则生成（Rule Generation）**：生成规则摘要、相互独立的不安全/安全场景，并为因果链中每个不同、局部且规则敏感的位置生成不含查询语法的锚点意图。
-4. **AST-Grep 合成（AST-Grep Synthesis）**：在相互隔离且有界的 Synthesizer 上下文中逐个处理意图。每次运行都会看到完整的只读锚点计划和一个目标 id，并为该目标返回一个结构化结果。
-5. **组装与验证（Assembly and Validation）**：构建完整 VAS，然后由一个共享语义门在用例和源码根目录上扫描所有非空查询锚点。
+4. **AST-Grep 合成（AST-Grep Synthesis）**：在隔离且有界的 Synthesizer 上下文中逐个处理 intent。child 只返回一个目标 id 的 query 字段，host 与 canonical intent 组装 Anchor。
+5. **组装与验证（Assembly and Validation）**：使用权威 RCA、最新验收的 Anchor Plan、Rule Generation draft 和已验收 query delta 构建完整 VAS。
 6. **生成后锚点报告（Post-generation Anchor Report）**：独立生成用例覆盖和仓库热点报告。
 
 Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Synthesizer 独占查询语法以及查询与行为的一致性。如果无法生成可信查询，`query: ""` 会把该锚点标记为禁用；扫描和排序会跳过它，并在锚点审查文档和运行日志中突出显示。
 
-运行时无关的任务可以由 Pydantic AI 适配器或隔离的 Claude Code CLI 适配器执行；每个阶段都显式路由，并且不会在运行时之间回退。共享合成层只构造逐 intent 子任务、通过注入的异步 executor 并发执行，并恢复请求顺序。Pydantic Rule Generator 把这些任务委派回 Pydantic AI Runtime；Claude Rule Generator 则把完整计划交给阶段专属 MCP 工具，由 MCP 宿主使用所选 model、effort、output format、限制和 JSON Schema，为每个 intent 启动一个独立 Claude CLI 任务。Claude 合成流程不会导入或调用 Pydantic AI adapter。
+每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-每个 Synthesizer 可以读取其完整的单个 VAS workspace，并获得相互独立的只读 `src`/`cases` 视图和类型化的 `run_ast_grep_query` 工具。访问范围仍限定在该 VAS workspace 和 ast-grep references 内，不能访问兄弟 workspace，也不能写入。Runner 只接受逻辑目标 `src` 或 `cases`，不暴露 Bash、命令字符串或任意文件系统路径。两个 Runtime 都不使用合成回执或逐子 Agent 语义门；语义验收统一由最终 `VASCoreInfo` 任务负责。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序并验收非空 query。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`，没有通用文件系统、shell、网络或继续 delegation 权限。
 
 ### Miner 模块职责
 
-- `src/miner/agent/`：定义运行时无关的任务契约和阶段路由。
+- `src/miner/agent/`：定义封闭的 Phase Authority 和小型 Runtime Seam。
 - `src/miner/models/`：保存问题、根因、锚点和 VAS 模型。
-- `src/miner/mining/`：负责任务构建、工作流、示例套件接入和确定性验收。
+- `src/miner/mining/`：负责 Phase Definition、Input Adapter、共享 VAMiner 流程和确定性验收。
 - `src/miner/utils/`：负责通用配置、工作区布局、类型化缓存持久化、日志和遥测。
 - `src/miner/tools/`：提供运行时无关的证据、仓库、用例、Skill 和 ast-grep 操作。
-- `src/miner/runtimes/shared/`：包含运行时无关的异步任务委派和结果汇聚。
-- `src/miner/runtimes/pydantic/`：包含 Pydantic AI Phase 适配器、Capability、LLM 构建、Hook 和工具适配器。
-- `src/miner/runtimes/claude/`：包含 Claude CLI 实现、策略编译、子进程控制、协议解码、诊断产物和阶段专属 MCP 工具。
+- `src/miner/runtimes/shared/`：包含 host-owned Anchor Synthesis Session。
+- `src/miner/runtimes/pydantic/`：包含进程内 Pydantic AI Adapter、LLM 构建、Hook 和精确 typed 工具。
+- `src/miner/runtimes/claude/`：包含 Claude CLI Adapter、策略编译、有界子进程解码和精确的 Phase-scoped MCP 工具。
 - `src/miner/anchors/`：负责生成规则扫描和生成后审查。
 - `src/miner/main.py`：作为 CLI 组合入口，负责运行时选择、工作流执行、组装和持久化。
 
@@ -186,11 +190,20 @@ OPENAI_BASE_URL=https://your-endpoint/v1
 Claude CLI 适配器使用一套独立且刻意收窄的配置：
 
 ```dotenv
-MINER_AGENT_RUNTIME=claude-code
+MINER_AGENT_RUNTIME=claude-cli
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
 ```
 
-也可以传入 `--claude-model claude-sonnet-4-6`。VAMINER 始终使用 `user` setting source 和显式模型名调用 Claude；鉴权与 provider 选择直接来自现有的 Claude CLI 用户会话。VAMINER 不接受 Claude API Key、Base URL、Bedrock/Vertex/Foundry 开关、自定义鉴权 settings 文件或其它 setting source。
+也可以传入 `--claude-model claude-sonnet-4-6`。VAMINER 使用 `user` setting source、严格的临时 MCP 配置和 fresh session id 调用 Claude。启用 tracing 时，session transcript 仅保留到 Claude 的同步 Stop/SessionEnd Hook 完成，随后连同其 tool-result 目录一起删除。子进程完整继承父进程环境以沿用 Claude 鉴权和 provider 选择；环境值绝不写入 log 或 trace。checkout 中的 project/local settings、instructions 和 MCP 配置均不加载。
+
+使用 `claude-cli` tracing 前，需要在 Claude user scope 安装一次 Langfuse 官方 Observability Plugin：
+
+```bash
+claude plugin marketplace add langfuse/Claude-Observability-Plugin
+claude plugin install langfuse-observability@langfuse-observability
+```
+
+VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使插件产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。当父级 Langfuse trace 被禁用或不可用时，VAMINER 会在临时 settings 中禁用该插件。
 
 外部证据和可选链路追踪也通过仓库根目录中不会提交到 Git 的 `.env` 配置：
 
@@ -233,11 +246,11 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 不需要其他代理配置。VAMINER 会在创建 HTTP Client 前加载这些变量，并把 HTTPS 代理（未设置时回退到 HTTP 代理）传递给本地网页搜索 Client。`NO_PROXY` 使本机回环地址保持直连。这些变量对整个进程生效，因此模型服务、GitHub、网页搜索和网页抓取请求都可能使用所配置的代理。
 
-如需启用可选的 Langfuse 链路追踪，请同时设置 `LANGFUSE_PUBLIC_KEY` 和 `LANGFUSE_SECRET_KEY`。只有使用自定义 Langfuse 服务时才需要设置 `LANGFUSE_BASE_URL`，否则使用 SDK 默认地址。通用 Miner 限制位于 `src/miner/utils/config.py`；Pydantic 专用的文件系统、工具输出溢出和上下文压缩限制位于 `src/miner/runtimes/pydantic/config.py`。
+如需启用可选的 Langfuse 链路追踪，请同时设置 `LANGFUSE_PUBLIC_KEY` 和 `LANGFUSE_SECRET_KEY`。只有使用自定义 Langfuse 服务时才需要设置 `LANGFUSE_BASE_URL`，否则使用 SDK 默认地址。通用 Miner 限制位于 `src/miner/utils/config.py`；Pydantic 专用模型和上下文压缩设置位于 `src/miner/runtimes/pydantic/config.py`。
 
-Langfuse 工作流 Trace 名称会包含实际路由的 Runtime，例如 `VAS-0001 Miner Workflow @pydantic-ai` 或 `VAS-0001 Miner Workflow @claude-code`；混合工作流会列出两个 Runtime ID。Claude Phase 采用与其他 Agent 运行一致的 observation 层级：一个 `<Agent> run` `AGENT` 下交错排列 `chat <model>` `GENERATION` 和每次完整工具执行对应的 `TOOL`。Chat 输入包含累计消息历史和可见工具目录；同一个 TOOL 同时保存参数和结果。终止协议事件只作为 Agent metadata，不再单独生成子 span。MCP 宿主内的 Synthesizer 会继承当前 Claude Agent 的 W3C trace context；合成 TOOL 会成为委派的 Claude CLI Agent 运行及其 model/tool 子节点的父节点。Claude Runtime 诊断会把子任务 attempt、工具活动、结果和用量追加到当前 VAS run log。事件负载会脱敏并限制大小。
+每个 mining input 只产生一个名为 `VAS-XXXX Miner @<runtime>` 的 trace；根 input 是原始 typed mining input，根 output 是最终保存的 VAS 规则。Pydantic AI 通过原生 OpenTelemetry 产生 `invoke_agent` → `chat`/`execute_tool` spans。Langfuse 官方 Claude Plugin 在 VAMINER 自有的 Phase span 下产生 Conversational Turn → Generation/Tool observations；跨进程 synthesis orchestration span 仍由应用创建，以便子 Claude run 继承实时 W3C context。Rich Hook/stream event 只用于 console 和 run-file diagnostics，不再创建重复的 Langfuse observation。
 
-Claude 文件权限按 Phase 隔离：Root Cause Analysis 可以读取单个 VAS 工作区，并且只能写入 `cases/` 顶层；Rule Generation 只能读取 `cases/`；每个 Synthesizer 可以读取其完整的单个 VAS 工作区，但不能写入。Rule Generation 的源码 grounding 只由 MCP 宿主内的 Synthesizer 完成。原生工具拒绝会作为当前会话内的工具结果交给 Claude 自行处理，并仅保留为审计元数据；Runtime 外层修复循环只处理最终结构化输出失败，不承担工具重试。最终 RCA 校验会保留声明且符合规范的 case 文件，并删除之前 attempt 遗留的所有未声明文件。
+两个 Runtime Adapter 执行同一份 Phase Authority。RCA 通过 typed list/search/read 操作读取 source，只能写入合法的顶层 Case Artifact；Rule Generation 只读 Case Artifact 并调用 synthesis；Synthesizer 只读 scoped evidence 并运行 ast-grep，没有 write、network、shell 或 delegation 工具。RCA cleanup 在纯验收前显式执行，cache load 与最终 VAS 验证绝不修改文件系统。
 
 ### 测试
 

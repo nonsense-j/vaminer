@@ -86,3 +86,12 @@ class VASCoreInfo(BaseModel):
     summary: str
     scenarios: Scenarios
     anchors: list[Anchor] = Field(..., min_length=1)
+
+
+class RuleGenerationDraft(BaseModel):
+    """Only the Rule Generator-owned fields of a final VAS core."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: IssueCategory
+    scenarios: Scenarios

@@ -5,7 +5,7 @@ from pathlib import Path
 from src.miner.utils.workspace import Workspace, safe_input_id
 
 
-def test_workspace_keeps_only_src_and_cases_and_externalizes_outputs(tmp_path: Path):
+def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Path):
     workspace_root = tmp_path / "vas_ws" / "miner" / "VAS-0001"
     (workspace_root / "cache").mkdir(parents=True)
     (workspace_root / "artifacts").mkdir()
@@ -28,7 +28,7 @@ def test_workspace_keeps_only_src_and_cases_and_externalizes_outputs(tmp_path: P
         / "CVE-2099-0001"
         / "caches"
     )
-    assert workspace.artifact_root == tmp_path / "output" / "artifacts"
+    assert not hasattr(workspace, "artifact_root")
 
 
 def test_safe_input_id_preserves_cves_and_disambiguates_urls():

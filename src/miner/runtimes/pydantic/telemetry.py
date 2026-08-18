@@ -1,4 +1,4 @@
-"""Optional tracing integration owned by the Pydantic AI adapter."""
+"""Native Pydantic AI OpenTelemetry instrumentation for Langfuse."""
 
 from __future__ import annotations
 
@@ -10,10 +10,13 @@ _INSTRUMENTED = False
 
 
 def instrument_tracing() -> None:
-    """Instrument Pydantic agents when the shared trace client is available."""
+    """Enable Pydantic AI's native spans once a Langfuse client is active."""
 
     global _INSTRUMENTED
     if _INSTRUMENTED or configure_tracing() is None:
         return
     Agent.instrument_all()
     _INSTRUMENTED = True
+
+
+__all__ = ["instrument_tracing"]

@@ -11,42 +11,43 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..models.analysis import AstGrepLanguage
 from ..models.vas import ExampleSuiteFileMetadata
 from ..utils.workspace import Workspace
 
-MAX_EXAMPLE_SUITE_FILES = 200
-MAX_EXAMPLE_SUITE_FILE_BYTES = 512 * 1024
-MAX_EXAMPLE_SUITE_TOTAL_BYTES = 8 * 1024 * 1024
-
-_LANGUAGE_SUFFIXES: dict[AstGrepLanguage, set[str]] = {
-    AstGrepLanguage.C: {".c"},
-    AstGrepLanguage.CPP: {".cc", ".cpp", ".cxx"},
-    AstGrepLanguage.CSHARP: {".cs"},
-    AstGrepLanguage.GO: {".go"},
-    AstGrepLanguage.JAVA: {".java"},
-    AstGrepLanguage.JAVASCRIPT: {".js", ".mjs", ".cjs"},
-    AstGrepLanguage.JSX: {".jsx"},
-    AstGrepLanguage.KOTLIN: {".kt", ".kts"},
-    AstGrepLanguage.PHP: {".php"},
-    AstGrepLanguage.PYTHON: {".py"},
-    AstGrepLanguage.RUBY: {".rb"},
-    AstGrepLanguage.RUST: {".rs"},
-    AstGrepLanguage.SCALA: {".scala"},
-    AstGrepLanguage.SWIFT: {".swift"},
-    AstGrepLanguage.TSX: {".tsx"},
-    AstGrepLanguage.TYPESCRIPT: {".ts"},
-}
-_SUFFIX_LANGUAGE = {
-    suffix: language
-    for language, suffixes in _LANGUAGE_SUFFIXES.items()
-    for suffix in suffixes
-}
+_SOURCE_SUFFIXES = frozenset(
+    {
+        ".c",
+        ".h",
+        ".cc",
+        ".cpp",
+        ".cxx",
+        ".hh",
+        ".hpp",
+        ".hxx",
+        ".cs",
+        ".go",
+        ".java",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".jsx",
+        ".kt",
+        ".kts",
+        ".php",
+        ".py",
+        ".rb",
+        ".rs",
+        ".scala",
+        ".swift",
+        ".tsx",
+        ".ts",
+    }
+)
 _MANIFEST_NAMES = ("manifest.json", "manifest.yaml", "manifest.yml")
 
 
 class ExampleSuiteInspection(BaseModel):
-    """Validated metadata over an input directory before workspace materialization."""
+    """Observed metadata over an input directory before workspace materialization."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -54,7 +55,6 @@ class ExampleSuiteInspection(BaseModel):
     suite_name: str
     source_path: str
     content_digest: str
-    language: AstGrepLanguage
     file_count: int
     total_bytes: int
     source_files: list[str]
@@ -87,32 +87,16 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
 
     if not paths:
         raise ValueError("example suite does not contain any regular files")
-    if len(paths) > MAX_EXAMPLE_SUITE_FILES:
-        raise ValueError(
-            f"example suite contains too many files: {len(paths)} > {MAX_EXAMPLE_SUITE_FILES}"
-        )
-
     total_bytes = 0
     source_files: list[str] = []
-    languages: set[AstGrepLanguage] = set()
     digest = hashlib.sha256()
     file_metadata: list[ExampleSuiteFileMetadata] = []
     for path in paths:
         relative = path.resolve().relative_to(root).as_posix()
         size = path.stat().st_size
-        if size > MAX_EXAMPLE_SUITE_FILE_BYTES:
-            raise ValueError(
-                f"example suite file exceeds {MAX_EXAMPLE_SUITE_FILE_BYTES} bytes: {relative}"
-            )
         total_bytes += size
-        if total_bytes > MAX_EXAMPLE_SUITE_TOTAL_BYTES:
-            raise ValueError(
-                f"example suite exceeds {MAX_EXAMPLE_SUITE_TOTAL_BYTES} total bytes: {total_bytes}"
-            )
-        suffix = path.suffix.lower()
-        language = _SUFFIX_LANGUAGE.get(suffix)
-        if language is not None:
-            languages.add(language)
+        is_source = path.suffix.lower() in _SOURCE_SUFFIXES
+        if is_source:
             source_files.append(relative)
         content = path.read_bytes()
         file_metadata.append(
@@ -120,7 +104,7 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
                 path=relative,
                 size=size,
                 sha256=hashlib.sha256(content).hexdigest(),
-                source=language is not None,
+                source=is_source,
             )
         )
         digest.update(relative.encode("utf-8"))
@@ -131,17 +115,12 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
         digest.update(b"\0")
 
     if not source_files:
-        raise ValueError("example suite does not contain a supported ast-grep source language")
-    if len(languages) != 1:
-        names = ", ".join(sorted(language.value for language in languages))
-        raise ValueError(f"example suite must contain exactly one supported source language; found: {names}")
-
+        raise ValueError("example suite does not contain a recognizable source code file")
     return ExampleSuiteInspection(
         registry_key=f"example-suite:{suite_name}",
         suite_name=suite_name,
         source_path=source_path.as_posix(),
         content_digest=digest.hexdigest(),
-        language=next(iter(languages)),
         file_count=len(paths),
         total_bytes=total_bytes,
         source_files=sorted(source_files),
@@ -151,7 +130,7 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
 
 
 def inspect_example_suite(example_suite: Path) -> ExampleSuiteInspection:
-    """Validate an example suite and compute a stable path-and-content digest."""
+    """Inspect an example suite and compute a stable path-and-content digest."""
 
     raw_root = example_suite.expanduser()
     if raw_root.is_symlink():
@@ -226,9 +205,6 @@ def materialize_example_suite(
 
 
 __all__ = [
-    "MAX_EXAMPLE_SUITE_FILES",
-    "MAX_EXAMPLE_SUITE_FILE_BYTES",
-    "MAX_EXAMPLE_SUITE_TOTAL_BYTES",
     "ExampleSuiteInspection",
     "ExampleSuiteIntake",
     "inspect_example_suite",

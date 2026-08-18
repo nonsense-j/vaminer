@@ -12,6 +12,7 @@ from git.exc import GitError
 
 from ...models.analysis import AstGrepLanguage, RootCauseAnalysis
 from ...models.issue import IssueCollectionInfo
+from ...tools.cases import MAX_CASE_ARTIFACT_BYTES
 
 _CASE_RE = re.compile(r"^case(?P<case>\d+)(?:_var(?P<variant>\d+))?(?P<suffix>\.[A-Za-z0-9]+)$")
 _LANGUAGE_SUFFIXES: dict[AstGrepLanguage, set[str]] = {
@@ -94,26 +95,6 @@ def validate_root_cause_cases(
 
     declared = [relative_case_path(path) for path in root_cause_case_files(analysis)]
     expected = sorted(set(declared))
-    actual_paths = sorted(
-        (
-            path
-            for path in cases_dir.rglob("*")
-            if path.is_file() or path.is_symlink()
-        ),
-        key=lambda path: path.as_posix(),
-    )
-    for path in actual_paths:
-        relative = path.relative_to(cases_dir).as_posix()
-        if relative not in expected:
-            path.unlink(missing_ok=True)
-    for path in sorted(
-        (path for path in cases_dir.rglob("*") if path.is_dir()),
-        key=lambda path: len(path.parts),
-        reverse=True,
-    ):
-        if path != cases_dir:
-            shutil.rmtree(path, ignore_errors=True)
-
     actual = sorted(
         path.relative_to(cases_dir).as_posix()
         for path in cases_dir.rglob("*")
@@ -154,13 +135,50 @@ def validate_root_cause_cases(
         path = cases_dir / relative
         if path.is_symlink():
             errors.append(f"case file must not be a symbolic link: {relative}")
-        elif path.is_file() and not path.read_text(encoding="utf-8", errors="replace").strip():
-            errors.append(f"case file is empty: {relative}")
+        elif path.is_file():
+            if path.stat().st_size > MAX_CASE_ARTIFACT_BYTES:
+                errors.append(
+                    f"case file exceeds the {MAX_CASE_ARTIFACT_BYTES}-byte limit: {relative}"
+                )
+            elif not path.read_text(encoding="utf-8", errors="replace").strip():
+                errors.append(f"case file is empty: {relative}")
 
     for case_no, suffix, relative in variants:
         if (case_no, suffix) not in originals:
             errors.append(f"variant has no matching original case: {relative}")
     return errors
+
+
+def finalize_root_cause_cases(
+    analysis: RootCauseAnalysis,
+    *,
+    cases_dir: Path,
+) -> None:
+    """Remove files outside the accepted RCA manifest as an explicit mutation."""
+
+    if not cases_dir.is_dir():
+        return
+    expected = {
+        relative_case_path(path)
+        for path in root_cause_case_files(analysis)
+    }
+    for path in sorted(
+        (
+            candidate
+            for candidate in cases_dir.rglob("*")
+            if candidate.is_file() or candidate.is_symlink()
+        ),
+        key=lambda candidate: candidate.as_posix(),
+    ):
+        if path.relative_to(cases_dir).as_posix() not in expected:
+            path.unlink(missing_ok=True)
+    for path in sorted(
+        (candidate for candidate in cases_dir.rglob("*") if candidate.is_dir()),
+        key=lambda candidate: len(candidate.parts),
+        reverse=True,
+    ):
+        if path != cases_dir:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def validate_root_cause_analysis(

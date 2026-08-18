@@ -20,6 +20,20 @@ class AstGrepRunnerError(RuntimeError):
     """Raised when ast-grep cannot produce a trustworthy JSON result."""
 
 
+class AstGrepQueryError(AstGrepRunnerError):
+    """Raised when ast-grep rejects model-authored query syntax or semantics."""
+
+
+_QUERY_ERROR_MARKERS = (
+    "pattern contains an error node",
+    "cannot parse rule",
+    "not a valid ast-grep rule",
+    "fail to parse yaml as ruleconfig",
+    "failed to parse pattern",
+    "invalid pattern",
+)
+
+
 def _enforce_allowed_root(root: Path) -> None:
     raw = os.getenv(_ALLOWED_ROOTS_ENV)
     if raw is None:
@@ -172,9 +186,14 @@ def run_ast_grep(
     except OSError as exc:
         raise AstGrepRunnerError(f"ast-grep could not start: {exc}") from exc
 
-    if completed.returncode not in {0, 1}:
+    if completed.returncode not in {0, 1} or completed.stderr.strip():
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
-        raise AstGrepRunnerError(f"ast-grep query failed: {detail}")
+        error_type = (
+            AstGrepQueryError
+            if any(marker in detail.lower() for marker in _QUERY_ERROR_MARKERS)
+            else AstGrepRunnerError
+        )
+        raise error_type(f"ast-grep query failed: {detail}")
 
     raw_matches = _parse_output(completed.stdout)
     include_metavariables = output == "full"
@@ -202,8 +221,6 @@ def run_ast_grep(
     elif output == "full":
         result["matches"] = matches
         result["truncated"] = False
-    if completed.stderr.strip():
-        result["warnings"] = completed.stderr.strip()
     return result
 
 
@@ -235,3 +252,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+__all__ = ["AstGrepQueryError", "AstGrepRunnerError", "run_ast_grep"]

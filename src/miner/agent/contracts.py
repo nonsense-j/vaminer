@@ -1,23 +1,23 @@
-"""Runtime-neutral contracts for executing Miner agent phases."""
+"""Small runtime-neutral interfaces for executing Miner Agent phases."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Literal, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
-from ..models.analysis import AnalysisSubject, RootCauseAnalysis
+from ..models.analysis import GroundingPolicy, RootCauseAnalysis
+from ..models.anchors import AnchorPlan
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
-OutputValidator = Callable[[OutputT, "TaskContext"], Sequence[str]]
 
 
 class AgentPhase(StrEnum):
-    """Stable phase identities used for routing, cache names, and diagnostics."""
+    """Closed phase identities used by task construction and diagnostics."""
 
     ISSUE_COLLECTION = "issue_collection"
     ROOT_CAUSE = "root_cause"
@@ -25,50 +25,83 @@ class AgentPhase(StrEnum):
     AST_GREP_SYNTHESIS = "ast_grep_synthesis"
 
 
-class RuntimeCapability(StrEnum):
-    """Semantic capabilities a task may require from a runtime adapter."""
+@dataclass(frozen=True, slots=True)
+class IssueCollectionAuthority:
+    issue_reference: str
 
-    STRUCTURED_OUTPUT = "structured_output"
-    ISSUE_RESEARCH = "issue_research"
-    WEB_RESEARCH = "web_research"
-    REPOSITORY_CHECKOUT = "repository_checkout"
-    WORKSPACE_READ = "workspace_read"
-    WORKSPACE_WRITE = "workspace_write"
-    FIXED_DIFF = "fixed_diff"
-    AST_GREP = "ast_grep"
-    SKILLS = "skills"
-    AGENT_DELEGATION = "agent_delegation"
+    @property
+    def phase(self) -> AgentPhase:
+        return AgentPhase.ISSUE_COLLECTION
 
 
-class FileAccess(StrEnum):
-    """Required access to one task-owned filesystem area."""
+@dataclass(frozen=True, slots=True)
+class RootCauseAuthority:
+    source_root: Path
+    cases_dir: Path
+    grounding_policy: GroundingPolicy
+    repo_path: Path | None = None
+    fixed_diff: bool = False
 
-    NONE = "none"
-    READ_ONLY = "read_only"
-    READ_WRITE = "read_write"
-
-
-@dataclass(frozen=True)
-class WorkspacePolicy:
-    """Cross-runtime native filesystem and network authority for one task."""
-
-    cwd: Path
-    native_workspace_access: FileAccess = FileAccess.NONE
-    allow_network: bool = False
+    @property
+    def phase(self) -> AgentPhase:
+        return AgentPhase.ROOT_CAUSE
 
 
-@dataclass(frozen=True)
-class SkillSpec:
-    """A repository-owned skill that an adapter must expose without global install."""
+@dataclass(frozen=True, slots=True)
+class RuleGenerationAuthority:
+    source_root: Path
+    cases_dir: Path
+    grounding_policy: GroundingPolicy
+    root_cause: RootCauseAnalysis
 
-    name: str
-    root: Path
+    @property
+    def phase(self) -> AgentPhase:
+        return AgentPhase.RULE_GENERATION
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+class AnchorSynthesisAuthority:
+    source_root: Path
+    cases_dir: Path
+    grounding_policy: GroundingPolicy
+    root_cause: RootCauseAnalysis
+    plan: AnchorPlan
+    target_anchor_id: str
+    skill_root: Path
+
+    @property
+    def phase(self) -> AgentPhase:
+        return AgentPhase.AST_GREP_SYNTHESIS
+
+
+PhaseAuthority = (
+    IssueCollectionAuthority
+    | RootCauseAuthority
+    | RuleGenerationAuthority
+    | AnchorSynthesisAuthority
+)
+PhaseValidator = Callable[[OutputT, PhaseAuthority, Path], Sequence[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionLayers:
+    """Canonical instructions followed by input policy and one Adapter binding."""
+
+    shared: str
+    input_policy: str = ""
+
+    def render(self, runtime_binding: str) -> str:
+        rendered = self.shared
+        for layer in (self.input_policy, runtime_binding):
+            if not layer:
+                continue
+            separator = "" if rendered.endswith("\n\n") else "\n" if rendered.endswith("\n") else "\n\n"
+            rendered += separator + layer
+        return rendered if rendered.endswith("\n") else rendered + "\n"
+
+
+@dataclass(frozen=True, slots=True)
 class RunLimits:
-    """Logical run limits interpreted by each runtime adapter."""
-
     request_limit: int | None = None
     timeout_seconds: float | None = None
     output_retries: int = 2
@@ -82,58 +115,78 @@ class RunLimits:
             raise ValueError("output_retries must be non-negative")
 
 
-@dataclass(frozen=True)
-class TaskContext:
-    """Typed filesystem and domain state made available to one isolated task."""
+@dataclass(frozen=True, slots=True)
+class PhaseDefinition[OutputT: BaseModel]:
+    """Canonical responsibility, instructions, tools, output, and limits for one phase."""
 
-    workspace_root: Path
-    output_root: Path | None = None
-    input_id: str | None = None
-    trace_id: str | None = None
-    source_root: Path | None = None
-    repo_path: Path | None = None
-    cases_dir: Path | None = None
-    root_cause: RootCauseAnalysis | None = None
-    analysis_subject: AnalysisSubject | None = None
-
-
-@dataclass(frozen=True)
-class AgentTask[OutputT: BaseModel]:
-    """One runtime-neutral, structured-output agent invocation."""
-
-    task_id: str
     phase: AgentPhase
     agent_name: str
     description: str
     instructions: str
-    prompt: str
     output_type: type[OutputT]
-    context: TaskContext
-    workspace: WorkspacePolicy
-    required_capabilities: frozenset[RuntimeCapability]
-    input_instructions: str = ""
-    limits: RunLimits = field(default_factory=RunLimits)
-    skills: tuple[SkillSpec, ...] = ()
-    model_hint: str | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-    output_validator: OutputValidator[OutputT] | None = None
+    tools: tuple[str, ...]
+    limits: RunLimits
+    validator: PhaseValidator[OutputT]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTask[OutputT: BaseModel]:
+    """One complete assignment constructed from a closed Phase Authority."""
+
+    task_id: str
+    definition: PhaseDefinition[OutputT]
+    authority: PhaseAuthority
+    prompt: str
+    workspace_root: Path
+    input_policy: str = ""
+    extra_tools: tuple[str, ...] = ()
+    limit_override: RunLimits | None = None
+
+    def __post_init__(self) -> None:
+        if self.definition.phase is not self.authority.phase:
+            raise ValueError(
+                f"Phase Definition {self.definition.phase.value!r} does not match "
+                f"Authority {self.authority.phase.value!r}"
+            )
+
+    @property
+    def phase(self) -> AgentPhase:
+        return self.authority.phase
+
+    @property
+    def agent_name(self) -> str:
+        return self.definition.agent_name
+
+    @property
+    def description(self) -> str:
+        return self.definition.description
+
+    @property
+    def output_type(self) -> type[OutputT]:
+        return self.definition.output_type
+
+    @property
+    def instructions(self) -> InstructionLayers:
+        return InstructionLayers(self.definition.instructions, self.input_policy)
+
+    @property
+    def tools(self) -> tuple[str, ...]:
+        return self.definition.tools + self.extra_tools
+
+    @property
+    def limits(self) -> RunLimits:
+        return self.limit_override or self.definition.limits
 
     def validate_output(self, value: OutputT) -> tuple[str, ...]:
-        """Run the phase's deterministic post-schema validation."""
-
         if not isinstance(value, self.output_type):
             return (
                 f"output must be {self.output_type.__name__}; received {type(value).__name__}",
             )
-        if self.output_validator is None:
-            return ()
-        return tuple(self.output_validator(value, self.context))
+        return tuple(self.definition.validator(value, self.authority, self.workspace_root))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeUsage:
-    """Provider-independent usage values; unavailable fields remain null."""
-
     requests: int | None = None
     turns: int | None = None
     input_tokens: int | None = None
@@ -141,40 +194,50 @@ class RuntimeUsage:
     cache_creation_input_tokens: int | None = None
     cache_read_input_tokens: int | None = None
     duration_ms: int | None = None
-    model_usage: Mapping[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class RuntimeArtifacts:
-    """Optional raw artifacts retained by subprocess or SDK adapters."""
-
-    final_text: str | None = None
-    prompt_path: Path | None = None
-    stdout_path: Path | None = None
-    stderr_path: Path | None = None
-    events_path: Path | None = None
-    invocation_path: Path | None = None
-
-
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RuntimeIdentity:
-    """Stable pre-run identity used by cache keys and routing diagnostics."""
-
     runtime_id: str
     model_id: str
 
 
-@dataclass(frozen=True)
+RuntimeEventType = Literal[
+    "thinking",
+    "message",
+    "tool.call",
+    "tool.result",
+    "compaction",
+    "output",
+    "error",
+]
+_RUNTIME_EVENT_TYPES = {
+    "thinking",
+    "message",
+    "tool.call",
+    "tool.result",
+    "compaction",
+    "output",
+    "error",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeLogEvent:
+    type: RuntimeEventType
+    content: str | dict[str, Any] | list[Any]
+
+    def __post_init__(self) -> None:
+        if self.type not in _RUNTIME_EVENT_TYPES:
+            raise ValueError(f"unsupported Runtime Log Event type: {self.type}")
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRunResult[OutputT: BaseModel]:
-    """Normalized successful result returned by every runtime adapter."""
-
     output: OutputT
-    runtime_id: str
-    model_id: str
+    identity: RuntimeIdentity
     usage: RuntimeUsage | None = None
-    artifacts: RuntimeArtifacts = field(default_factory=RuntimeArtifacts)
     attempts: int = 1
-    metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.attempts < 1:
@@ -183,12 +246,10 @@ class AgentRunResult[OutputT: BaseModel]:
 
 @runtime_checkable
 class AgentRuntime(Protocol):
-    """Adapter seam implemented by Pydantic AI and agent CLI runtimes."""
+    """Real Seam implemented by the Pydantic AI and Claude Code Adapters."""
 
-    runtime_id: str
-    capabilities: frozenset[RuntimeCapability]
-
-    def model_id_for(self, task: AgentTask[Any]) -> str: ...
+    @property
+    def identity(self) -> RuntimeIdentity: ...
 
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]: ...
 
@@ -198,15 +259,18 @@ __all__ = [
     "AgentRunResult",
     "AgentRuntime",
     "AgentTask",
-    "FileAccess",
+    "AnchorSynthesisAuthority",
+    "InstructionLayers",
+    "IssueCollectionAuthority",
     "OutputT",
-    "OutputValidator",
+    "PhaseAuthority",
+    "PhaseDefinition",
+    "PhaseValidator",
+    "RootCauseAuthority",
+    "RuleGenerationAuthority",
     "RunLimits",
-    "RuntimeArtifacts",
-    "RuntimeCapability",
+    "RuntimeEventType",
     "RuntimeIdentity",
+    "RuntimeLogEvent",
     "RuntimeUsage",
-    "SkillSpec",
-    "TaskContext",
-    "WorkspacePolicy",
 ]

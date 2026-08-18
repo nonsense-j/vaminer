@@ -55,6 +55,14 @@ class ClaudeCodeProtocolError(ClaudeCodeError):
     """Raised when stdout does not implement the expected Claude result protocol."""
 
 
+class ClaudeCodeChildSynthesisError(ClaudeCodeError):
+    """Raised when a same-runtime child Agent reports a non-repairable failure."""
+
+
+class ClaudeCodeToolExecutionError(ClaudeCodeError):
+    """Raised when an MCP tool reports a non-repairable execution failure."""
+
+
 class ClaudeCodeProviderError(ClaudeCodeError):
     """Raised for authentication, model, credit, rate-limit, or upstream failures."""
 

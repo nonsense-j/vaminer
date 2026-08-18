@@ -9,6 +9,8 @@ from types import ModuleType
 
 import pytest
 
+from src.miner.tools.ast_grep import AstGrepQueryError
+
 RUNNER_PATH = (
     Path(__file__).resolve().parents[2]
     / "src"
@@ -78,3 +80,20 @@ def test_runner_normalizes_directory_results(tmp_path: Path):
     assert sample["matches"][0]["start"] == {"line": 2, "column": 3}
     assert [site["file"] for site in full["matches"]] == ["a.c", "b.c"]
     assert all("meta_variables" in site for site in full["matches"])
+
+
+def test_runner_classifies_model_authored_invalid_pattern_as_repairable(tmp_path: Path):
+    if shutil.which("ast-grep") is None:
+        pytest.skip("ast-grep is required")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "a.c").write_text("void a(void) {}\n", encoding="utf-8")
+
+    with pytest.raises(AstGrepQueryError, match="ERROR node"):
+        _load_runner().run_ast_grep(
+            target,
+            language="c",
+            query_type="pattern",
+            query="danger(",
+        )

@@ -7,14 +7,12 @@ requires-python = ">=3.12"
 dependencies = [
     "gitpython>=3.1.57",
     "httpx>=0.28.1",
-    "json-repair>=0.61.7",
-    "langfuse>=4.14.1",
+    "langfuse>=4.14.1,<5",
     "mcp[cli]>=2.0.0",
     "pydantic>=2.13.4",
     "pydantic-ai-harness>=0.11.0",
     "pydantic-ai-slim[duckduckgo,openai]>=2.18.0",
     "python-dotenv>=1.2.2",
-    "pyyaml>=6.0.3",
     "rich>=15.0.0",
     "trafilatura>=2.1.0",
 ]

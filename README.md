@@ -55,6 +55,14 @@ uv run python -m src.miner.main CVE-2024-XXXX
 uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
+You can also pass an Example Suite directory. Its basename (typically something like a CVE ID) is used as the registry identity. Files may be flat or arbitrarily nested, and all examples should demonstrate one shared defect pattern:
+
+```bash
+uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
+```
+
+At the domain-input level, the miner only requires an existing non-empty directory containing at least one recognizable source file recursively. It imposes no case-count, layout, source-language-count, or manifest requirement. Good/bad evidence may be expressed through filenames, directories, comments, labels, or an optional manifest and is interpreted against source behavior during RCA. Symbolic links and special filesystem entries remain excluded so the immutable snapshot cannot escape the input directory.
+
 Use `--use-cache` to reuse valid outputs from a previous attempt:
 
 ```bash
@@ -82,12 +90,8 @@ output/
 ├── miner/VAS-XXXX/<input-id>/
 │   ├── caches/                         # Issue Collection, RCA, and Rule Generation caches
 │   └── anchor_review.md
-├── logs/miner/VAS-XXXX/<input-id>/
-│   └── <trace-id>__<runtime>.log
-└── artifacts/claude-code/<input-id>/<trace-id>/
-    ├── issue-collection/
-    ├── root-cause/
-    └── rule-generation/
+└── logs/miner/VAS-XXXX/<input-id>/
+    └── <trace-id>__<runtime>.log
 ```
 
 `<trace-id>` is the overall Langfuse workflow trace id when tracing is enabled. Without Langfuse, VAMINER generates a local id with the same format. Set `VAMINER_OUTPUT_DIR` or pass `--output-dir` to relocate the complete `output/` tree.
@@ -129,26 +133,26 @@ The miner runs a deterministic sequence:
 1. **Issue Collection** gathers issue text, repository provenance, and buggy/fixed commits.
 2. **Root Cause Analysis** identifies the concrete defect behavior and fixing pattern, then extracts minimal original and variant cases.
 3. **Rule Generation** produces the rule summary, independent unsafe/safe scenarios, and one queryless anchor intent for each distinct, local, rule-sensitive causal-chain site.
-4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context. Every run sees the complete read-only anchor plan plus one target id, and returns one structurally typed result for that target.
-5. **Assembly and Validation** builds the complete VAS, then one shared semantic gate scans every non-empty anchor against the cases and source root.
+4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context. A child returns only query fields for one target id; the host combines them with the canonical intent.
+5. **Assembly and Validation** uses the authoritative RCA, latest accepted Anchor Plan, Rule Generation draft, and accepted query deltas to build the complete VAS.
 6. **Post-generation Anchor Report** independently renders case coverage and repository hotspot results.
 
 The Rule Generator never loads the ast-grep skill or authors query text. The AST-Grep Synthesizer exclusively owns query syntax and query/behavior alignment. If no trustworthy query can be produced, `query: ""` marks that anchor as disabled; it is skipped during scanning and ranking and is reported prominently in the anchor review and run log.
 
-Runtime-neutral tasks can be executed by either the Pydantic AI adapter or the isolated Claude Code CLI adapter, with explicit per-phase routing and no runtime fallback. The shared synthesis layer only builds per-intent tasks, runs an injected async executor concurrently, and restores request order. A Pydantic Rule Generator delegates those tasks back to the Pydantic AI runtime. A Claude Rule Generator sends the complete plan through a phase-scoped MCP tool whose host launches one independent Claude CLI task per intent with the selected model, effort, output format, limits, and JSON Schema. Claude synthesis does not import or invoke the Pydantic AI adapter.
+One mining run selects exactly one Runtime Adapter and one configured model. All phases, including child Synthesizers, retain that identity; there is no per-phase routing or runtime fallback. `VAMiner` accepts either an Issue or Example Suite through an Input Adapter, then uses one shared RCA → Rule Generation → persistence workflow.
 
-Each Synthesizer can read its complete per-VAS workspace and receives separate read-only `src` and `cases` views plus a typed `run_ast_grep_query` tool. Access remains bounded to that one VAS workspace and the ast-grep references; sibling workspaces and writes are unavailable. The runner accepts only the logical target `src` or `cases`; it does not expose Bash, a command string, or an arbitrary filesystem path. Neither runtime uses a synthesis receipt or per-child semantic gate; semantic acceptance belongs to the final `VASCoreInfo` task.
+`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts at most two plans, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates non-empty queries, and records only the latest successful batch. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; generic filesystem, shell, network, and further delegation are unavailable.
 
 ### Miner module responsibilities
 
-- `src/miner/agent/` defines runtime-neutral task contracts and phase routing.
+- `src/miner/agent/` defines the closed Phase Authority and the small Runtime Seam.
 - `src/miner/models/` contains issue, root-cause, anchor, and VAS models.
-- `src/miner/mining/` owns task construction, workflows, example-suite intake, and deterministic acceptance.
+- `src/miner/mining/` owns Phase Definitions, Input Adapters, the shared VAMiner workflow, and deterministic acceptance.
 - `src/miner/utils/` owns general configuration, workspace layout, typed cache persistence, logging, and telemetry.
 - `src/miner/tools/` contains runtime-neutral evidence, repository, case, skill, and ast-grep operations.
-- `src/miner/runtimes/shared/` contains runtime-neutral asynchronous task delegation and result aggregation.
-- `src/miner/runtimes/pydantic/` contains the Pydantic AI phase adapter, capabilities, LLM construction, hooks, and tool adapters.
-- `src/miner/runtimes/claude/` contains the Claude CLI implementation, policy compiler, subprocess control, protocol decoder, artifacts, and phase-scoped MCP tools.
+- `src/miner/runtimes/shared/` contains the host-owned Anchor Synthesis Session.
+- `src/miner/runtimes/pydantic/` contains the in-process Pydantic AI Adapter, LLM construction, hooks, and exact typed tools.
+- `src/miner/runtimes/claude/` contains the Claude CLI Adapter, policy compiler, bounded subprocess decoder, and exact phase-scoped MCP tools.
 - `src/miner/anchors/` contains generated-rule scanning and post-generation review.
 - `src/miner/main.py` is the CLI composition root for runtime selection, workflow execution, assembly, and persistence.
 
@@ -186,11 +190,20 @@ OPENAI_BASE_URL=https://your-endpoint/v1
 The Claude CLI adapter has a separate, intentionally narrower configuration:
 
 ```dotenv
-MINER_AGENT_RUNTIME=claude-code
+MINER_AGENT_RUNTIME=claude-cli
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
 ```
 
-You can also pass `--claude-model claude-sonnet-4-6`. VAMINER always invokes Claude with the `user` setting source and an explicit model name. Authentication and provider selection come directly from the existing Claude CLI user session. VAMINER does not accept Claude API keys, base URLs, Bedrock/Vertex/Foundry switches, custom auth settings files, or alternate setting sources.
+You can also pass `--claude-model claude-sonnet-4-6`. VAMINER invokes Claude with the `user` setting source, strict temporary MCP configuration, and a fresh session id. When tracing is enabled, the session transcript exists only until Claude's synchronous Stop/SessionEnd hooks complete and is then deleted together with its tool-result directory. The child process inherits the complete parent environment for normal Claude authentication and provider selection; environment values are never written to logs or traces. Checkout project/local settings, instructions, and MCP configuration are not loaded.
+
+To trace `claude-cli`, install the official Langfuse Observability Plugin once at Claude's user scope:
+
+```bash
+claude plugin marketplace add langfuse/Claude-Observability-Plugin
+claude plugin install langfuse-observability@langfuse-observability
+```
+
+VAMINER passes the active phase span through `CC_LANGFUSE_TRACEPARENT`, so the plugin's Conversational Turn, Generation, and Tool observations join the same Miner trace. The plugin is disabled in VAMINER's temporary settings whenever the parent Langfuse trace is disabled or unavailable.
 
 External evidence and optional tracing are configured in the same ignored repository-root `.env`:
 
@@ -233,11 +246,11 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 No additional proxy configuration is required. VAMINER loads these variables before constructing its HTTP clients and bridges the HTTPS proxy (falling back to the HTTP proxy) to the local web-search client. `NO_PROXY` keeps loopback traffic direct. These variables are process-wide, so model-provider, GitHub, web-search, and web-fetch requests may all use the configured proxy.
 
-Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable optional tracing. `LANGFUSE_BASE_URL` is needed only for a custom Langfuse server; otherwise the SDK default is used. General Miner limits live in `src/miner/utils/config.py`; Pydantic-specific filesystem, overflow, and compaction limits live in `src/miner/runtimes/pydantic/config.py`.
+Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable optional tracing. `LANGFUSE_BASE_URL` is needed only for a custom Langfuse server; otherwise the SDK default is used. General Miner limits live in `src/miner/utils/config.py`; Pydantic-specific model and compaction settings live in `src/miner/runtimes/pydantic/config.py`.
 
-Langfuse workflow traces are named with their routed runtime, for example `VAS-0001 Miner Workflow @pydantic-ai` or `VAS-0001 Miner Workflow @claude-code`. Mixed workflows list both runtime IDs. Claude phases use the same observation hierarchy as other agent runs: one `<Agent> run` `AGENT` contains interleaved `chat <model>` `GENERATION` observations and one `TOOL` observation per completed tool execution. Chat input contains the accumulated message history and visible tool catalog, and each tool keeps its arguments and result together. Terminal protocol events remain Agent metadata instead of separate child spans. MCP-hosted Synthesizers inherit the active Claude Agent's W3C trace context; the synthesis `TOOL` observation owns the delegated Claude CLI Agent runs and their model/tool descendants. Claude runtime diagnostics append child attempts, tool activity, results, and usage to the active VAS run log. Event payloads are redacted and bounded.
+One mining input produces one trace named `VAS-XXXX Miner @<runtime>`, whose root input is the original typed mining input and whose root output is the final saved VAS rule. Pydantic AI contributes its native `invoke_agent` → `chat`/`execute_tool` OpenTelemetry spans. The official Claude plugin contributes Conversational Turn → Generation/Tool observations beneath VAMINER-owned phase spans; the cross-process synthesis orchestration span remains application-owned so child Claude runs can inherit live W3C context. Rich Hook/stream events are console and run-file diagnostics only and do not create duplicate Langfuse observations.
 
-Claude filesystem authority is phase-scoped. Root Cause Analysis may read the per-VAS workspace and may write only top-level files under `cases/`; Rule Generation may read only `cases/`; each Synthesizer may read its complete per-VAS workspace but cannot write it. Source grounding during Rule Generation belongs exclusively to the MCP-hosted Synthesizers. A denied native tool call remains an in-session tool result for Claude to handle and is retained only as audit metadata; the outer runtime repair loop handles final structured-output failures, not tool retries. Final RCA validation keeps the declared, valid case files and deletes every undeclared file left by earlier attempts.
+Both Runtime Adapters enforce the same Phase Authority. RCA reads source through typed list/search/read operations and writes only valid top-level Case Artifacts. Rule Generation reads only Case Artifacts and invokes synthesis. Synthesizers read scoped evidence and run ast-grep without write, network, shell, or delegation tools. RCA cleanup is explicit before pure validation; cache loading and final VAS validation never mutate the filesystem.
 
 ### Tests
 

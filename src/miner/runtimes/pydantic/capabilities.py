@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
-from datetime import timedelta
-from pathlib import Path
 
-import yaml
-from pydantic_ai.capabilities import AbstractCapability, Capability, WebFetch, WebSearch
+from pydantic_ai.capabilities import Capability, WebFetch, WebSearch
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolCallPart
-from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.tools import Tool
 from pydantic_ai_harness.cache_stability import CacheStabilityMonitor
 from pydantic_ai_harness.compaction import (
@@ -20,28 +15,16 @@ from pydantic_ai_harness.compaction import (
     SummarizingCompaction,
     TieredCompaction,
 )
-from pydantic_ai_harness.overflowing_tool_output import (
-    Band,
-    LocalFileStore,
-    OverflowingToolOutput,
-    Spill,
-    Truncate,
-)
 
+from ...tools.github import search_commit_by_tag, search_commit_by_time
+from ...utils.fetch import FetchError, fetch_page
 from .config import (
     MINER_COMPACTION_KEEP_TOKENS,
     MINER_COMPACTION_KEEP_TOOL_PAIRS,
     MINER_COMPACTION_MAX_TOKENS,
     MINER_COMPACTION_MIN_CLEAR_TOKENS,
-    MINER_OVERFLOW_MAX_TOKENS,
-    MINER_OVERFLOW_PREVIEW_CHARS,
-    MINER_OVERFLOW_TTL_HOURS,
 )
-from ...tools.github import search_commit_by_tag, search_commit_by_time
-from ...utils.fetch import FetchError, fetch_page
 from .context import MinerContext
-
-AgentCapability = AbstractCapability[MinerContext]
 
 
 async def _web_fetch(url: str) -> dict[str, str]:
@@ -51,30 +34,16 @@ async def _web_fetch(url: str) -> dict[str, str]:
         raise ModelRetry(f"Failed to fetch {url}: {exc}") from exc
 
 
-def overflow_capability() -> OverflowingToolOutput[MinerContext]:
-    """Bound oversized tool results and spill recoverable previews locally."""
-    return OverflowingToolOutput(
-        bands=[
-            Band(
-                over=MINER_OVERFLOW_MAX_TOKENS,
-                action=Spill(preview_chars=MINER_OVERFLOW_PREVIEW_CHARS, then=Truncate()),
-            )
-        ],
-        over_tokens=True,
-        store=LocalFileStore(cleanup_after=timedelta(hours=MINER_OVERFLOW_TTL_HOURS)),
-    )
-
-
 def file_read_key(call: ToolCallPart) -> str | None:
     """Return a stable identity for file reads that compaction may deduplicate."""
-    if call.tool_name not in {"read_file", "skill_read_file"}:
+    if call.tool_name not in {"read_src_file", "read_case_artifact", "read_skill_resource"}:
         return None
     args = call.args_as_dict()
     path = args.get("path")
     if not isinstance(path, str):
         return None
     return json.dumps(
-        [call.tool_name, path, args.get("offset", 0), args.get("limit")],
+        [call.tool_name, path, args.get("start_line", 1), args.get("end_line")],
         separators=(",", ":"),
     )
 
@@ -148,43 +117,11 @@ def cache_stability_capability() -> CacheStabilityMonitor[MinerContext]:
     return CacheStabilityMonitor()
 
 
-def local_skill_capability(
-    path: Path,
-    *,
-    defer_loading: bool,
-    toolsets: Sequence[AgentToolset[MinerContext]] = (),
-) -> Capability[MinerContext]:
-    """Load a local SKILL.md and its related toolsets as one capability."""
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---") or path.suffix != ".md":
-        raise ValueError(f"skill is missing YAML frontmatter: {path}")
-    _, frontmatter, body = text.split("---", 2)
-    metadata = yaml.safe_load(frontmatter) or {}
-    if not isinstance(metadata, dict):
-        raise TypeError(f"skill frontmatter must be a mapping: {path}")
-    name = metadata.get("name")
-    description = metadata.get("description")
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError(f"skill name is missing: {path}")
-    if not isinstance(description, str) or not description.strip():
-        raise ValueError(f"skill description is missing: {path}")
-    return Capability(
-        id=name.strip(),
-        description=description.strip(),
-        instructions=body.strip(),
-        toolsets=toolsets,
-        defer_loading=defer_loading,
-    )
-
-
 __all__ = [
-    "AgentCapability",
     "cache_stability_capability",
     "commit_history_capability",
     "compaction_capability",
     "file_read_key",
-    "local_skill_capability",
-    "overflow_capability",
     "web_fetch_capability",
     "web_search_capability",
 ]

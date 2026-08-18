@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
-from langfuse import Langfuse, get_client
+from langfuse import Langfuse, get_client, propagate_attributes
 from opentelemetry import context as otel_context
 from opentelemetry import propagate, trace
 
@@ -21,6 +23,49 @@ _TRACE_CARRIER_ENV = {
     "tracestate": "VAMINER_OTEL_TRACESTATE",
     "baggage": "VAMINER_OTEL_BAGGAGE",
 }
+_TRACE_PAYLOAD_LIMIT = 16_000
+_SENSITIVE_KEY = re.compile(r"api[-_]?key|authorization|token|password|secret|cookie", re.IGNORECASE)
+_SECRET = re.compile(r"(?i)(bearer\s+|(?:api[_-]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+")
+
+
+def _tracing_disabled() -> bool:
+    return os.getenv("LANGFUSE_TRACING_ENABLED", "true").strip().lower() in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def trace_value(value: Any) -> Any:
+    """Return complete JSON-compatible telemetry data with secrets removed."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    elif is_dataclass(value) and not isinstance(value, type):
+        value = asdict(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): "<redacted>" if _SENSITIVE_KEY.search(str(key)) else trace_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [trace_value(item) for item in value]
+    if isinstance(value, str):
+        return _SECRET.sub(lambda match: match.group(1) + "<redacted>", value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)
+
+
+def bounded_trace_value(value: Any) -> Any:
+    safe = trace_value(value)
+    try:
+        rendered = json.dumps(safe, ensure_ascii=False, default=str)
+    except TypeError:
+        rendered = str(safe)
+    if len(rendered) <= _TRACE_PAYLOAD_LIMIT:
+        return safe
+    return rendered[:_TRACE_PAYLOAD_LIMIT].rstrip() + " ... [truncated]"
 
 
 @dataclass(frozen=True)
@@ -28,17 +73,40 @@ class PipelineTrace:
     """One workflow trace identity, with an optional Langfuse observation."""
 
     trace_id: str
+    runtime_id: str
     observation: Any | None = None
 
     def update(self, **values: Any) -> None:
         if self.observation is not None:
-            self.observation.update(**values)
+            self.observation.update(
+                **{key: bounded_trace_value(value) for key, value in values.items()}
+            )
+
+    @contextmanager
+    def bind(self, vas_id: str) -> Iterator[None]:
+        """Apply the stable VAS identity before any traced Agent work begins."""
+
+        if self.observation is None:
+            yield
+            return
+        trace_name = f"{vas_id} Miner @{self.runtime_id}"
+        metadata = {"vas_id": vas_id, "runtime": self.runtime_id}
+        self.observation.update(name=trace_name, metadata=metadata)
+        with propagate_attributes(
+            trace_name=trace_name,
+            metadata=metadata,
+            tags=["vaminer", self.runtime_id],
+        ):
+            yield
 
 
 def configure_tracing() -> Langfuse | None:
     """Configure the runtime-neutral Langfuse client when credentials work."""
 
     global _TRACING_ATTEMPTED, _TRACING_CLIENT, _TRACING_CONFIGURED
+    if _tracing_disabled():
+        _TRACING_ATTEMPTED = True
+        return None
     if _TRACING_CONFIGURED:
         return _TRACING_CLIENT
     if _TRACING_ATTEMPTED:
@@ -65,6 +133,15 @@ def propagated_trace_environment() -> dict[str, str]:
         for key, env_name in _TRACE_CARRIER_ENV.items()
         if (value := carrier.get(key))
     }
+
+
+def claude_trace_environment() -> dict[str, str]:
+    """Return the trace carrier understood by the official Claude Langfuse plugin."""
+
+    carrier: dict[str, str] = {}
+    propagate.inject(carrier)
+    traceparent = carrier.get("traceparent")
+    return {"CC_LANGFUSE_TRACEPARENT": traceparent} if traceparent else {}
 
 
 @contextmanager
@@ -109,7 +186,7 @@ def trace_tool_observation(
         manager = langfuse.start_as_current_observation(
             name=name,
             as_type="tool",
-            input=input,
+            input=bounded_trace_value(input),
             metadata=dict(metadata or {}),
         )
         observation = manager.__enter__()
@@ -122,40 +199,82 @@ def trace_tool_observation(
     except BaseException as error:
         try:
             manager.__exit__(type(error), error, error.__traceback__)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
         raise
     else:
         try:
             manager.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
+            pass
+
+
+@contextmanager
+def trace_agent_observation(
+    *,
+    name: str,
+    input: Any,
+    metadata: Mapping[str, Any],
+    truncate: bool = True,
+) -> Iterator[Any | None]:
+    """Create one Agent observation below the active Workflow or synthesis Tool."""
+
+    if not trace.get_current_span().get_span_context().is_valid:
+        yield None
+        return
+    langfuse = configure_tracing()
+    if langfuse is None:
+        yield None
+        return
+    try:
+        manager = langfuse.start_as_current_observation(
+            name=name,
+            as_type="agent",
+            input=bounded_trace_value(input) if truncate else trace_value(input),
+            metadata=dict(metadata),
+        )
+        observation = manager.__enter__()
+    except Exception:  # noqa: BLE001
+        yield None
+        return
+    try:
+        yield observation
+    except BaseException as error:
+        try:
+            observation.update(status_message=str(error), level="ERROR")
+            manager.__exit__(type(error), error, error.__traceback__)
+        except Exception:  # noqa: BLE001, S110
+            pass
+        raise
+    else:
+        try:
+            manager.__exit__(None, None, None)
+        except Exception:  # noqa: BLE001, S110
             pass
 
 
 @contextmanager
 def trace_pipeline(
     *,
-    issue_input: str,
-    vas_id: str,
-    runtime_ids: Sequence[str],
+    mining_input: Any,
+    runtime_id: str,
 ) -> Iterator[PipelineTrace]:
-    """Create one active observation for the complete mining workflow."""
+    """Create one root observation from the original input to the final VAS."""
 
     langfuse = configure_tracing()
     if langfuse is None:
-        yield PipelineTrace(trace_id=uuid.uuid4().hex)
+        yield PipelineTrace(trace_id=uuid.uuid4().hex, runtime_id=runtime_id)
         return
 
-    routed_runtimes = tuple(dict.fromkeys(runtime_ids))
-    runtime_label = "+".join(routed_runtimes) or "unknown-runtime"
     with langfuse.start_as_current_observation(
-        name=f"{vas_id} Miner Workflow @{runtime_label}",
+        name=f"VAMiner @{runtime_id}",
         as_type="chain",
-        input={"issue_input": issue_input},
-        metadata={"vas_id": vas_id, "runtimes": routed_runtimes},
+        input=bounded_trace_value(mining_input),
+        metadata={"runtime": runtime_id},
     ) as pipeline_span:
         yield PipelineTrace(
             trace_id=pipeline_span.trace_id,
+            runtime_id=runtime_id,
             observation=pipeline_span,
         )
 

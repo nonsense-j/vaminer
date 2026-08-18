@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic_ai import RunContext
 
 from ...models.issue import RepoCheckout
-from ...tools.repo import clone_repository, read_patch_diff_from_repo
+from ...tools.repo import clone_repository
 from .context import MinerContext
 
 
@@ -23,14 +23,3 @@ def clone_repo(
         buggy_sha,
         fixed_sha,
     )
-
-
-def read_patch_diff(
-    context: RunContext[MinerContext],
-    path: str | None = None,
-) -> str:
-    """Read the buggy-to-fixed diff, optionally limited to one repository path."""
-
-    if context.deps.repo_path is None:
-        raise RuntimeError("repo_path is missing from agent dependencies")
-    return read_patch_diff_from_repo(context.deps.repo_path, path)
