@@ -45,6 +45,7 @@ Produce the evidence-backed handoff:
 # Constraints
 
 - Prefer direct advisory, issue, pull-request, and commit evidence over inference.
+- Never search for the full commit SHA, partial SHA is sufficient for downstream checkout.
 - Use web research only for a concrete evidence gap after specialized sources are exhausted.
 - The patch MUST target the provided issue scope. Never include patches for further enhancements or unrelated issues.
 - Treat broad tag or time-range commit discovery as a last resort when both fixing commit and affected revisions are not clearly identified.

@@ -7,8 +7,8 @@ class CommitRawInfo(BaseModel):
     """Commit information for locating buggy and fixed revisions."""
 
     commit_url: str | None = Field(None, description="GitHub commit URL")
-    cur_sha: str = Field(..., description="The fixed commit SHA (current)")
-    parent_sha: str = Field(..., description="The parent SHA of the fixed commit (buggy)")
+    cur_sha: str = Field(..., description="The fixed commit SHA (current, partial)")
+    parent_sha: str = Field(..., description="The parent SHA (partial) of the fixed commit (buggy)")
     timestamp: str = Field(..., description="Commit timestamp (YYYY-MM-DDTHH:MM)")
     msg: str = Field(..., description="Commit message")
 
@@ -45,8 +45,8 @@ class IssueCollectionInfo(BaseModel):
     )
     repo_url: str = Field(..., description="Repository URL")
     repo_path: str = Field(..., description="Local path of the verified checkout")
-    buggy_commit: str = Field(..., description="Commit SHA currently checked out on the buggy branch")
+    buggy_commit: str = Field(..., description="Commit SHA (partial) currently checked out on the buggy branch")
     fixed_commit: str | None = Field(
         None,
-        description="Evidence-supported fixing commit SHA, or null when unavailable",
+        description="Evidence-supported fixing commit SHA (partial), or null when unavailable",
     )
