@@ -1,0 +1,1 @@
+"""VAMiner preflight tests."""

@@ -107,7 +107,7 @@ def load_claude_synthesis_handler(path: Path) -> ClaudeSynthesisHandler:
 
     runtime = ClaudeCodeRuntime(
         context.runtime_config(),
-        runtime_log=RuntimeLog(emit_console=False),
+        runtime_log=RuntimeLog(emit_console=False, ansi_transport=True),
     )
     authority = RuleGenerationAuthority(
         source_root=context.source_root,

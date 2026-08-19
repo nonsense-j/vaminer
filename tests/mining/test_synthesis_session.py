@@ -193,6 +193,23 @@ def test_synthesizer_task_name_includes_plan_position(tmp_path: Path):
     )
 
     assert task.agent_name == "AST-Grep Synthesizer [2/2]"
+    assert "Repository checkout" in task.input_policy
+    assert "RCA-declared source span" in task.input_policy
+
+    suite_task = make_ast_grep_synthesis_task(
+        plan,
+        intents[1],
+        workspace_root=tmp_path,
+        source_root=tmp_path,
+        cases_dir=tmp_path,
+        grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
+        root_cause=_rca(),
+    )
+    assert "Example Suite snapshot" in suite_task.input_policy
+    assert "bad/unsafe spans" in suite_task.input_policy
+    assert "repository" not in suite_task.input_policy.lower()
+    assert "repository" not in suite_task.prompt.lower()
+    assert "repository" not in suite_task.instructions.render("").lower()
 
 
 @pytest.mark.asyncio

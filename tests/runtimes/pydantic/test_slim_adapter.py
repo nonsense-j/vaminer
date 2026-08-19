@@ -11,6 +11,7 @@ from src.miner.mining.tasks import (
     make_root_cause_task,
     make_rule_generation_task,
 )
+from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.models import (
     AnchorIntent,
     AnchorPlan,
@@ -97,6 +98,32 @@ def test_pydantic_phase_tools_match_closed_authority(tmp_path: Path):
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
     )
     assert _tool_names(runtime, root_task) == set(root_task.tools)
+
+    inspection = inspect_example_suite(source)
+    suite_task = make_root_cause_task(
+        ExampleSuiteIntake(
+            **inspection.model_dump(mode="json"),
+            snapshot_path=source.as_posix(),
+            snapshot_ref="src/input_snapshot",
+        ),
+        workspace_root=workspace,
+        source_root=source,
+        cases_dir=cases,
+        grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
+    )
+    assert _tool_names(runtime, suite_task) == {
+        "list_src_files",
+        "search_src_files",
+        "read_src_file",
+        "list_case_artifacts",
+        "read_case_artifact",
+        "write_case_artifact",
+    }
+
+    (source / "long.c").write_text("line\n" * 250, encoding="utf-8")
+    complete = src_tools["read_src_file"]("long.c", full_file=True)
+    assert complete["end_line"] == 250
+    assert complete["truncated"] is False
 
     rule_task = make_rule_generation_task(
         root_cause,

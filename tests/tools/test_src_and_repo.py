@@ -114,6 +114,16 @@ def test_src_read_caps_large_ranges_for_paging(tmp_path: Path):
     with pytest.raises(ValueError, match="end_line"):
         read_src_file(tmp_path, "large.txt", start_line=10, end_line=9)
 
+    complete = read_src_file(tmp_path, "large.txt", full_file=True)
+    assert (complete["start_line"], complete["end_line"], complete["truncated"]) == (1, 250, False)
+    with pytest.raises(ValueError, match="full_file cannot be combined"):
+        read_src_file(tmp_path, "large.txt", end_line=250, full_file=True)
+
+    oversized = tmp_path / "oversized.txt"
+    oversized.write_bytes(b"x" * (src_module.MAX_SRC_READ_BYTES + 1))
+    with pytest.raises(ValueError, match="exceeds"):
+        read_src_file(tmp_path, "oversized.txt", full_file=True)
+
 
 def test_src_read_past_eof_returns_recovery_information(tmp_path: Path):
     path = tmp_path / "short.txt"

@@ -37,10 +37,26 @@ cp .env.example .env
 
 示例配置默认使用 DeepSeek。请在仓库根目录的 `.env` 中填写 `DEEPSEEK_API_KEY`；如需使用其他服务，请参考 [LLM 配置](#llm-配置)。
 
-开始生成规则前，请确认 ast-grep 已正确安装：
+开始生成规则前，先运行环境预检：
 
 ```bash
-ast-grep --version
+uv run python -m src.miner.preflight --runtime pydanic-sdk
+uv run python -m src.miner.preflight --runtime claude-cli
+```
+
+交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用
+模型。它会验证 Python 与内置资源、输出路径写权限、Git、一次真实 ast-grep 查询、
+已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数、tracing
+启用时是否已安装 Langfuse 插件，以及真实的 MCP handshake、工具列表和只读工具调用。
+
+增加 `--live` 后会发起一次很小的真实模型请求。Agent 必须调用探针工具并返回结构化输出；如果已启用
+Langfuse，还必须在同一条 preflight trace 下产生至少一个 runtime observation。该请求可能产生模型费用。
+使用 `--json` 可在 stdout 输出机器可读报告，进度仍通过 stderr 展示；增加 `--quiet` 可完全关闭进度。
+任何必需检查失败时命令退出码为 1。
+Langfuse trace 默认最多等待 120 秒，每 10 秒输出一次 heartbeat。
+
+```bash
+uv run python -m src.miner.preflight --runtime claude-cli --live
 ```
 
 ### 生成规则
@@ -59,6 +75,12 @@ uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 
 ```bash
 uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
+```
+
+仓库包含一个受 Juliet 命名与 flow variant 约定启发的合成样例，可直接作为输入：
+
+```bash
+uv run python -m src.miner.main --example-suite data/CWE134_Uncontrolled_Format_String
 ```
 
 在业务输入层，Miner 只要求该路径是非空目录，并且递归后至少包含一个可识别的源码文件。它不限制示例数量、目录布局或源码语言数量，也不要求 manifest。good/bad 信息可以通过文件名、目录名、注释、标签或可选 manifest 表达，并由 RCA 阶段结合源码行为判断。为保证生成的快照不会越过输入目录，符号链接和特殊文件系统条目仍不接收。
@@ -203,7 +225,7 @@ claude plugin marketplace add langfuse/Claude-Observability-Plugin
 claude plugin install langfuse-observability@langfuse-observability
 ```
 
-VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使插件产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。当父级 Langfuse trace 被禁用或不可用时，VAMINER 会在临时 settings 中禁用该插件。
+VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使插件产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。有可用父 trace 时，VAMINER 会在每次 Claude 调用的临时 settings 中显式启用该插件，不依赖用户态是否启用；tracing 不可用时则仅为本次调用禁用。
 
 外部证据和可选链路追踪也通过仓库根目录中不会提交到 Git 的 `.env` 配置：
 
@@ -309,8 +331,8 @@ uv run pytest
 - 每个锚点代表因果链中一个不同且可观察的行为，即使不同锚点的用例覆盖发生重叠。
 - `behavior` 只描述该锚点匹配的局部操作；跨位置关系、漏洞触发条件和检查问题属于 `inspect_hint`。
 - 每个查询以目标 `behavior` 为语义核心。为了减少与兄弟锚点的重叠，可以在一次精度优化中加入所有必要用例和 RCA 位置都支持的局部缺陷相关结构，例如要求目标操作位于 `if` 语句内；仍禁止项目特有约束或完整因果链约束。
-- Synthesizer 通常返回空的 `plan_suggestion`。只有在仓库匹配精度明显过差且能够保留必要用例召回时，才可简短建议删除、合并或调整 intent；是否进行一次有界的计划调整由 Rule Generator 决定。
+- Synthesizer 通常返回空的 `plan_suggestion`。只有在源码语料匹配精度明显过差且能够保留必要用例召回时，才可简短建议删除、合并或调整 intent；是否进行一次有界的计划调整由 Rule Generator 决定。
 - 除非结构约束或 API 约束使其对规则敏感，否则拒绝使用泛化的调用、赋值、定义和条件作为锚点。
-- 精度优化用于减少兄弟锚点之间的重叠。无关的仓库额外匹配不能作为缩窄查询的理由；必要时应保留召回并降低 `query_weight`。
+- 精度优化用于减少兄弟锚点之间的重叠。无关的源码额外匹配不能作为缩窄查询的理由；必要时应保留召回并降低 `query_weight`。
 
 关于 Skill 内部的规则执行和报告流程，请参阅 [`vas-scanner` Skill](src/.vaminer/skills/vas-scanner/SKILL.md)。

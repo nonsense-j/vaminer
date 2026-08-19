@@ -24,7 +24,7 @@ from ...agent.schema import descriptive_json_schema
 from ...models.vas import RuleGenerationDraft
 from ...utils.config import GITHUB_MIRROR_ENABLED
 from ...utils.telemetry import claude_trace_environment, propagated_trace_environment
-from .config import ClaudeCodeConfig
+from .config import LANGFUSE_CLAUDE_PLUGIN_ID, ClaudeCodeConfig
 from .errors import ClaudeCodeConfigurationError
 from .mcp import (
     CASES_DIR_ENV,
@@ -77,9 +77,6 @@ _PROFILES = {
     AgentPhase.RULE_GENERATION: (MCPProfile.RULE_GENERATION, ()),
     AgentPhase.AST_GREP_SYNTHESIS: (MCPProfile.AST_GREP_SYNTHESIS, ()),
 }
-_LANGFUSE_PLUGIN_ID = "langfuse-observability@langfuse-observability"
-
-
 def model_output_type(task: AgentTask[Any]) -> type[BaseModel]:
     return RuleGenerationDraft if task.phase is AgentPhase.RULE_GENERATION else task.output_type
 
@@ -143,7 +140,7 @@ class PolicyCompiler:
         if task.phase is AgentPhase.ISSUE_COLLECTION:
             detail = "Use the scoped issue MCP tools first; WebSearch/WebFetch are fallback evidence tools only."
         elif task.phase is AgentPhase.ROOT_CAUSE:
-            detail = "Use scoped repository reads and typed Case Artifact operations; generic filesystem tools are unavailable."
+            detail = "Use scoped source reads and typed Case Artifact operations; generic filesystem tools are unavailable."
         elif task.phase is AgentPhase.RULE_GENERATION:
             detail = "Read only Case Artifacts and submit complete plans through `mcp__vaminer__synthesize_anchor_plan`."
         else:
@@ -236,11 +233,10 @@ class PolicyCompiler:
         settings_payload: dict[str, Any] = {
             "permissions": {"defaultMode": "dontAsk", "allow": list(policy.allowed_tools)},
             "enableAllProjectMcpServers": False,
+            "enabledPlugins": {
+                LANGFUSE_CLAUDE_PLUGIN_ID: bool(claude_trace_environment()),
+            },
         }
-        if not claude_trace_environment():
-            # A user-installed plugin must not emit standalone traces when the
-            # parent VAMiner trace is disabled or unavailable.
-            settings_payload["enabledPlugins"] = {_LANGFUSE_PLUGIN_ID: False}
         _write_private(settings, json.dumps(settings_payload, indent=2))
         # Keep the virtual-environment entry point intact. Resolving this symlink
         # selects the base interpreter and drops the venv's installed packages.

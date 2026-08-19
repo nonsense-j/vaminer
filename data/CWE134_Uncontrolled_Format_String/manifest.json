@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "suite": "CWE134_Uncontrolled_Format_String",
+  "origin": "Juliet-inspired synthetic example; not copied from the NIST Juliet distribution",
+  "cwe": {
+    "id": "CWE-134",
+    "name": "Use of Externally-Controlled Format String"
+  },
+  "language": "c",
+  "pattern": {
+    "bad_source": "Text read from standard input",
+    "bad_sink": "Passing that text as the format argument to printf",
+    "fixing_invariant": "Use a constant format string and pass external text only as a value argument"
+  },
+  "cases": [
+    {
+      "id": "CWE134_Uncontrolled_Format_String__char_stdin_printf_01",
+      "flow_variant": "01",
+      "flow": "Baseline: source and sink are in the same function",
+      "file": "CWE134_Uncontrolled_Format_String__char_stdin_printf_01.c",
+      "bad_functions": [
+        "CWE134_Uncontrolled_Format_String__char_stdin_printf_01_bad"
+      ],
+      "good_functions": [
+        "goodB2G"
+      ]
+    },
+    {
+      "id": "CWE134_Uncontrolled_Format_String__char_stdin_printf_41",
+      "flow_variant": "41",
+      "flow": "Data is passed to a sink function in the same source file",
+      "file": "CWE134_Uncontrolled_Format_String__char_stdin_printf_41.c",
+      "bad_functions": [
+        "badSink",
+        "CWE134_Uncontrolled_Format_String__char_stdin_printf_41_bad"
+      ],
+      "good_functions": [
+        "goodB2GSink",
+        "goodB2G"
+      ]
+    }
+  ]
+}

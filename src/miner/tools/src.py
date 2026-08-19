@@ -159,16 +159,18 @@ def read_src_file(
     start_line: int = 1,
     end_line: int | None = None,
     max_lines: int = MAX_SRC_READ_LINES,
+    full_file: bool = False,
 ) -> dict[str, object]:
-    """Read a bounded line range from one Src-Root-relative regular file.
+    """Read a bounded line range or one complete Src-Root-relative file.
 
     The tool is already rooted at the analyzed Src Root, so ``path`` must be
     relative to that root and must not include its workspace prefix. Line
     numbers are one-based and ``end_line`` is inclusive. Reads are capped at
     the configured line limit; continue from one line after the returned
-    ``end_line`` when ``truncated`` is true. A start position past EOF returns
-    empty content together with the file length and a recovery message.
-    Oversized files are rejected.
+    ``end_line`` when ``truncated`` is true. Set ``full_file`` to read the whole
+    file without line bounds; the byte limit still applies. A start position
+    past EOF returns empty content together with the file length and a recovery
+    message. Oversized files are rejected.
     """
 
     if not path:
@@ -178,6 +180,8 @@ def read_src_file(
         raise ValueError(f"src path is not a regular file: {path}")
     if start_line < 1 or max_lines < 1:
         raise ValueError("start_line and max_lines must be positive")
+    if full_file and (start_line != 1 or end_line is not None):
+        raise ValueError("full_file cannot be combined with start_line or end_line bounds")
     if target.stat().st_size > MAX_SRC_READ_BYTES:
         raise ValueError(f"src file exceeds the {MAX_SRC_READ_BYTES}-byte read limit: {path}")
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
@@ -203,10 +207,11 @@ def read_src_file(
                 "no content was returned"
             ),
         }
-    requested_end = end_line if end_line is not None else start_line + max_lines - 1
+    effective_max_lines = MAX_SRC_READ_BYTES if full_file else max_lines
+    requested_end = end_line if end_line is not None else start_line + effective_max_lines - 1
     if requested_end < start_line:
         raise ValueError("end_line must be greater than or equal to start_line")
-    resolved_end = min(len(lines), requested_end, start_line + max_lines - 1)
+    resolved_end = min(len(lines), requested_end, start_line + effective_max_lines - 1)
     return {
         "path": Path(path).as_posix(),
         "content": "".join(lines[start_line - 1 : resolved_end]),

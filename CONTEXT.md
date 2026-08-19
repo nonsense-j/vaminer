@@ -22,6 +22,7 @@ VAMiner turns one Mining Input into a Variant Analysis Specification (VAS). The 
 - Instructions compile exactly as canonical shared instructions → input policy → Runtime Adapter binding. The Adapter binding names concrete tools and structured output; it cannot redefine responsibility or constraints.
 - One mining run uses one Runtime Adapter and one model identity for every parent and child Agent.
 - RCA is the only Agent that writes workspace data, and it writes only through typed Case Artifact operations. Cleanup is explicit; acceptance and cache loading are pure.
+- Example Suite RCA receives the complete verified snapshot file list as Src-Root-relative paths and must not infer unlisted files. It uses the same Src tools as repository RCA and may request `full_file` reads within the shared byte limit.
 - Rule Generation cannot read source or author query syntax. It produces semantics and submits at most two Anchor Plans.
 - A Synthesizer cannot change RCA, summary, intent fields, or invoke another Agent. Invalid query semantics may degrade that one Anchor to `query: ""`; protocol, authority, and external execution failures propagate.
 - Runtime Artifacts, generic filesystem permissions, arbitrary metadata, and capability negotiation are not part of the architecture.

@@ -37,10 +37,27 @@ cp .env.example .env
 
 The example selects DeepSeek. Set `DEEPSEEK_API_KEY` in the repository-root `.env`, or choose one of the other configurations in [LLM configuration](#llm-configuration).
 
-Confirm that ast-grep is available before mining:
+Run the local preflight before mining:
 
 ```bash
-ast-grep --version
+uv run python -m src.miner.preflight --runtime pydanic-sdk
+uv run python -m src.miner.preflight --runtime claude-cli
+```
+
+The interactive command streams each check and long-running wait to stderr, then prints a final report. The
+default preflight does not call a model. It validates Python and bundled assets, writable paths, Git,
+an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration.
+For Claude it also checks the CLI flags, the installed Langfuse plugin when tracing is configured, and a real
+MCP handshake/list-tools/tool-call cycle.
+
+Add `--live` to make one small model request. The Agent must call a probe tool, return structured output, and,
+when Langfuse is enabled, produce at least one runtime observation under the preflight trace. This request may
+incur provider cost. Add `--json` for a machine-readable stdout report; progress remains on stderr unless
+`--quiet` is supplied. Any failed required check produces exit code 1.
+Langfuse trace visibility is polled for up to 120 seconds by default, with a heartbeat every 10 seconds.
+
+```bash
+uv run python -m src.miner.preflight --runtime claude-cli --live
 ```
 
 ### Generate a rule
@@ -59,6 +76,12 @@ You can also pass an Example Suite directory. Its basename (typically something 
 
 ```bash
 uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
+```
+
+The repository includes a synthetic input inspired by Juliet naming and flow-variant conventions:
+
+```bash
+uv run python -m src.miner.main --example-suite data/CWE134_Uncontrolled_Format_String
 ```
 
 At the domain-input level, the miner only requires an existing non-empty directory containing at least one recognizable source file recursively. It imposes no case-count, layout, source-language-count, or manifest requirement. Good/bad evidence may be expressed through filenames, directories, comments, labels, or an optional manifest and is interpreted against source behavior during RCA. Symbolic links and special filesystem entries remain excluded so the immutable snapshot cannot escape the input directory.
@@ -203,7 +226,7 @@ claude plugin marketplace add langfuse/Claude-Observability-Plugin
 claude plugin install langfuse-observability@langfuse-observability
 ```
 
-VAMINER passes the active phase span through `CC_LANGFUSE_TRACEPARENT`, so the plugin's Conversational Turn, Generation, and Tool observations join the same Miner trace. The plugin is disabled in VAMINER's temporary settings whenever the parent Langfuse trace is disabled or unavailable.
+VAMINER passes the active phase span through `CC_LANGFUSE_TRACEPARENT`, so the plugin's Conversational Turn, Generation, and Tool observations join the same Miner trace. VAMINER explicitly enables the plugin in each temporary Claude invocation when a parent trace is available, regardless of its user-level enabled state, and disables it for that invocation when tracing is unavailable.
 
 External evidence and optional tracing are configured in the same ignored repository-root `.env`:
 
@@ -309,8 +332,8 @@ A complete anchor set is recall-oriented and behavior-distinct:
 - Each anchor represents one distinct observable behavior in the causal chain, even when case coverage overlaps.
 - `behavior` describes only the local operation matched by that anchor; cross-site relationships, exploit conditions, and review questions belong in `inspect_hint`.
 - Each per-anchor query is centered on its target `behavior`. To reduce overlap with sibling anchors, one precision pass may add local defect-relevant structure supported by every required case and the RCA site, such as requiring the target operation to appear inside an `if` statement. Project-specific or full-chain constraints remain out of bounds.
-- A Synthesizer normally returns an empty `plan_suggestion`. It may briefly suggest deleting, merging, or revising intents only when observed repository precision is materially poor and required-case recall can be preserved; the Rule Generator decides whether one bounded plan refinement is worthwhile.
+- A Synthesizer normally returns an empty `plan_suggestion`. It may briefly suggest deleting, merging, or revising intents only when observed source-corpus precision is materially poor and required-case recall can be preserved; the Rule Generator decides whether one bounded plan refinement is worthwhile.
 - Generic calls, assignments, definitions, and conditions are rejected unless structural or API constraints make them rule-sensitive.
-- Precision refinement is for reducing overlap between sibling anchors. Unrelated repository matches do not justify narrowing the query; keep recall and lower `query_weight` when needed.
+- Precision refinement is for reducing overlap between sibling anchors. Unrelated source matches do not justify narrowing the query; keep recall and lower `query_weight` when needed.
 
 See [the vas-scanner skill](src/.vaminer/skills/vas-scanner/SKILL.md) for its internal rule-execution and reporting workflow.

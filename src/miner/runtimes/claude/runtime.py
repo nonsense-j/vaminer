@@ -30,7 +30,7 @@ from ...mining.synthesis import (
     AnchorSynthesisReceipt,
     finalize_rule_generation,
 )
-from ...utils.log import RuntimeLog, logger, relay_log_renderable
+from ...utils.log import RuntimeLog, logger
 from ...utils.telemetry import trace_agent_observation, trace_value
 from .config import ClaudeCodeConfig
 from .errors import (
@@ -66,7 +66,12 @@ def _merge_usage(current: RuntimeUsage | None, added: RuntimeUsage) -> RuntimeUs
     )
 
 
-async def _relay_synthesis_log(path: Path, finished: asyncio.Event) -> None:
+async def _relay_synthesis_log(
+    path: Path,
+    finished: asyncio.Event,
+    *,
+    runtime_log: RuntimeLog,
+) -> None:
     """Stream MCP-hosted Synthesizer panels through the parent logger."""
 
     pending = bytearray()
@@ -77,10 +82,10 @@ async def _relay_synthesis_log(path: Path, finished: asyncio.Event) -> None:
                 while (newline := pending.find(b"\n")) >= 0:
                     raw_line = bytes(pending[:newline])
                     del pending[: newline + 1]
-                    relay_log_renderable(raw_line.decode("utf-8", errors="replace").rstrip("\r"))
+                    runtime_log.relay(raw_line.decode("utf-8", errors="replace").rstrip("\r"))
                 if finished.is_set():
                     if pending:
-                        relay_log_renderable(bytes(pending).decode("utf-8", errors="replace"))
+                        runtime_log.relay(bytes(pending).decode("utf-8", errors="replace"))
                     return
                 try:
                     await asyncio.wait_for(finished.wait(), timeout=0.05)
@@ -245,7 +250,11 @@ class ClaudeCodeRuntime:
                     if files.synthesis_log is not None:
                         files.synthesis_log.write_text("", encoding="utf-8")
                         relay_task = asyncio.create_task(
-                            _relay_synthesis_log(files.synthesis_log, relay_finished)
+                            _relay_synthesis_log(
+                                files.synthesis_log,
+                                relay_finished,
+                                runtime_log=self._runtime_log,
+                            )
                         )
                     try:
                         process = await self._runner.run(

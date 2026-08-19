@@ -193,7 +193,8 @@ def _root_cause_input_policy(
 ## Example Suite snapshot
 
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
-- `src` is an immutable Example Suite snapshot, not a repository checkout. Discover its flat or nested contents with the scoped source tools.{manifest}
+- `intake.files` is the exhaustive, authoritative list of files in the immutable Example Suite snapshot.{manifest}
+- Use only paths present in `intake.files`; never infer, invent, or probe another filename. Read file content through `read_src_file`; `full_file=true` may be used to return a complete file within the tool's byte limit.
 - The suite is a flexible collection of demonstrations that share one defect pattern. Files may be flat or nested, and there may be many bad/unsafe cases.
 - The suite may distinguish bad/unsafe from good/safe cases through filenames, directories, comments, labels, or its manifest. Treat those markers as navigation hints and verify behavior in the source.
 - Analyze and record every concrete bad/unsafe span. Use good/safe cases only as contrastive evidence for isolating the violated invariant; do not emit them as `buggy_components` or Case Artifacts.
@@ -233,6 +234,33 @@ def _rule_input_policy(grounding: GroundingPolicy) -> str:
 
 - Design intents from RCA-declared repository spans.
 - Every enabled synthesized query must overlap an applicable declared span.
+"""
+
+
+def _synthesis_input_policy(
+    *,
+    source_root: Path,
+    grounding_policy: GroundingPolicy,
+) -> str:
+    bound_root = source_root.resolve().as_posix()
+    if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE:
+        return f"""# Input Context
+
+## Example Suite snapshot
+
+- The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
+- `src` is the complete immutable Example Suite snapshot analyzed by RCA. Files may be flat or nested and may contain multiple bad/unsafe and good/safe demonstrations.
+- Ground the query against the applicable RCA-declared bad/unsafe spans. Good/safe source is contrastive evidence only and is not a required positive match.
+- Interpret additional `src` matches as other suite examples; accept them only when they remain plausible instances of the target behavior.
+"""
+    return f"""# Input Context
+
+## Repository checkout
+
+- The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
+- `src` is the affected repository source corpus analyzed by RCA.
+- Ground the query by overlapping at least one applicable RCA-declared source span for this intent.
+- Treat other repository matches as precision evidence, not automatically as required positives or confirmed defects.
 """
 
 
@@ -297,6 +325,7 @@ def make_root_cause_task(
             "file_count": source.file_count,
             "source_file_count": len(source.source_files),
             "manifest_path": source.manifest_path,
+            "files": [metadata.path for metadata in source.files],
         }
     authority = RootCauseAuthority(
         source_root=source_root,
@@ -394,7 +423,7 @@ def make_ast_grep_synthesis_task(
     requirement = (
         "Match at least one applicable RCA-declared bad span."
         if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
-        else "Overlap at least one applicable RCA-declared repository span."
+        else "Overlap at least one applicable RCA-declared source span."
     )
     return AgentTask(
         task_id=task_id or f"ast-grep-synthesis:{intent.id}",
@@ -416,6 +445,10 @@ def make_ast_grep_synthesis_task(
             indent=2,
         ),
         workspace_root=workspace_root,
+        input_policy=_synthesis_input_policy(
+            source_root=source_root,
+            grounding_policy=grounding_policy,
+        ),
         limit_override=limits,
     )
 

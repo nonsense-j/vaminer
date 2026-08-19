@@ -192,9 +192,16 @@ class PydanticAIRuntime:
             path: str,
             start_line: int = 1,
             end_line: int | None = None,
+            full_file: bool = False,
         ) -> dict[str, object]:
             try:
-                return read_src_impl(root, path, start_line=start_line, end_line=end_line)
+                return read_src_impl(
+                    root,
+                    path,
+                    start_line=start_line,
+                    end_line=end_line,
+                    full_file=full_file,
+                )
             except (ValueError, RuntimeError, OSError) as exc:
                 _raise_tool_feedback(exc)
 

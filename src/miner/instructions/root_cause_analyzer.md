@@ -44,6 +44,6 @@ Return one complete structured analysis once the causal chain, fixing invariant,
 # Constraints
 
 - Keep source exploration focused and efficient; avoid broad or repeated queries.
-- When reading source or comparison content, use a focused Src-Root-relative path, search pattern, and read range.
+- When reading source or comparison content, use a focused Src-Root-relative path, search pattern, and read range unless the Input Context explicitly permits a full-file read.
 - Write only through `write_case_artifact`; generic filesystem writes are not available.
 - Stop once the required causal evidence and Case Artifacts are complete; do not perform rule generation.

@@ -214,8 +214,15 @@ def _register_src_tools(server: Any, root: Path) -> None:
         path: str,
         start_line: int = 1,
         end_line: int | None = None,
+        full_file: bool = False,
     ) -> dict[str, object]:
-        return read_src_impl(root, path, start_line=start_line, end_line=end_line)
+        return read_src_impl(
+            root,
+            path,
+            start_line=start_line,
+            end_line=end_line,
+            full_file=full_file,
+        )
 
     read_src_file.__doc__ = f"{read_src_impl.__doc__}{root_note}"
 

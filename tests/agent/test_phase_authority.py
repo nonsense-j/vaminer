@@ -10,7 +10,7 @@ from src.miner.mining.tasks import (
     make_issue_collection_task,
     make_root_cause_task,
 )
-from src.miner.mining.examples import ExampleSuiteIntake
+from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.models import GroundingPolicy, IssueCollectionInfo
 
 
@@ -88,22 +88,15 @@ def test_repository_root_cause_context_declares_bound_root_and_revisions(tmp_pat
 def test_example_suite_root_cause_context_declares_contrastive_evidence(tmp_path: Path):
     source_root = tmp_path / "src" / "input_snapshot"
     cases = tmp_path / "cases"
-    source_root.mkdir(parents=True)
+    nested = source_root / "nested"
+    nested.mkdir(parents=True)
     cases.mkdir()
+    (source_root / "bad.c").write_text("danger();\n", encoding="utf-8")
+    (nested / "good.c").write_text("safe();\n", encoding="utf-8")
+    (source_root / "manifest.json").write_text('{"bad": ["bad.c"]}\n', encoding="utf-8")
+    inspection = inspect_example_suite(source_root)
     suite = ExampleSuiteIntake(
-        registry_key="example-suite:sample",
-        suite_name="sample",
-        source_path=(tmp_path / "sample").as_posix(),
-        content_digest="a" * 64,
-        file_count=3,
-        total_bytes=3,
-        source_files=["bad.c", "good.c"],
-        files=[
-            {"path": "bad.c", "size": 1, "sha256": "b" * 64, "source": True},
-            {"path": "good.c", "size": 1, "sha256": "c" * 64, "source": True},
-            {"path": "manifest.json", "size": 1, "sha256": "d" * 64, "source": False},
-        ],
-        manifest_path="manifest.json",
+        **inspection.model_dump(mode="json"),
         snapshot_path=source_root.as_posix(),
         snapshot_ref="src/input_snapshot",
     )
@@ -119,12 +112,21 @@ def test_example_suite_root_cause_context_declares_contrastive_evidence(tmp_path
     assert payload["intake"]["source_layout"] == "example_suite_snapshot"
     assert payload["intake"]["file_count"] == 3
     assert payload["intake"]["source_file_count"] == 2
-    assert "files" not in payload["intake"]
+    assert payload["intake"]["files"] == ["bad.c", "manifest.json", "nested/good.c"]
+    assert "danger();" not in task.prompt
+    assert "safe();" not in task.prompt
     assert "source_files" not in payload["intake"]
+    assert payload["src_tools"] == {
+        "root": source_root.resolve().as_posix(),
+        "path_arguments": "relative_to_root",
+    }
     assert source_root.resolve().as_posix() in task.input_policy
+    assert "never infer, invent, or probe" in task.input_policy
+    assert "full_file=true" in task.input_policy
     assert "bad/unsafe" in task.input_policy
     assert "good/safe" in task.input_policy
-    assert "read_patch_diff" not in task.tools
+    assert task.definition is PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE]
+    assert set(task.tools) == set(PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE].tools)
 
 
 def test_issue_input_is_validated_before_task_construction(tmp_path: Path):

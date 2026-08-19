@@ -13,6 +13,7 @@ COMMAND = (os.getenv("CLAUDE_CODE_COMMAND") or "claude").strip()
 MODEL = (os.getenv("CLAUDE_CODE_MODEL") or "").strip() or None
 TIMEOUT_SECONDS = int(os.getenv("CLAUDE_CODE_TIMEOUT_SECONDS") or "1800")
 MAX_OUTPUT_BYTES = int(os.getenv("CLAUDE_CODE_MAX_OUTPUT_BYTES") or str(16 * 1024 * 1024))
+LANGFUSE_CLAUDE_PLUGIN_ID = "langfuse-observability@langfuse-observability"
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,6 +14,7 @@ from src.miner.mining.tasks import (
     make_root_cause_task,
     make_rule_generation_task,
 )
+from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.models import (
     AnchorIntent,
     AnchorPlan,
@@ -24,7 +25,7 @@ from src.miner.models import (
     IssueCollectionInfo,
     RootCauseAnalysis,
 )
-from src.miner.runtimes.claude.config import ClaudeCodeConfig
+from src.miner.runtimes.claude.config import LANGFUSE_CLAUDE_PLUGIN_ID, ClaudeCodeConfig
 from src.miner.runtimes.claude.errors import (
     ClaudeCodeChildSynthesisError,
     ClaudeCodeConfigurationError,
@@ -138,10 +139,25 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
     assert "stream-json" in argv
     assert files.receipt is None
     assert json.loads(files.settings.read_text(encoding="utf-8"))["enabledPlugins"] == {
-        "langfuse-observability@langfuse-observability": False
+        LANGFUSE_CLAUDE_PLUGIN_ID: False
     }
     mcp_config = json.loads(files.mcp.read_text(encoding="utf-8"))
     assert mcp_config["mcpServers"]["vaminer"]["command"] == str(Path(sys.executable).absolute())
+
+    inspection = inspect_example_suite(source)
+    suite_task = make_root_cause_task(
+        ExampleSuiteIntake(
+            **inspection.model_dump(mode="json"),
+            snapshot_path=source.as_posix(),
+            snapshot_ref="src/input_snapshot",
+        ),
+        workspace_root=workspace,
+        source_root=source,
+        cases_dir=cases,
+        grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
+    )
+    suite_policy = compiler.compile(suite_task)
+    assert {"list_src_files", "search_src_files", "read_src_file"} <= set(suite_policy.mcp_tools)
 
     traceparent = "00-0123456789abcdef0123456789abcdef-fedcba9876543210-01"
     monkeypatch.setattr(
@@ -159,7 +175,9 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
         executable="/bin/true",
         model_id="session",
     )
-    assert "enabledPlugins" not in json.loads(traced_files.settings.read_text(encoding="utf-8"))
+    assert json.loads(traced_files.settings.read_text(encoding="utf-8"))["enabledPlugins"] == {
+        LANGFUSE_CLAUDE_PLUGIN_ID: True
+    }
 
 
 def test_rule_policy_materializes_synthesizer_log_channel(tmp_path: Path):
@@ -192,11 +210,12 @@ async def test_synthesizer_log_relay_forwards_complete_lines(tmp_path: Path, mon
     synthesis_log = tmp_path / "synthesis.log"
     synthesis_log.write_text("first panel line\nsecond panel line\n", encoding="utf-8")
     received = []
-    monkeypatch.setattr("src.miner.runtimes.claude.runtime.relay_log_renderable", received.append)
+    runtime_log = RuntimeLog(emit_console=False)
+    monkeypatch.setattr(runtime_log, "relay", received.append)
     finished = asyncio.Event()
     finished.set()
 
-    await _relay_synthesis_log(synthesis_log, finished)
+    await _relay_synthesis_log(synthesis_log, finished, runtime_log=runtime_log)
 
     assert received == ["first panel line", "second panel line"]
 
@@ -224,6 +243,10 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
     assert source.as_posix() in root.tools["list_src_files"].__doc__
     assert "file or directory" in root.tools["search_src_files"].__doc__
     assert "one-based" in root.tools["read_src_file"].__doc__
+    (source / "long.c").write_text("line\n" * 250, encoding="utf-8")
+    complete = root.tools["read_src_file"]("long.c", full_file=True)
+    assert complete["end_line"] == 250
+    assert complete["truncated"] is False
     synthesis = build_server(
         settings=MCPServerSettings(
             profile=MCPProfile.AST_GREP_SYNTHESIS,

@@ -91,14 +91,6 @@ def _log_renderable(rendered: str) -> None:
     )
 
 
-def relay_log_renderable(rendered: str) -> None:
-    """Write an already-formatted subprocess diagnostic to stdout and the run file."""
-    logger.info(
-        rendered.rstrip("\n"),
-        extra={_RAW_RECORD_ATTRIBUTE: True},
-    )
-
-
 def _redact_text(value: str) -> str:
     return _SECRET.sub(lambda match: (match.group(1) or "") + "<redacted>", value)
 
@@ -179,11 +171,13 @@ class RuntimeLog:
         *,
         console: Console | None = None,
         emit_console: bool = True,
+        ansi_transport: bool = False,
         width: int = 120,
         body_limit: int = 1_000,
         lines_limit: int = 15,
     ) -> None:
         self.console = (console or Console(width=width)) if emit_console else None
+        self.ansi_transport = ansi_transport
         self.width = width
         self.body_limit = body_limit
         self.lines_limit = lines_limit
@@ -213,12 +207,33 @@ class RuntimeLog:
             if self.console is not None:
                 self.console.print(panel)
             buffer = StringIO()
-            Console(file=buffer, width=self.width, color_system=None, force_terminal=False).print(panel)
+            if self.ansi_transport:
+                Console(
+                    file=buffer,
+                    width=self.width,
+                    color_system="truecolor",
+                    force_terminal=True,
+                    no_color=False,
+                ).print(panel)
+            else:
+                Console(file=buffer, width=self.width, color_system=None, force_terminal=False).print(panel)
             _log_renderable(buffer.getvalue())
         except Exception:
             logger.debug("Failed to emit Runtime diagnostics", exc_info=True)
             return "<diagnostic unavailable>"
         return safe
+
+    def relay(self, rendered: str) -> None:
+        """Relay an ANSI Rich transport line to this console and the plain run log."""
+        try:
+            decoded = Text.from_ansi(rendered.rstrip("\n"))
+            if self.console is not None:
+                self.console.print(decoded)
+            buffer = StringIO()
+            Console(file=buffer, width=self.width, color_system=None, force_terminal=False).print(decoded)
+            _log_renderable(buffer.getvalue())
+        except Exception:
+            logger.debug("Failed to relay Runtime diagnostics", exc_info=True)
 
     def started(self, agent_name: str, content: Any) -> None:
         self._emit(
