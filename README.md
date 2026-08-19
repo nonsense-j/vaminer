@@ -22,6 +22,7 @@ This repository generates VAS rules. It does **not** provide a standalone end-us
 - Python 3.12 or newer
 - `uv`
 - Git
+- The `rg` (ripgrep) executable available on `PATH`
 - The `ast-grep` or `sg` executable available on `PATH`
 - For Pydantic AI, an API key for a supported LLM provider
 - For Claude CLI, an installed `claude` command with an authenticated user session
@@ -45,7 +46,7 @@ uv run python -m src.miner.preflight --runtime claude-cli
 ```
 
 The interactive command streams each check and long-running wait to stderr, then prints a final report. The
-default preflight does not call a model. It validates Python and bundled assets, writable paths, Git,
+default preflight does not call a model. It validates Python and bundled assets, writable paths, Git, `rg`,
 an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration.
 For Claude it also checks the CLI flags, the installed Langfuse plugin when tracing is configured, and a real
 MCP handshake/list-tools/tool-call cycle.

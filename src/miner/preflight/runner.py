@@ -14,7 +14,7 @@ from .claude import (
     check_claude_live,
     check_mcp_server,
 )
-from .common import check_ast_grep, check_git, check_paths, check_project_assets, check_python
+from .common import check_ast_grep, check_git, check_paths, check_project_assets, check_python, check_rg
 from .models import CheckResult, CheckStatus, PreflightReport
 from .pydantic import check_pydantic_config, check_pydantic_live
 from .progress import ProgressCallback, notify
@@ -48,11 +48,15 @@ async def run_preflight(
 ) -> PreflightReport:
     checks: list[CheckResult] = []
 
+    def result_message(check: CheckResult) -> str:
+        detail = f"; detail={check.detail}" if check.detail else ""
+        return f"{check.status.value.upper()} {check.name}: {check.summary}{detail}"
+
     def run_check(label: str, function: Callable[[], CheckResult]) -> None:
         notify(progress, f"checking {label} ...")
         check = function()
         checks.append(check)
-        notify(progress, f"{check.status.value.upper()} {check.name}: {check.summary}")
+        notify(progress, result_message(check))
 
     run_check("Python", check_python)
     run_check("project assets", check_project_assets)
@@ -65,12 +69,13 @@ async def run_preflight(
         ),
     )
     run_check("Git", check_git)
+    run_check("ripgrep source navigation", check_rg)
     run_check("ast-grep functional query", lambda: check_ast_grep(timeout_seconds=options.timeout_seconds))
 
     notify(progress, "checking Langfuse authentication ...")
     langfuse_check, langfuse_client = check_langfuse()
     checks.append(langfuse_check)
-    notify(progress, f"{langfuse_check.status.value.upper()} {langfuse_check.name}: {langfuse_check.summary}")
+    notify(progress, result_message(langfuse_check))
 
     executable: str | None = None
     active_claude_config = claude_config or ClaudeCodeConfig()
@@ -83,7 +88,7 @@ async def run_preflight(
             timeout_seconds=options.timeout_seconds,
         )
         checks.append(cli_check)
-        notify(progress, f"{cli_check.status.value.upper()} {cli_check.name}: {cli_check.summary}")
+        notify(progress, result_message(cli_check))
         notify(progress, "checking Claude Langfuse plugin ...")
         plugin_check = check_claude_langfuse_plugin(
             executable,
@@ -91,7 +96,7 @@ async def run_preflight(
             timeout_seconds=options.timeout_seconds,
         )
         checks.append(plugin_check)
-        notify(progress, f"{plugin_check.status.value.upper()} {plugin_check.name}: {plugin_check.summary}")
+        notify(progress, result_message(plugin_check))
         notify(progress, "checking VAMiner MCP handshake and tool call ...")
         mcp_check = await check_mcp_server(
             active_claude_config,
@@ -99,15 +104,15 @@ async def run_preflight(
             progress=progress,
         )
         checks.append(mcp_check)
-        notify(progress, f"{mcp_check.status.value.upper()} {mcp_check.name}: {mcp_check.summary}")
+        notify(progress, result_message(mcp_check))
 
     live_name = "pydantic.agent-live" if options.runtime_id == "pydanic-sdk" else "claude.agent-live"
     if not options.live:
         live_check = CheckResult.skipped(live_name, "Use --live to make a real model request")
         trace_check = CheckResult.skipped("langfuse.trace", "Use --live to emit and verify a probe trace")
         checks.extend((live_check, trace_check))
-        notify(progress, f"SKIP {live_check.name}: {live_check.summary}")
-        notify(progress, f"SKIP {trace_check.name}: {trace_check.summary}")
+        notify(progress, result_message(live_check))
+        notify(progress, result_message(trace_check))
         return PreflightReport(options.runtime_id, options.live, tuple(checks))
 
     failed_prerequisites = [check.name for check in checks if check.status is CheckStatus.FAIL]
@@ -118,8 +123,8 @@ async def run_preflight(
         )
         trace_check = CheckResult.skipped("langfuse.trace", "No live probe trace was emitted")
         checks.extend((live_check, trace_check))
-        notify(progress, f"SKIP {live_check.name}: {live_check.summary}")
-        notify(progress, f"SKIP {trace_check.name}: {trace_check.summary}")
+        notify(progress, result_message(live_check))
+        notify(progress, result_message(trace_check))
         return PreflightReport(options.runtime_id, options.live, tuple(checks))
 
     trace_id: str | None = None
@@ -150,7 +155,7 @@ async def run_preflight(
             )
         pipeline.update(output=live_check.as_dict())
         checks.append(live_check)
-        notify(progress, f"{live_check.status.value.upper()} {live_check.name}: {live_check.summary}")
+        notify(progress, result_message(live_check))
 
     notify(progress, "checking Langfuse trace ingestion ...")
     trace_check = await check_trace_ingestion(
@@ -161,7 +166,7 @@ async def run_preflight(
         progress=progress,
     )
     checks.append(trace_check)
-    notify(progress, f"{trace_check.status.value.upper()} {trace_check.name}: {trace_check.summary}")
+    notify(progress, result_message(trace_check))
     return PreflightReport(options.runtime_id, options.live, tuple(checks))
 
 

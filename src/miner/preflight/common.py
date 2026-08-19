@@ -67,6 +67,13 @@ def check_git() -> CheckResult:
     return CheckResult.passed("git", f"git executable found at {executable}")
 
 
+def check_rg() -> CheckResult:
+    executable = shutil.which("rg")
+    if executable is None:
+        return CheckResult.failed("rg", "ripgrep (rg) was not found on PATH")
+    return CheckResult.passed("rg", f"ripgrep executable found at {executable}")
+
+
 def check_ast_grep(*, timeout_seconds: float) -> CheckResult:
     started = time.monotonic()
     try:
@@ -96,4 +103,4 @@ def check_ast_grep(*, timeout_seconds: float) -> CheckResult:
     )
 
 
-__all__ = ["check_ast_grep", "check_git", "check_paths", "check_project_assets", "check_python"]
+__all__ = ["check_ast_grep", "check_git", "check_paths", "check_project_assets", "check_python", "check_rg"]

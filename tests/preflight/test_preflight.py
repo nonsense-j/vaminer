@@ -10,6 +10,7 @@ import pytest
 from src.miner.preflight import tracing
 from src.miner.preflight.claude import check_claude_langfuse_plugin, check_mcp_server
 from src.miner.preflight.cli import parse_args
+from src.miner.preflight import common
 from src.miner.preflight.models import CheckResult, CheckStatus, PreflightReport
 from src.miner.preflight.progress import start_heartbeat, stop_heartbeat
 from src.miner.runtimes.claude.config import ClaudeCodeConfig
@@ -34,6 +35,18 @@ def test_report_fails_only_when_a_required_check_fails():
     assert ready.ok is True
     assert blocked.ok is False
     assert blocked.as_dict()["checks"][-1]["status"] == "fail"
+
+
+def test_rg_preflight_requires_ripgrep_on_path(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(common.shutil, "which", lambda name: None if name == "rg" else "/usr/bin/" + name)
+    missing = common.check_rg()
+    assert missing.status is CheckStatus.FAIL
+    assert "rg" in (missing.detail or missing.summary)
+
+    monkeypatch.setattr(common.shutil, "which", lambda name: "/usr/bin/rg" if name == "rg" else None)
+    available = common.check_rg()
+    assert available.status is CheckStatus.PASS
+    assert "/usr/bin/rg" in available.summary
 
 
 def test_langfuse_check_distinguishes_disabled_incomplete_and_authenticated(monkeypatch: pytest.MonkeyPatch):
@@ -116,6 +129,23 @@ async def test_real_mcp_preflight_handshake_and_tool_call():
 
     assert result.status is CheckStatus.PASS, result.detail
     assert any("MCP initialize completed" in message for message in progress)
+
+
+@pytest.mark.asyncio
+async def test_mcp_preflight_reports_nested_exception_and_server_stderr(tmp_path: Path):
+    project_root = Path(__file__).resolve().parents[2]
+    failing_server = tmp_path / "failing-mcp"
+    failing_server.write_text("#!/bin/sh\necho 'MCP bootstrap failed' >&2\nexit 17\n", encoding="utf-8")
+    failing_server.chmod(0o755)
+
+    result = await check_mcp_server(
+        ClaudeCodeConfig(executable="/bin/true", project_root=project_root, mcp_python=failing_server),
+        timeout_seconds=5,
+    )
+
+    assert result.status is CheckStatus.FAIL
+    assert "MCPError: Connection closed" in (result.detail or "")
+    assert "stderr: MCP bootstrap failed" in (result.detail or "")
 
 
 def test_preflight_cli_is_input_free_and_live_is_explicit():

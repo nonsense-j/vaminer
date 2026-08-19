@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TextIO
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -57,6 +57,26 @@ _SENTINEL_FILE = "vaminer_preflight.c"
 class _ClaudeProbeOutput(BaseModel):
     greeting: Literal["hello from vaminer"]
     mcp_sentinel_seen: Literal[True]
+
+
+def _exception_detail(exc: BaseException) -> str:
+    """Keep the useful leaf messages when AnyIO wraps an MCP error in groups."""
+
+    if isinstance(exc, BaseExceptionGroup):
+        details = [_exception_detail(child) for child in exc.exceptions]
+        return "; ".join(dict.fromkeys(detail for detail in details if detail))
+    message = str(exc).strip()
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
+def _mcp_failure_detail(error_log: TextIO, *details: str | None) -> str:
+    error_log.flush()
+    error_log.seek(0)
+    stderr = error_log.read().strip()
+    parts = [detail for detail in details if detail]
+    if stderr:
+        parts.append(f"stderr: {stderr}")
+    return "; ".join(parts) or "MCP failure did not include diagnostic details"
 
 
 def _run_cli(
@@ -216,33 +236,43 @@ async def check_mcp_server(
                 cwd=config.project_root,
             )
             with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as error_log:
-                async with asyncio.timeout(timeout_seconds):
-                    async with stdio_client(parameters, errlog=error_log) as (read_stream, write_stream):
-                        async with ClientSession(read_stream, write_stream) as session:
-                            await session.initialize()
-                            notify(progress, "MCP initialize completed; requesting tool inventory ...")
-                            tools = await session.list_tools()
-                            available = {tool.name for tool in tools.tools}
-                            missing = sorted(_EXPECTED_MCP_TOOLS - available)
-                            if missing:
-                                return CheckResult.failed(
-                                    "claude.mcp",
-                                    "VAMiner MCP server omitted required Root Cause tools",
-                                    detail=", ".join(missing),
-                                )
-                            result = await session.call_tool("list_src_files", {"max_results": 10})
-                            structured = result.structured_content or {}
-                            if result.is_error or _SENTINEL_FILE not in structured.get("files", []):
-                                return CheckResult.failed(
-                                    "claude.mcp",
-                                    "VAMiner MCP tool call returned an unexpected result",
-                                    detail=f"is_error={result.is_error}; payload={structured!r}",
-                                )
+                try:
+                    async with asyncio.timeout(timeout_seconds):
+                        async with stdio_client(parameters, errlog=error_log) as (read_stream, write_stream):
+                            async with ClientSession(read_stream, write_stream) as session:
+                                await session.initialize()
+                                notify(progress, "MCP initialize completed; requesting tool inventory ...")
+                                tools = await session.list_tools()
+                                available = {tool.name for tool in tools.tools}
+                                missing = sorted(_EXPECTED_MCP_TOOLS - available)
+                                if missing:
+                                    return CheckResult.failed(
+                                        "claude.mcp",
+                                        "VAMiner MCP server omitted required Root Cause tools",
+                                        detail=_mcp_failure_detail(error_log, ", ".join(missing)),
+                                    )
+                                result = await session.call_tool("list_src_files", {"max_results": 10})
+                                structured = result.structured_content or {}
+                                if result.is_error or _SENTINEL_FILE not in structured.get("files", []):
+                                    return CheckResult.failed(
+                                        "claude.mcp",
+                                        "VAMiner MCP tool call returned an unexpected result",
+                                        detail=_mcp_failure_detail(
+                                            error_log,
+                                            f"is_error={result.is_error}; payload={structured!r}",
+                                        ),
+                                    )
+                except Exception as exc:  # noqa: BLE001
+                    return CheckResult.failed(
+                        "claude.mcp",
+                        "VAMiner MCP handshake or tool call failed",
+                        detail=_mcp_failure_detail(error_log, _exception_detail(exc)),
+                    )
     except Exception as exc:  # noqa: BLE001
         return CheckResult.failed(
             "claude.mcp",
             "VAMiner MCP handshake or tool call failed",
-            detail=f"{type(exc).__name__}: {exc}",
+            detail=_exception_detail(exc),
         )
     finally:
         await stop_heartbeat(heartbeat)

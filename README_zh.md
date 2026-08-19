@@ -22,6 +22,7 @@ VAMINER 将一个已报告的软件问题转换为变体分析规范（Variant A
 - Python 3.12 或更高版本
 - `uv`
 - Git
+- `PATH` 中可用的 `rg`（ripgrep）命令
 - `PATH` 中可用的 `ast-grep` 或 `sg` 命令
 - 使用 Pydantic AI 时，需要支持的 LLM 服务及对应 API Key
 - 使用 Claude CLI 时，需要已安装 `claude` 命令并完成用户登录
@@ -45,7 +46,7 @@ uv run python -m src.miner.preflight --runtime claude-cli
 ```
 
 交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用
-模型。它会验证 Python 与内置资源、输出路径写权限、Git、一次真实 ast-grep 查询、
+模型。它会验证 Python 与内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、
 已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数、tracing
 启用时是否已安装 Langfuse 插件，以及真实的 MCP handshake、工具列表和只读工具调用。
 
