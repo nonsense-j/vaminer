@@ -30,6 +30,11 @@ class ClaudeCodeConfig:
     max_repair_attempts: int = 2
     max_repair_payload_chars: int = 50_000
 
+    @property
+    def invocation_prefix_args(self) -> tuple[str, ...]:
+        command_name = Path(os.fspath(self.executable)).name
+        return ("--skip-safe-check",) if command_name == "codeagent" else ()
+
     def __post_init__(self) -> None:
         if self.default_timeout_seconds <= 0:
             raise ValueError("default_timeout_seconds must be positive")

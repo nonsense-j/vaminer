@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from src.miner.preflight import tracing
-from src.miner.preflight.claude import check_claude_langfuse_plugin, check_mcp_server
+from src.miner.preflight import runner, tracing
+from src.miner.preflight.claude import check_claude_langfuse_plugin, check_claude_live, check_mcp_server
 from src.miner.preflight.cli import parse_args
 from src.miner.preflight import common
 from src.miner.preflight.models import CheckResult, CheckStatus, PreflightReport
 from src.miner.preflight.progress import start_heartbeat, stop_heartbeat
 from src.miner.runtimes.claude.config import ClaudeCodeConfig
+from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
 
 
 def test_report_fails_only_when_a_required_check_fails():
@@ -114,6 +117,114 @@ def test_claude_plugin_check_requires_installed_official_plugin(monkeypatch: pyt
     assert disabled.status is CheckStatus.PASS
     assert "activation per invocation" in (disabled.detail or "")
     assert enabled.status is CheckStatus.PASS
+
+
+@pytest.mark.asyncio
+async def test_codeagent_live_probe_skips_safe_check(monkeypatch: pytest.MonkeyPatch):
+    captured_argv: list[str] = []
+    events = [
+        {
+            "type": "system",
+            "subtype": "init",
+            "tools": ["mcp__vaminer__list_src_files"],
+            "mcp_servers": [{"name": "vaminer", "status": "connected"}],
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "mcp__vaminer__list_src_files",
+                        "id": "probe-tool",
+                        "input": {},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "structured_output": {
+                "greeting": "hello from vaminer",
+                "mcp_sentinel_seen": True,
+            },
+        },
+    ]
+
+    async def fake_run(self, argv, **kwargs):
+        captured_argv.extend(argv)
+        lines = [json.dumps(event) for event in events]
+        for line in lines:
+            kwargs["stdout_line_handler"](line)
+        return ProcessResult(stdout="\n".join(lines), stderr="", returncode=0, duration_ms=1)
+
+    monkeypatch.setattr(ProcessRunner, "run", fake_run)
+    monkeypatch.setattr("src.miner.preflight.claude.cleanup_session_transcript", lambda *_args: ())
+
+    result = await check_claude_live(
+        ClaudeCodeConfig(executable="codeagent"),
+        executable="/usr/local/bin/codeagent",
+        tracing_active=False,
+        timeout_seconds=1,
+    )
+
+    assert result.status is CheckStatus.PASS
+    assert captured_argv[1] == "--skip-safe-check"
+
+
+@pytest.mark.asyncio
+async def test_failed_claude_live_probe_does_not_wait_for_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    passed = lambda name: CheckResult.passed(name, "ok")
+    monkeypatch.setattr(runner, "check_python", lambda: passed("python"))
+    monkeypatch.setattr(runner, "check_project_assets", lambda: passed("assets"))
+    monkeypatch.setattr(runner, "check_paths", lambda **_kwargs: passed("paths"))
+    monkeypatch.setattr(runner, "check_git", lambda: passed("git"))
+    monkeypatch.setattr(runner, "check_rg", lambda: passed("rg"))
+    monkeypatch.setattr(runner, "check_ast_grep", lambda **_kwargs: passed("ast-grep"))
+    monkeypatch.setattr(runner, "check_langfuse", lambda: (passed("langfuse.auth"), object()))
+    monkeypatch.setattr(runner, "tracing_requested", lambda: True)
+    monkeypatch.setattr(runner, "check_claude_cli", lambda *_args, **_kwargs: (passed("claude.cli"), "claude"))
+    monkeypatch.setattr(
+        runner,
+        "check_claude_langfuse_plugin",
+        lambda *_args, **_kwargs: passed("claude.langfuse-plugin"),
+    )
+
+    async def check_mcp(*_args, **_kwargs):
+        return passed("claude.mcp")
+
+    async def check_live(*_args, **_kwargs):
+        return CheckResult.failed("claude.agent-live", "probe failed")
+
+    async def fail_if_trace_checked(*_args, **_kwargs):
+        pytest.fail("trace ingestion must not be checked after a failed Claude live probe")
+
+    @contextmanager
+    def traced_pipeline(**_kwargs):
+        yield SimpleNamespace(trace_id="0" * 32, observation=object(), update=lambda **_values: None)
+
+    monkeypatch.setattr(runner, "check_mcp_server", check_mcp)
+    monkeypatch.setattr(runner, "check_claude_live", check_live)
+    monkeypatch.setattr(runner, "check_trace_ingestion", fail_if_trace_checked)
+    monkeypatch.setattr(runner, "trace_pipeline", traced_pipeline)
+
+    report = await runner.run_preflight(
+        runner.PreflightOptions(
+            runtime_id="claude-cli",
+            workspace_dir=tmp_path,
+            output_dir=tmp_path,
+            rules_dir=tmp_path,
+            live=True,
+            timeout_seconds=1,
+            trace_wait_seconds=1,
+        ),
+        claude_config=ClaudeCodeConfig(executable="claude"),
+    )
+
+    assert report.checks[-2].status is CheckStatus.FAIL
+    assert report.checks[-1].status is CheckStatus.SKIP
+    assert report.checks[-1].name == "langfuse.trace"
 
 
 @pytest.mark.asyncio

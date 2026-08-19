@@ -157,6 +157,15 @@ async def run_preflight(
         checks.append(live_check)
         notify(progress, result_message(live_check))
 
+    if options.runtime_id == "claude-cli" and live_check.status is CheckStatus.FAIL:
+        trace_check = CheckResult.skipped(
+            "langfuse.trace",
+            "Claude live Agent probe failed; trace ingestion was not checked",
+        )
+        checks.append(trace_check)
+        notify(progress, result_message(trace_check))
+        return PreflightReport(options.runtime_id, options.live, tuple(checks))
+
     notify(progress, "checking Langfuse trace ingestion ...")
     trace_check = await check_trace_ingestion(
         langfuse_client,

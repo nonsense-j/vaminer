@@ -122,6 +122,7 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
     assert "visible" not in materialized
     argv = compiler.argv(executable="/bin/true", task=task, policy=policy, files=files, model_id="session")
     assert "--strict-mcp-config" in argv
+    assert "--skip-safe-check" not in argv
     assert "--no-session-persistence" not in argv
     assert argv[argv.index("--session-id") + 1] == files.session_id
     assert str(uuid.UUID(files.session_id)) == files.session_id
@@ -143,6 +144,16 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
     }
     mcp_config = json.loads(files.mcp.read_text(encoding="utf-8"))
     assert mcp_config["mcpServers"]["vaminer"]["command"] == str(Path(sys.executable).absolute())
+
+    codeagent_compiler = PolicyCompiler(ClaudeCodeConfig(executable="codeagent"))
+    codeagent_argv = codeagent_compiler.argv(
+        executable="/usr/local/bin/codeagent",
+        task=task,
+        policy=policy,
+        files=files,
+        model_id="session",
+    )
+    assert codeagent_argv[1] == "--skip-safe-check"
 
     inspection = inspect_example_suite(source)
     suite_task = make_root_cause_task(

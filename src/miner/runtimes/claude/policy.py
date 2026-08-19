@@ -288,6 +288,7 @@ class PolicyCompiler:
         session_args = ["--resume", files.session_id] if resume else ["--session-id", files.session_id]
         argv = [
             executable,
+            *self.config.invocation_prefix_args,
             "--print",
             "--setting-sources",
             "user",
