@@ -351,7 +351,6 @@ async def check_claude_live(
             )
             argv = [
                 executable,
-                *config.invocation_prefix_args,
                 "--print",
                 "--setting-sources",
                 "user",

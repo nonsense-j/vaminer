@@ -103,7 +103,9 @@ def test_claude_hook_check_exercises_bundled_in_process_api(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
-async def test_codeagent_live_probe_skips_safe_check(monkeypatch: pytest.MonkeyPatch):
+async def test_codeagent_live_probe_relies_on_print_mode_safe_check_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
     captured_argv: list[str] = []
     events = [
         {
@@ -159,7 +161,8 @@ async def test_codeagent_live_probe_skips_safe_check(monkeypatch: pytest.MonkeyP
     )
 
     assert result.status is CheckStatus.PASS
-    assert captured_argv[1] == "--skip-safe-check"
+    assert captured_argv[1] == "--print"
+    assert "--skip-safe-check" not in captured_argv
 
 
 @pytest.mark.asyncio

@@ -50,10 +50,6 @@ class ClaudeCodeConfig:
     def config_dir_name(self) -> str:
         return default_config_dir_name(self.executable)
 
-    @property
-    def invocation_prefix_args(self) -> tuple[str, ...]:
-        return ("--skip-safe-check",) if self.is_codeagent else ()
-
     def __post_init__(self) -> None:
         if self.default_timeout_seconds <= 0:
             raise ValueError("default_timeout_seconds must be positive")

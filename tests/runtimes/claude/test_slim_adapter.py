@@ -155,7 +155,8 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
         files=files,
         model_id="session",
     )
-    assert codeagent_argv[1] == "--skip-safe-check"
+    assert codeagent_argv[1] == "--print"
+    assert "--skip-safe-check" not in codeagent_argv
 
     default_codeagent = ClaudeCodeConfig(
         executable="codeagent",
