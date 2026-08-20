@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from ..runtimes.claude.config import COMMAND, MODEL, TIMEOUT_SECONDS, ClaudeCodeConfig
+from ..runtimes.claude.config import COMMAND, EFFORT, MODEL, TIMEOUT_SECONDS, ClaudeCodeConfig
 from ..utils.config import MINER_AGENT_RUNTIME, MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .models import CheckStatus, PreflightReport
 from .progress import ProgressCallback
@@ -43,7 +43,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rules-dir", type=Path, default=VAS_RULES_DIR)
     parser.add_argument("--claude-command", default=COMMAND)
     parser.add_argument("--claude-model", default=MODEL)
-    parser.add_argument("--claude-effort", choices=("low", "medium", "high", "xhigh", "max"), default=None)
+    parser.add_argument(
+        "--claude-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=EFFORT,
+    )
     parser.add_argument("--json", action="store_true", help="Print a machine-readable report.")
     parser.add_argument("--quiet", action="store_true", help="Suppress streamed progress on stderr.")
     args = parser.parse_args(argv)

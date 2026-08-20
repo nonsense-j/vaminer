@@ -146,14 +146,14 @@ def _validation_errors(exc: ValidationError) -> tuple[str, ...]:
     return tuple(errors)
 
 
-def _native_output_errors(event: dict[str, Any]) -> tuple[str, ...]:
+def _native_output_errors(event: dict[str, Any], *, cli_name: str) -> tuple[str, ...]:
     raw = event.get("errors")
     if raw is None:
-        return ("Claude Code exhausted its native structured-output retry limit",)
+        return (f"{cli_name} exhausted its native structured-output retry limit",)
     if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
-        raise ClaudeCodeProtocolError("Claude structured-output errors must be an array of strings")
+        raise ClaudeCodeProtocolError(f"{cli_name} structured-output errors must be an array of strings")
     errors = tuple(redact(item.strip()) for item in raw if item.strip())
-    return errors or ("Claude Code exhausted its native structured-output retry limit",)
+    return errors or (f"{cli_name} exhausted its native structured-output retry limit",)
 
 
 class ClaudeStreamDecoder:
@@ -163,7 +163,8 @@ class ClaudeStreamDecoder:
         self,
         *,
         output_type: type[BaseModel],
-        agent_name: str = "Claude Code",
+        agent_name: str = "Claude",
+        cli_name: str = "Claude",
         runtime_log: RuntimeLog | None = None,
         expected_mcp_server: str | None = None,
         expected_mcp_tools: tuple[str, ...] = (),
@@ -171,6 +172,7 @@ class ClaudeStreamDecoder:
     ) -> None:
         self.output_type = output_type
         self.agent_name = agent_name
+        self.cli_name = cli_name
         self.runtime_log = runtime_log or RuntimeLog()
         self.expected_mcp_server = expected_mcp_server
         self.expected_mcp_tools = expected_mcp_tools
@@ -197,7 +199,7 @@ class ClaudeStreamDecoder:
         if status != "connected":
             state = status if isinstance(status, str) and status else "missing"
             raise ClaudeCodeConfigurationError(
-                f"Claude Code MCP server {self.expected_mcp_server!r} is {state}; expected connected"
+                f"{self.cli_name} MCP server {self.expected_mcp_server!r} is {state}; expected connected"
             )
 
         raw_tools = event.get("tools")
@@ -205,7 +207,7 @@ class ClaudeStreamDecoder:
         missing = sorted(set(self.expected_mcp_tools) - available)
         if missing:
             raise ClaudeCodeConfigurationError(
-                "Claude Code did not expose required MCP tools: " + ", ".join(missing)
+                f"{self.cli_name} did not expose required MCP tools: " + ", ".join(missing)
             )
 
     def feed_line(self, raw: str) -> None:
@@ -217,7 +219,7 @@ class ClaudeStreamDecoder:
             event = json.loads(raw)
         except json.JSONDecodeError:
             self.error = ClaudeCodeProtocolError(
-                f"Claude stream line {self.line_number} is not JSON: {_bounded(raw)}"
+                f"{self.cli_name} stream line {self.line_number} is not JSON: {_bounded(raw)}"
             )
             return
         if not isinstance(event, dict):
@@ -284,7 +286,7 @@ class ClaudeStreamDecoder:
         if process.returncode != 0:
             detail = redact(clip(process.stderr or process.stdout, 2_000))
             raise ClaudeCodeProcessError(
-                f"Claude Code exited with {process.returncode}: {detail}",
+                f"{self.cli_name} exited with {process.returncode}: {detail}",
                 returncode=process.returncode,
                 stderr=detail,
             )
@@ -292,10 +294,10 @@ class ClaudeStreamDecoder:
             raise self.error
         if self.parsed_count == 0:
             raise ClaudeCodeProtocolError(
-                "Claude Code emitted no stream-json events: " + redact(clip(process.stderr, 1_000))
+                f"{self.cli_name} emitted no stream-json events: " + redact(clip(process.stderr, 1_000))
             )
         if self.result_event is None:
-            raise ClaudeCodeProtocolError("Claude Code stream ended without a terminal result event")
+            raise ClaudeCodeProtocolError(f"{self.cli_name} stream ended without a terminal result event")
 
         native_output_failure = (
             self.result_event.get("terminal_reason") == "structured_output_retry_exhausted"
@@ -306,7 +308,7 @@ class ClaudeStreamDecoder:
             or self.result_event.get("subtype") not in {None, "success"}
         ):
             raise ClaudeCodeProtocolError(
-                "Claude Code returned an error result: "
+                f"{self.cli_name} returned an error result: "
                 + _bounded(self.result_event.get("result") or self.result_event)
             )
         usage_data = self.result_event.get("usage", {})
@@ -343,16 +345,16 @@ class ClaudeStreamDecoder:
                 output=None,
                 usage=usage,
                 events=tuple(self.events),
-                validation_errors=_native_output_errors(self.result_event),
+                validation_errors=_native_output_errors(self.result_event, cli_name=self.cli_name),
                 candidate=candidate,
             )
 
         structured = _result_payload(self.result_event)
         if structured is None:
             message = (
-                "Claude terminal result is not valid JSON"
+                f"{self.cli_name} terminal result is not valid JSON"
                 if isinstance(candidate, str) and candidate.strip()
-                else "Claude terminal result did not contain a structured output object"
+                else f"{self.cli_name} terminal result did not contain a structured output object"
             )
             return DecodedClaudeRun(
                 output=None,
@@ -383,7 +385,8 @@ def decode_claude_stream(
     process: ProcessResult,
     *,
     output_type: type[BaseModel],
-    agent_name: str = "Claude Code",
+    agent_name: str = "Claude",
+    cli_name: str = "Claude",
     runtime_log: RuntimeLog | None = None,
     expected_mcp_server: str | None = None,
     expected_mcp_tools: tuple[str, ...] = (),
@@ -393,6 +396,7 @@ def decode_claude_stream(
     decoder = ClaudeStreamDecoder(
         output_type=output_type,
         agent_name=agent_name,
+        cli_name=cli_name,
         runtime_log=runtime_log,
         expected_mcp_server=expected_mcp_server,
         expected_mcp_tools=expected_mcp_tools,

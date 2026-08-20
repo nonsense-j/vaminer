@@ -14,6 +14,9 @@ from .runtimes.claude.config import (
     COMMAND as CLAUDE_CODE_COMMAND,
 )
 from .runtimes.claude.config import (
+    EFFORT as CLAUDE_CODE_EFFORT,
+)
+from .runtimes.claude.config import (
     MAX_OUTPUT_BYTES as CLAUDE_CODE_MAX_OUTPUT_BYTES,
 )
 from .runtimes.claude.config import (
@@ -80,7 +83,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=CLAUDE_CODE_MODEL,
         help="Claude model name; authentication comes from the Claude CLI user session.",
     )
-    claude.add_argument("--claude-effort", choices=("low", "medium", "high", "xhigh", "max"), default=None)
+    claude.add_argument(
+        "--claude-effort",
+        choices=("low", "medium", "high", "xhigh", "max"),
+        default=CLAUDE_CODE_EFFORT,
+    )
     claude.add_argument("--claude-timeout-seconds", type=float, default=CLAUDE_CODE_TIMEOUT_SECONDS)
     claude.add_argument("--claude-max-output-bytes", type=int, default=CLAUDE_CODE_MAX_OUTPUT_BYTES)
     args = parser.parse_args(argv)

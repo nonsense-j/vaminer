@@ -82,17 +82,19 @@ async def run_preflight(
     if options.runtime_id == "pydanic-sdk":
         run_check("Pydantic model configuration", check_pydantic_config)
     else:
-        notify(progress, "checking Claude CLI executable and supported flags ...")
+        runtime_name = active_claude_config.display_name
+        notify(progress, f"checking {runtime_name} CLI executable and supported flags ...")
         cli_check, executable = check_claude_cli(
             active_claude_config,
             timeout_seconds=options.timeout_seconds,
         )
         checks.append(cli_check)
         notify(progress, result_message(cli_check))
-        notify(progress, "checking bundled Claude Langfuse hook ...")
+        notify(progress, f"checking bundled {runtime_name} Langfuse hook ...")
         hook_check = check_claude_langfuse_hook(
             langfuse_client,
             executable,
+            display_name=runtime_name,
             required=tracing_requested(),
         )
         checks.append(hook_check)
@@ -160,7 +162,7 @@ async def run_preflight(
     if options.runtime_id == "claude-cli" and live_check.status is CheckStatus.FAIL:
         trace_check = CheckResult.skipped(
             "langfuse.trace",
-            "Claude live Agent probe failed; trace ingestion was not checked",
+            f"{active_claude_config.display_name} live Agent probe failed; trace ingestion was not checked",
         )
         checks.append(trace_check)
         notify(progress, result_message(trace_check))

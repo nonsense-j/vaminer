@@ -11,6 +11,7 @@ from typing import Any
 from ...utils.log import logger
 from ...utils.telemetry import configure_tracing
 from ._vendor import langfuse_hook
+from .config import default_config_dir_name
 
 BUNDLED_HOOK = Path(__file__).resolve().parent / "_vendor" / "langfuse_hook.py"
 BUNDLED_HOOK_LICENSE = Path(__file__).resolve().parent / "_vendor" / "LICENSE.langfuse-observability"
@@ -29,7 +30,12 @@ class HookRunResult:
         return not self.errors
 
 
-def session_transcripts(session_id: str, environment: dict[str, str]) -> tuple[Path, ...]:
+def session_transcripts(
+    session_id: str,
+    environment: dict[str, str],
+    *,
+    executable: str = "claude",
+) -> tuple[Path, ...]:
     """Return transcript files owned by one UUID session below the active Claude config."""
 
     try:
@@ -42,7 +48,8 @@ def session_transcripts(session_id: str, environment: dict[str, str]) -> tuple[P
     if configured_root:
         config_root = Path(configured_root).expanduser().resolve()
     else:
-        config_root = Path(environment.get("HOME") or Path.home()).expanduser().resolve() / ".claude"
+        config_dir_name = default_config_dir_name(executable)
+        config_root = Path(environment.get("HOME") or Path.home()).expanduser().resolve() / config_dir_name
     projects_root = config_root / "projects"
     if not projects_root.is_dir():
         return ()
@@ -66,6 +73,7 @@ def probe_bundled_hook(
     transcript_path: Path,
     state_dir: Path,
     executable: str,
+    display_name: str | None = None,
     traceparent: str,
 ) -> int:
     """Exercise the vendored parser/API without emitting a model observation."""
@@ -76,6 +84,7 @@ def probe_bundled_hook(
         transcript_path=transcript_path,
         state_dir=state_dir,
         cli_name=Path(executable).name,
+        cli_display_name=display_name,
         traceparent=traceparent,
     )
 
@@ -86,12 +95,13 @@ async def emit_session_trace(
     environment: dict[str, str],
     state_dir: Path,
     executable: str,
+    display_name: str | None = None,
 ) -> HookRunResult:
     """Flush one completed CLI invocation into Langfuse before its transcript is deleted."""
 
     if not environment.get("CC_LANGFUSE_TRACEPARENT"):
         return HookRunResult()
-    transcripts = session_transcripts(session_id, environment)
+    transcripts = session_transcripts(session_id, environment, executable=executable)
     if not transcripts:
         return HookRunResult()
 
@@ -120,6 +130,7 @@ async def emit_session_trace(
                 transcript_path=transcript,
                 state_dir=state_dir,
                 cli_name=Path(executable).name,
+                cli_display_name=display_name,
                 user_id=user_id,
                 traceparent=traceparent,
                 trace_seed=trace_seed,

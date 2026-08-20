@@ -98,7 +98,9 @@ class PolicyCompiler:
     def validate(self, task: AgentTask[Any]) -> None:
         workspace = task.workspace_root.resolve()
         if not workspace.is_dir():
-            raise ClaudeCodeConfigurationError(f"Claude workspace does not exist: {workspace}")
+            raise ClaudeCodeConfigurationError(
+                f"{self.config.display_name} workspace does not exist: {workspace}"
+            )
         paths: list[Path] = []
         if isinstance(task.authority, (RootCauseAuthority, RuleGenerationAuthority, AnchorSynthesisAuthority)):
             paths.extend((task.authority.source_root, task.authority.cases_dir))
@@ -130,15 +132,18 @@ class PolicyCompiler:
         if os.sep in configured:
             path = Path(configured).expanduser().resolve()
             if not path.is_file() or not os.access(path, os.X_OK):
-                raise ClaudeCodeConfigurationError(f"Claude executable is not executable: {path}")
+                raise ClaudeCodeConfigurationError(
+                    f"{self.config.display_name} executable is not executable: {path}"
+                )
             return str(path)
         resolved = shutil.which(configured, path=environment.get("PATH"))
         if resolved is None:
-            raise ClaudeCodeConfigurationError(f"Claude executable was not found on PATH: {configured}")
+            raise ClaudeCodeConfigurationError(
+                f"{self.config.display_name} executable was not found on PATH: {configured}"
+            )
         return resolved
 
-    @staticmethod
-    def runtime_binding(task: AgentTask[Any]) -> str:
+    def runtime_binding(self, task: AgentTask[Any]) -> str:
         if task.phase is AgentPhase.ISSUE_COLLECTION:
             detail = "Use the scoped issue MCP tools first; WebSearch/WebFetch are fallback evidence tools only."
         elif task.phase is AgentPhase.ROOT_CAUSE:
@@ -149,7 +154,7 @@ class PolicyCompiler:
             detail = "Use scoped source/case/skill reads and execute queries only through `mcp__vaminer__run_ast_grep_query`."
         return f"""# Runtime Binding
 
-## Claude Code
+## {self.config.display_name}
 
 - {detail}
 - Canonical MCP tool names in the shared instructions map to `mcp__{SERVER_NAME}__<tool_name>` in this runtime.
@@ -330,11 +335,16 @@ class PolicyCompiler:
         return argv
 
 
-def cleanup_session_transcript(session_id: str, environment: dict[str, str]) -> tuple[Path, ...]:
+def cleanup_session_transcript(
+    session_id: str,
+    environment: dict[str, str],
+    *,
+    executable: str = "claude",
+) -> tuple[Path, ...]:
     """Remove only the transcript artifacts owned by one completed invocation."""
 
     removed: list[Path] = []
-    for transcript in session_transcripts(session_id, environment):
+    for transcript in session_transcripts(session_id, environment, executable=executable):
         try:
             transcript.unlink(missing_ok=True)
             removed.append(transcript)

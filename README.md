@@ -215,10 +215,12 @@ The Claude CLI adapter has a separate, intentionally narrower configuration:
 
 ```dotenv
 MINER_AGENT_RUNTIME=claude-cli
+CLAUDE_CODE_NAME=Claude
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
+CLAUDE_CODE_EFFORT=high
 ```
 
-You can also pass `--claude-model claude-sonnet-4-6`. VAMINER invokes Claude with the `user` setting source, strict temporary MCP configuration, and a fresh session id. When tracing is enabled, VAMINER calls its bundled Langfuse transcript hook through an in-process Python API after each Claude process returns and before deleting the session transcript and tool-result directory. The child process inherits the complete parent environment for normal Claude authentication and provider selection; environment values are never written to logs or traces. Checkout project/local settings, instructions, and MCP configuration are not loaded.
+You can also pass `--claude-model claude-sonnet-4-6` and `--claude-effort high`. `CLAUDE_CODE_NAME` controls the runtime name shown in logs and traces. VAMINER invokes the selected CLI with the `user` setting source, strict temporary MCP configuration, and a fresh session id. When tracing is enabled, VAMINER calls its bundled Langfuse transcript hook through an in-process Python API after each process returns and before deleting the session transcript and tool-result directory. The child process inherits the complete parent environment for normal authentication and provider selection; environment values are never written to logs or traces. Checkout project/local settings, instructions, and MCP configuration are not loaded.
 
 No user-scoped Claude plugin installation is required. VAMINER passes the active phase span through `CC_LANGFUSE_TRACEPARENT`, so the bundled hook's Conversational Turn, Generation, and Tool observations join the same Miner trace. The hook reuses VAMINER's authenticated Langfuse client and keeps its incremental cursor state in the invocation's temporary directory. VAMINER explicitly disables the user-installed Langfuse plugin in each temporary Claude invocation to prevent duplicate observations.
 

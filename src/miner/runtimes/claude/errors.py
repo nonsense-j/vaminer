@@ -25,16 +25,16 @@ class ClaudeCodeProcessError(ClaudeCodeError):
 class ClaudeCodeTimeoutError(ClaudeCodeError):
     """Raised after terminating a timed-out Claude process group."""
 
-    def __init__(self, timeout_seconds: float) -> None:
-        super().__init__(f"Claude Code timed out after {timeout_seconds:g} seconds")
+    def __init__(self, timeout_seconds: float, *, cli_name: str = "Claude") -> None:
+        super().__init__(f"{cli_name} timed out after {timeout_seconds:g} seconds")
         self.timeout_seconds = timeout_seconds
 
 
 class ClaudeCodeOutputLimitError(ClaudeCodeError):
     """Raised after terminating Claude for exceeding a captured stream limit."""
 
-    def __init__(self, stream_name: str, limit_bytes: int) -> None:
-        super().__init__(f"Claude Code {stream_name} exceeded the {limit_bytes}-byte limit")
+    def __init__(self, stream_name: str, limit_bytes: int, *, cli_name: str = "Claude") -> None:
+        super().__init__(f"{cli_name} {stream_name} exceeded the {limit_bytes}-byte limit")
         self.stream_name = stream_name
         self.limit_bytes = limit_bytes
 
@@ -42,9 +42,9 @@ class ClaudeCodeOutputLimitError(ClaudeCodeError):
 class ClaudeCodeRequestLimitError(ClaudeCodeError):
     """Raised after the observable model-request limit is exceeded."""
 
-    def __init__(self, limit: int, *, observed: int) -> None:
+    def __init__(self, limit: int, *, observed: int, cli_name: str = "Claude") -> None:
         super().__init__(
-            f"Claude Code exceeded the per-task model request limit of {limit}; "
+            f"{cli_name} exceeded the per-task model request limit of {limit}; "
             f"observed request {observed}"
         )
         self.limit = limit
@@ -72,9 +72,10 @@ class ClaudeCodeProviderError(ClaudeCodeError):
         *,
         category: str,
         status_code: int | None = None,
+        cli_name: str = "Claude",
     ) -> None:
         suffix = f" (HTTP {status_code})" if status_code is not None else ""
-        super().__init__(f"Claude Code provider {category} error{suffix}: {message}")
+        super().__init__(f"{cli_name} provider {category} error{suffix}: {message}")
         self.category = category
         self.status_code = status_code
 
@@ -82,8 +83,8 @@ class ClaudeCodeProviderError(ClaudeCodeError):
 class ClaudeCodeValidationError(ClaudeCodeError):
     """Raised when all bounded structured-output repair attempts fail."""
 
-    def __init__(self, errors: Sequence[str], *, attempts: int) -> None:
+    def __init__(self, errors: Sequence[str], *, attempts: int, cli_name: str = "Claude") -> None:
         detail = "\n- ".join(errors)
-        super().__init__(f"Claude Code output remained invalid after {attempts} attempt(s):\n- {detail}")
+        super().__init__(f"{cli_name} output remained invalid after {attempts} attempt(s):\n- {detail}")
         self.errors = tuple(errors)
         self.attempts = attempts

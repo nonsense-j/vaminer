@@ -143,10 +143,16 @@ async def test_codeagent_live_probe_skips_safe_check(monkeypatch: pytest.MonkeyP
         return ProcessResult(stdout="\n".join(lines), stderr="", returncode=0, duration_ms=1)
 
     monkeypatch.setattr(ProcessRunner, "run", fake_run)
-    monkeypatch.setattr("src.miner.preflight.claude.cleanup_session_transcript", lambda *_args: ())
+    monkeypatch.setattr(
+        "src.miner.preflight.claude.cleanup_session_transcript",
+        lambda *_args, **_kwargs: (),
+    )
 
     result = await check_claude_live(
-        ClaudeCodeConfig(executable="codeagent"),
+        ClaudeCodeConfig(
+            executable="codeagent",
+            display_name="CodeAgent",
+        ),
         executable="/usr/local/bin/codeagent",
         tracing_active=False,
         timeout_seconds=1,

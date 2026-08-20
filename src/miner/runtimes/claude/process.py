@@ -48,10 +48,12 @@ class ProcessRunner:
         max_stdout_bytes: int,
         max_stderr_bytes: int,
         terminate_grace_seconds: float,
+        cli_name: str = "Claude",
     ) -> None:
         self.max_stdout_bytes = max_stdout_bytes
         self.max_stderr_bytes = max_stderr_bytes
         self.terminate_grace_seconds = terminate_grace_seconds
+        self.cli_name = cli_name
 
     async def _read(
         self,
@@ -66,7 +68,7 @@ class ProcessRunner:
         while chunk := await stream.read(64 * 1024):
             size += len(chunk)
             if size > limit:
-                raise ClaudeCodeOutputLimitError(label, limit)
+                raise ClaudeCodeOutputLimitError(label, limit, cli_name=self.cli_name)
             chunks.append(chunk)
             if line_handler is not None:
                 pending.extend(chunk)
@@ -100,7 +102,7 @@ class ProcessRunner:
             )
         except (OSError, ValueError) as exc:
             raise ClaudeCodeProcessError(
-                f"failed to start Claude Code: {redact(str(exc))}",
+                f"failed to start {self.cli_name}: {redact(str(exc))}",
                 returncode=-1,
             ) from exc
         assert process.stdin is not None and process.stdout is not None and process.stderr is not None
@@ -133,7 +135,7 @@ class ProcessRunner:
         try:
             stdout, stderr, returncode = await asyncio.wait_for(collect(), timeout=timeout_seconds)
         except TimeoutError as exc:
-            raise ClaudeCodeTimeoutError(timeout_seconds) from exc
+            raise ClaudeCodeTimeoutError(timeout_seconds, cli_name=self.cli_name) from exc
         return ProcessResult(
             stdout=stdout.decode("utf-8", errors="replace"),
             stderr=stderr.decode("utf-8", errors="replace"),

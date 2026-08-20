@@ -135,6 +135,7 @@ class ClaudeCodeRuntime:
             max_stdout_bytes=self.config.max_stdout_bytes,
             max_stderr_bytes=self.config.max_stderr_bytes,
             terminate_grace_seconds=self.config.terminate_grace_seconds,
+            cli_name=self.config.display_name,
         )
 
     @property
@@ -241,6 +242,7 @@ class ClaudeCodeRuntime:
                     decoder = ClaudeStreamDecoder(
                         output_type=model_output_type(task),
                         agent_name=task.agent_name,
+                        cli_name=self.config.display_name,
                         runtime_log=self._runtime_log,
                         expected_mcp_server=SERVER_NAME,
                         expected_mcp_tools=policy.qualified_mcp_tools,
@@ -276,9 +278,14 @@ class ClaudeCodeRuntime:
                                 environment=environment,
                                 state_dir=files.trace_state,
                                 executable=executable,
+                                display_name=self.config.display_name,
                             )
                         except Exception:  # noqa: BLE001 - tracing must never affect Agent execution.
-                            logger.debug("Failed to run bundled Claude Langfuse hook", exc_info=True)
+                            logger.debug(
+                                "Failed to run bundled %s Langfuse hook",
+                                self.config.display_name,
+                                exc_info=True,
+                            )
                     decoded = None
                     final = None
                     try:
@@ -312,17 +319,23 @@ class ClaudeCodeRuntime:
                             attempts=attempt,
                         )
                     logger.warning(
-                        "Claude output rejected for %s (attempt %s): %s",
+                        "%s output rejected for %s (attempt %s): %s",
+                        self.config.display_name,
                         task.task_id,
                         attempt,
                         "; ".join(errors),
                     )
             finally:
-                cleanup_session_transcript(files.session_id, environment)
+                cleanup_session_transcript(
+                    files.session_id,
+                    environment,
+                    executable=executable,
+                )
 
         raise ClaudeCodeValidationError(
             errors or ["model request limit exhausted during output repair"],
             attempts=max(1, completed_attempts),
+            cli_name=self.config.display_name,
         )
 
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:

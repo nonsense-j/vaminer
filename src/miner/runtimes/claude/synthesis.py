@@ -39,6 +39,7 @@ class ClaudeSynthesisHostContext(BaseModel):
     executable: str
     model: str | None = None
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    display_name: str
     project_root: Path
     mcp_python: Path | None = None
     default_timeout_seconds: float
@@ -71,6 +72,7 @@ class ClaudeSynthesisHostContext(BaseModel):
             executable=executable,
             model=model_id,
             effort=config.effort,
+            display_name=config.display_name,
             project_root=config.project_root,
             mcp_python=config.mcp_python,
             default_timeout_seconds=config.default_timeout_seconds,
@@ -86,6 +88,7 @@ class ClaudeSynthesisHostContext(BaseModel):
             executable=self.executable,
             model=self.model,
             effort=self.effort,
+            display_name=self.display_name,
             project_root=self.project_root,
             mcp_python=self.mcp_python,
             default_timeout_seconds=self.default_timeout_seconds,

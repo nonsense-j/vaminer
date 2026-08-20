@@ -214,10 +214,12 @@ Claude CLI 适配器使用一套独立且刻意收窄的配置：
 
 ```dotenv
 MINER_AGENT_RUNTIME=claude-cli
+CLAUDE_CODE_NAME=Claude
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
+CLAUDE_CODE_EFFORT=high
 ```
 
-也可以传入 `--claude-model claude-sonnet-4-6`。VAMINER 使用 `user` setting source、严格的临时 MCP 配置和 fresh session id 调用 Claude。启用 tracing 时，每个 Claude 进程返回后，VAMINER 会在删除 session transcript 及 tool-result 目录之前，通过进程内 Python API 调用内置 Langfuse transcript hook。子进程完整继承父进程环境以沿用 Claude 鉴权和 provider 选择；环境值绝不写入 log 或 trace。checkout 中的 project/local settings、instructions 和 MCP 配置均不加载。
+也可以传入 `--claude-model claude-sonnet-4-6` 和 `--claude-effort high`。`CLAUDE_CODE_NAME` 控制 log 和 trace 中显示的 runtime 名称。VAMINER 使用 `user` setting source、严格的临时 MCP 配置和 fresh session id 调用所选 CLI。启用 tracing 时，每个进程返回后，VAMINER 会在删除 session transcript 及 tool-result 目录之前，通过进程内 Python API 调用内置 Langfuse transcript hook。子进程完整继承父进程环境以沿用鉴权和 provider 选择；环境值绝不写入 log 或 trace。checkout 中的 project/local settings、instructions 和 MCP 配置均不加载。
 
 不再需要在 Claude user scope 安装插件。VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使内置 hook 产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。hook 复用 VAMINER 已完成鉴权的 Langfuse client，并把增量 cursor state 放在本次 invocation 的临时目录。每次临时 Claude invocation 都会显式禁用用户已安装的 Langfuse 插件，避免重复上报。
 

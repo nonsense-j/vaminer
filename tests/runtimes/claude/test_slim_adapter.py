@@ -34,6 +34,7 @@ from src.miner.runtimes.claude.errors import (
 )
 from src.miner.runtimes.claude import mcp as mcp_module
 from src.miner.runtimes.claude.mcp import (
+    SYNTHESIS_CONTEXT_ENV,
     SYNTHESIS_LOG_ENV,
     TOOL_FAILURE_ENV,
     MCPProfile,
@@ -156,6 +157,14 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
     )
     assert codeagent_argv[1] == "--skip-safe-check"
 
+    default_codeagent = ClaudeCodeConfig(
+        executable="codeagent",
+        display_name="CodeAgent",
+        effort="high",
+    )
+    assert default_codeagent.config_dir_name == ".cac"
+    assert default_codeagent.display_name == "CodeAgent"
+
     inspection = inspect_example_suite(source)
     suite_task = make_root_cause_task(
         ExampleSuiteIntake(
@@ -201,7 +210,13 @@ def test_rule_policy_materializes_synthesizer_log_channel(tmp_path: Path):
         cases_dir=cases,
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
     )
-    compiler = PolicyCompiler(ClaudeCodeConfig(executable="/bin/true"))
+    compiler = PolicyCompiler(
+        ClaudeCodeConfig(
+            executable="codeagent",
+            effort="xhigh",
+            display_name="CodeAgent",
+        )
+    )
     temporary = tmp_path / "rule-invocation"
     temporary.mkdir()
     files = compiler.materialize(
@@ -215,6 +230,9 @@ def test_rule_policy_materializes_synthesizer_log_channel(tmp_path: Path):
     assert files.synthesis_log is not None and files.synthesis_log.is_file()
     mcp_environment = json.loads(files.mcp.read_text(encoding="utf-8"))["mcpServers"]["vaminer"]["env"]
     assert mcp_environment[SYNTHESIS_LOG_ENV] == str(files.synthesis_log)
+    synthesis_context = json.loads(Path(mcp_environment[SYNTHESIS_CONTEXT_ENV]).read_text(encoding="utf-8"))
+    assert synthesis_context["effort"] == "xhigh"
+    assert synthesis_context["display_name"] == "CodeAgent"
 
 
 @pytest.mark.asyncio
@@ -484,6 +502,22 @@ def test_cleanup_session_transcript_removes_only_owned_session(tmp_path: Path):
     assert other.exists()
 
 
+def test_cleanup_session_transcript_uses_command_default_below_home(tmp_path: Path):
+    session_id = str(uuid.uuid4())
+    transcript = tmp_path / ".cac" / "projects" / "-workspace" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True)
+    transcript.write_text("{}\n", encoding="utf-8")
+
+    removed = cleanup_session_transcript(
+        session_id,
+        {"HOME": str(tmp_path)},
+        executable="codeagent",
+    )
+
+    assert transcript.resolve() in removed
+    assert not transcript.exists()
+
+
 @pytest.mark.asyncio
 async def test_process_runner_relays_stdout_lines_before_exit(tmp_path: Path):
     marker = tmp_path / "continue"
@@ -624,7 +658,13 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
         root_cause=_rca(),
     )
-    runtime = ClaudeCodeRuntime(ClaudeCodeConfig(executable="/bin/true", model="test-model"))
+    runtime = ClaudeCodeRuntime(
+        ClaudeCodeConfig(
+            executable="/bin/true",
+            model="test-model",
+            display_name="Internal Agent",
+        )
+    )
 
     class Runner:
         def __init__(self) -> None:
@@ -667,10 +707,10 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
 
     runner = Runner()
     runtime._runner = runner
-    traced_sessions: list[str] = []
+    traced_sessions: list[tuple[str, dict[str, object]]] = []
 
-    async def emit_trace(session_id: str, **_kwargs):
-        traced_sessions.append(session_id)
+    async def emit_trace(session_id: str, **kwargs):
+        traced_sessions.append((session_id, kwargs))
 
     monkeypatch.setattr("src.miner.runtimes.claude.runtime.emit_session_trace", emit_trace)
     result = await runtime.run(task)
@@ -678,7 +718,8 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
     assert runner.max_turns == [task.limits.request_limit, task.limits.request_limit - 1]
     assert runner.session_flags == ["--session-id", "--resume"]
     assert runner.session_ids[0] == runner.session_ids[1]
-    assert traced_sessions == runner.session_ids
+    assert [session_id for session_id, _kwargs in traced_sessions] == runner.session_ids
+    assert all(kwargs["display_name"] == "Internal Agent" for _session_id, kwargs in traced_sessions)
     assert runner.mcp_paths[0] == runner.mcp_paths[1]
     assert task.prompt == runner.prompts[0]
     assert task.prompt not in runner.prompts[1]

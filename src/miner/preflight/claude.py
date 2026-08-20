@@ -104,6 +104,7 @@ def _run_cli(
 
 def check_claude_cli(config: ClaudeCodeConfig, *, timeout_seconds: float) -> tuple[CheckResult, str | None]:
     started = time.monotonic()
+    runtime_name = config.display_name
     compiler = PolicyCompiler(config)
     environment = compiler.environment()
     try:
@@ -111,23 +112,23 @@ def check_claude_cli(config: ClaudeCodeConfig, *, timeout_seconds: float) -> tup
         version = _run_cli([executable, "--version"], environment=environment, timeout_seconds=timeout_seconds)
         if version.returncode != 0:
             detail = redact(version.stderr or version.stdout).strip()
-            return CheckResult.failed("claude.cli", "Claude CLI version check failed", detail=detail), None
+            return CheckResult.failed("claude.cli", f"{runtime_name} CLI version check failed", detail=detail), None
         help_result = _run_cli([executable, "--help"], environment=environment, timeout_seconds=timeout_seconds)
         if help_result.returncode != 0:
             detail = redact(help_result.stderr or help_result.stdout).strip()
-            return CheckResult.failed("claude.cli", "Claude CLI help check failed", detail=detail), None
+            return CheckResult.failed("claude.cli", f"{runtime_name} CLI help check failed", detail=detail), None
         missing = sorted(flag for flag in _REQUIRED_CLAUDE_FLAGS if flag not in help_result.stdout)
         if missing:
             return CheckResult.failed(
                 "claude.cli",
-                "Claude CLI does not support flags required by VAMiner",
+                f"{runtime_name} CLI does not support flags required by VAMiner",
                 detail=", ".join(missing),
             ), None
     except Exception as exc:  # noqa: BLE001
         return (
             CheckResult.failed(
                 "claude.cli",
-                "Claude CLI could not be executed",
+                f"{runtime_name} CLI could not be executed",
                 detail=f"{type(exc).__name__}: {exc}",
             ),
             None,
@@ -135,7 +136,7 @@ def check_claude_cli(config: ClaudeCodeConfig, *, timeout_seconds: float) -> tup
     return (
         CheckResult.passed(
             "claude.cli",
-            f"{version.stdout.strip() or 'Claude CLI'} supports the required invocation flags",
+            f"{version.stdout.strip() or runtime_name + ' CLI'} supports the required invocation flags",
             detail=executable,
             duration_ms=round((time.monotonic() - started) * 1000),
         ),
@@ -147,6 +148,7 @@ def check_claude_langfuse_hook(
     langfuse_client: object | None,
     executable: str | None,
     *,
+    display_name: str = "Claude",
     required: bool,
 ) -> CheckResult:
     if not required:
@@ -159,7 +161,7 @@ def check_claude_langfuse_hook(
     if executable is None:
         return CheckResult.failed(
             "claude.langfuse-hook",
-            "Claude CLI is unavailable, so its tracing identity cannot be checked",
+            f"{display_name} CLI is unavailable, so its tracing identity cannot be checked",
         )
     started = time.monotonic()
     try:
@@ -180,6 +182,7 @@ def check_claude_langfuse_hook(
                 transcript_path=transcript,
                 state_dir=temporary_root / "state",
                 executable=executable,
+                display_name=display_name,
                 traceparent="00-0123456789abcdef0123456789abcdef-fedcba9876543210-01",
             )
         if emitted != 0:
@@ -191,7 +194,7 @@ def check_claude_langfuse_hook(
         return CheckResult.passed(
             "claude.langfuse-hook",
             f"Bundled Langfuse hook {BUNDLED_HOOK_VERSION} loaded and parsed an empty transcript",
-            detail=f"cli={Path(executable).name}; api=in-process",
+            detail=f"cli={Path(executable).name}; name={display_name}; api=in-process",
             duration_ms=round((time.monotonic() - started) * 1000),
         )
     except Exception as exc:  # noqa: BLE001
@@ -302,6 +305,7 @@ async def check_claude_live(
     progress: ProgressCallback | None = None,
 ) -> CheckResult:
     started = time.monotonic()
+    runtime_name = config.display_name
     session_id = str(uuid.uuid4())
     compiler = PolicyCompiler(config)
     environment = compiler.environment()
@@ -385,6 +389,7 @@ async def check_claude_live(
             decoder = ClaudeStreamDecoder(
                 output_type=_ClaudeProbeOutput,
                 agent_name="Preflight Agent",
+                cli_name=runtime_name,
                 runtime_log=RuntimeLog(emit_console=False),
                 expected_mcp_server=SERVER_NAME,
                 expected_mcp_tools=(_MCP_TOOL,),
@@ -393,6 +398,7 @@ async def check_claude_live(
                 max_stdout_bytes=config.max_stdout_bytes,
                 max_stderr_bytes=config.max_stderr_bytes,
                 terminate_grace_seconds=config.terminate_grace_seconds,
+                cli_name=runtime_name,
             )
             first_event = False
             hook_result = None
@@ -402,11 +408,14 @@ async def check_claude_live(
                 decoder.feed_line(raw)
                 if not first_event and decoder.parsed_count:
                     first_event = True
-                    notify(progress, "Claude emitted its first stream event; waiting for Agent/tool completion ...")
+                    notify(
+                        progress,
+                        f"{runtime_name} emitted its first stream event; waiting for Agent/tool completion ...",
+                    )
 
             heartbeat = start_heartbeat(
                 progress,
-                message="Claude Agent subprocess is running",
+                message=f"{runtime_name} Agent subprocess is running",
                 timeout_seconds=timeout_seconds,
             )
             try:
@@ -429,25 +438,26 @@ async def check_claude_live(
                         environment=environment,
                         state_dir=workspace / "langfuse-state",
                         executable=executable,
+                        display_name=runtime_name,
                     )
-            notify(progress, "Claude subprocess exited; validating the terminal structured output ...")
+            notify(progress, f"{runtime_name} subprocess exited; validating the terminal structured output ...")
             decoded = decoder.finish(process)
             if decoded.validation_errors or decoded.output is None:
                 return CheckResult.failed(
                     "claude.agent-live",
-                    "Claude CLI did not return the required structured probe output",
+                    f"{runtime_name} CLI did not return the required structured probe output",
                     detail="; ".join(decoded.validation_errors),
                 )
             if not any(event.type == "tool.call" for event in decoded.events):
                 return CheckResult.failed(
                     "claude.agent-live",
-                    "Claude returned the probe output without calling the required MCP tool",
+                    f"{runtime_name} returned the probe output without calling the required MCP tool",
                 )
             trace_carrier = claude_trace_environment()
             if tracing_active and "CC_LANGFUSE_TRACEPARENT" not in environment:
                 return CheckResult.failed(
                     "claude.agent-live",
-                    "Claude completed, but no Langfuse traceparent reached the child process",
+                    f"{runtime_name} completed, but no Langfuse traceparent reached the child process",
                     detail=f"active carrier now present={bool(trace_carrier)}",
                 )
             if tracing_active and (
@@ -467,20 +477,24 @@ async def check_claude_live(
                     )
                 return CheckResult.failed(
                     "claude.agent-live",
-                    "Claude completed, but the bundled Langfuse hook did not process its transcript",
+                    f"{runtime_name} completed, but the bundled Langfuse hook did not process its transcript",
                     detail=detail,
                 )
     except Exception as exc:  # noqa: BLE001
         return CheckResult.failed(
             "claude.agent-live",
-            "Claude live Agent probe failed",
+            f"{runtime_name} live Agent probe failed",
             detail=f"{type(exc).__name__}: {redact(str(exc))}",
         )
     finally:
-        cleanup_session_transcript(session_id, environment)
+        cleanup_session_transcript(
+            session_id,
+            environment,
+            executable=executable,
+        )
     return CheckResult.passed(
         "claude.agent-live",
-        "Claude authenticated, connected VAMiner MCP, called list_src_files, and returned structured output",
+        f"{runtime_name} authenticated, connected VAMiner MCP, called list_src_files, and returned structured output",
         duration_ms=round((time.monotonic() - started) * 1000),
     )
 

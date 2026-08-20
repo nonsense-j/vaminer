@@ -3023,7 +3023,11 @@ def flush_and_shutdown_langfuse_client(langfuse: Optional[Langfuse]) -> None:
 _VAMINER_API_LOCK = threading.Lock()
 
 
-def _configure_vaminer_runtime(state_dir: Path, cli_name: str) -> None:
+def _configure_vaminer_runtime(
+    state_dir: Path,
+    cli_name: str,
+    cli_display_name: Optional[str] = None,
+) -> None:
     """Rebind process-global plugin settings for one serialized VAMiner call."""
 
     global STATE_DIR, LOG_FILE, STATE_FILE, LOCK_FILE
@@ -3031,7 +3035,16 @@ def _configure_vaminer_runtime(state_dir: Path, cli_name: str) -> None:
 
     resolved_state_dir = Path(state_dir).expanduser().absolute()
     resolved_cli_name = Path(cli_name).name or "claude"
-    if STATE_DIR == resolved_state_dir and CLI_NAME == resolved_cli_name:
+    resolved_cli_slug = resolved_cli_name.lower()
+    resolved_display_name = (cli_display_name or "").strip() or {
+        "claude": "Claude Code",
+        "codeagent": "CodeAgent",
+    }.get(resolved_cli_slug, resolved_cli_name)
+    if (
+        STATE_DIR == resolved_state_dir
+        and CLI_NAME == resolved_cli_name
+        and CLI_DISPLAY_NAME == resolved_display_name
+    ):
         return
 
     logger_instance = logging.getLogger("langfuse_hook")
@@ -3046,11 +3059,8 @@ def _configure_vaminer_runtime(state_dir: Path, cli_name: str) -> None:
     STATE_FILE = STATE_DIR / "langfuse_state.json"
     LOCK_FILE = STATE_DIR / "langfuse_state.lock"
     CLI_NAME = resolved_cli_name
-    CLI_SLUG = CLI_NAME.lower()
-    CLI_DISPLAY_NAME = {
-        "claude": "Claude Code",
-        "codeagent": "CodeAgent",
-    }.get(CLI_SLUG, CLI_NAME)
+    CLI_SLUG = resolved_cli_slug
+    CLI_DISPLAY_NAME = resolved_display_name
     TRACE_NAME = f"{CLI_DISPLAY_NAME} Turn"
 
 
@@ -3061,6 +3071,7 @@ def emit_vaminer_session(
     transcript_path: Path,
     state_dir: Path,
     cli_name: str,
+    cli_display_name: Optional[str] = None,
     user_id: Optional[str] = None,
     traceparent: Optional[str] = None,
     trace_seed: Optional[str] = None,
@@ -3090,7 +3101,7 @@ def emit_vaminer_session(
         parent_span_id=parent_span_id,
     )
     with _VAMINER_API_LOCK:
-        _configure_vaminer_runtime(state_dir, cli_name)
+        _configure_vaminer_runtime(state_dir, cli_name, cli_display_name)
         return emit_new_turns_from_transcript(
             langfuse,
             config,
