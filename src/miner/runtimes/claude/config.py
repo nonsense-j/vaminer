@@ -19,9 +19,12 @@ LANGFUSE_CLAUDE_PLUGIN_ID = "langfuse-observability@langfuse-observability"
 _EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
+def is_codeagent_executable(executable: str | Path) -> bool:
+    return "codeagent" in Path(executable).stem.casefold()
+
+
 def default_config_dir_name(executable: str | Path) -> str:
-    command_name = Path(os.fspath(executable)).name.lower()
-    return ".cac" if command_name == "codeagent" else ".claude"
+    return ".cac" if is_codeagent_executable(executable) else ".claude"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +43,8 @@ class ClaudeCodeConfig:
     display_name: str = NAME
 
     @property
-    def command_name(self) -> str:
-        return Path(os.fspath(self.executable)).name.lower()
+    def is_codeagent(self) -> bool:
+        return is_codeagent_executable(self.executable)
 
     @property
     def config_dir_name(self) -> str:
@@ -49,7 +52,7 @@ class ClaudeCodeConfig:
 
     @property
     def invocation_prefix_args(self) -> tuple[str, ...]:
-        return ("--skip-safe-check",) if self.command_name == "codeagent" else ()
+        return ("--skip-safe-check",) if self.is_codeagent else ()
 
     def __post_init__(self) -> None:
         if self.default_timeout_seconds <= 0:
