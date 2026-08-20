@@ -42,6 +42,7 @@ from .mcp import (
     MCPProfile,
 )
 from .synthesis import ClaudeSynthesisHostContext
+from .tracing import session_transcripts
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +66,7 @@ class InvocationFiles:
     settings: Path
     mcp: Path
     session_id: str
+    trace_state: Path
     receipt: Path | None = None
     synthesis_failure: Path | None = None
     synthesis_log: Path | None = None
@@ -214,6 +216,7 @@ class PolicyCompiler:
             if task.phase is AgentPhase.AST_GREP_SYNTHESIS
             else None
         )
+        trace_state = temporary_root / "langfuse-state"
         synthesis_context = None
         if receipt is not None:
             synthesis_context = temporary_root / "synthesis-context.json"
@@ -234,7 +237,9 @@ class PolicyCompiler:
             "permissions": {"defaultMode": "dontAsk", "allow": list(policy.allowed_tools)},
             "enableAllProjectMcpServers": False,
             "enabledPlugins": {
-                LANGFUSE_CLAUDE_PLUGIN_ID: bool(claude_trace_environment()),
+                # VAMiner invokes its bundled hook after the child exits. Keep a
+                # user-installed copy disabled so the transcript is not emitted twice.
+                LANGFUSE_CLAUDE_PLUGIN_ID: False,
             },
         }
         _write_private(settings, json.dumps(settings_payload, indent=2))
@@ -268,6 +273,7 @@ class PolicyCompiler:
             settings=settings,
             mcp=mcp,
             session_id=session_id,
+            trace_state=trace_state,
             receipt=receipt,
             synthesis_failure=synthesis_failure,
             synthesis_log=synthesis_log,
@@ -327,32 +333,12 @@ class PolicyCompiler:
 def cleanup_session_transcript(session_id: str, environment: dict[str, str]) -> tuple[Path, ...]:
     """Remove only the transcript artifacts owned by one completed invocation."""
 
-    try:
-        if str(uuid.UUID(session_id)) != session_id:
-            return ()
-    except ValueError:
-        return ()
-
-    configured_root = environment.get("CLAUDE_CONFIG_DIR")
-    if configured_root:
-        config_root = Path(configured_root).expanduser().resolve()
-    else:
-        config_root = Path(environment.get("HOME") or Path.home()).expanduser().resolve() / ".claude"
-    projects_root = config_root / "projects"
-    if not projects_root.is_dir():
-        return ()
-
     removed: list[Path] = []
-    resolved_projects_root = projects_root.resolve()
-    for transcript in projects_root.glob(f"*/{session_id}.jsonl"):
+    for transcript in session_transcripts(session_id, environment):
         try:
-            resolved_transcript = transcript.resolve()
-            resolved_transcript.relative_to(resolved_projects_root)
-            if resolved_transcript.name != f"{session_id}.jsonl":
-                continue
-            resolved_transcript.unlink(missing_ok=True)
-            removed.append(resolved_transcript)
-            session_dir = resolved_transcript.with_suffix("")
+            transcript.unlink(missing_ok=True)
+            removed.append(transcript)
+            session_dir = transcript.with_suffix("")
             if session_dir.is_dir():
                 shutil.rmtree(session_dir)
                 removed.append(session_dir)

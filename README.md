@@ -48,8 +48,8 @@ uv run python -m src.miner.preflight --runtime claude-cli
 The interactive command streams each check and long-running wait to stderr, then prints a final report. The
 default preflight does not call a model. It validates Python and bundled assets, writable paths, Git, `rg`,
 an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration.
-For Claude it also checks the CLI flags, the installed Langfuse plugin when tracing is configured, and a real
-MCP handshake/list-tools/tool-call cycle.
+For Claude it also checks the CLI flags, loads and exercises the bundled Langfuse transcript hook when tracing
+is configured, and runs a real MCP handshake/list-tools/tool-call cycle.
 
 Add `--live` to make one small model request. The Agent must call a probe tool, return structured output, and,
 when Langfuse is enabled, produce at least one runtime observation under the preflight trace. This request may
@@ -176,7 +176,7 @@ One mining run selects exactly one Runtime Adapter and one configured model. All
 - `src/miner/tools/` contains runtime-neutral evidence, repository, case, skill, and ast-grep operations.
 - `src/miner/runtimes/shared/` contains the host-owned Anchor Synthesis Session.
 - `src/miner/runtimes/pydantic/` contains the in-process Pydantic AI Adapter, LLM construction, hooks, and exact typed tools.
-- `src/miner/runtimes/claude/` contains the Claude CLI Adapter, policy compiler, bounded subprocess decoder, and exact phase-scoped MCP tools.
+- `src/miner/runtimes/claude/` contains the Claude CLI Adapter, policy compiler, bundled Langfuse transcript hook, bounded subprocess decoder, and exact phase-scoped MCP tools.
 - `src/miner/anchors/` contains generated-rule scanning and post-generation review.
 - `src/miner/main.py` is the CLI composition root for runtime selection, workflow execution, assembly, and persistence.
 
@@ -218,16 +218,9 @@ MINER_AGENT_RUNTIME=claude-cli
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
 ```
 
-You can also pass `--claude-model claude-sonnet-4-6`. VAMINER invokes Claude with the `user` setting source, strict temporary MCP configuration, and a fresh session id. When tracing is enabled, the session transcript exists only until Claude's synchronous Stop/SessionEnd hooks complete and is then deleted together with its tool-result directory. The child process inherits the complete parent environment for normal Claude authentication and provider selection; environment values are never written to logs or traces. Checkout project/local settings, instructions, and MCP configuration are not loaded.
+You can also pass `--claude-model claude-sonnet-4-6`. VAMINER invokes Claude with the `user` setting source, strict temporary MCP configuration, and a fresh session id. When tracing is enabled, VAMINER calls its bundled Langfuse transcript hook through an in-process Python API after each Claude process returns and before deleting the session transcript and tool-result directory. The child process inherits the complete parent environment for normal Claude authentication and provider selection; environment values are never written to logs or traces. Checkout project/local settings, instructions, and MCP configuration are not loaded.
 
-To trace `claude-cli`, install the official Langfuse Observability Plugin once at Claude's user scope:
-
-```bash
-claude plugin marketplace add langfuse/Claude-Observability-Plugin
-claude plugin install langfuse-observability@langfuse-observability
-```
-
-VAMINER passes the active phase span through `CC_LANGFUSE_TRACEPARENT`, so the plugin's Conversational Turn, Generation, and Tool observations join the same Miner trace. VAMINER explicitly enables the plugin in each temporary Claude invocation when a parent trace is available, regardless of its user-level enabled state, and disables it for that invocation when tracing is unavailable.
+No user-scoped Claude plugin installation is required. VAMINER passes the active phase span through `CC_LANGFUSE_TRACEPARENT`, so the bundled hook's Conversational Turn, Generation, and Tool observations join the same Miner trace. The hook reuses VAMINER's authenticated Langfuse client and keeps its incremental cursor state in the invocation's temporary directory. VAMINER explicitly disables the user-installed Langfuse plugin in each temporary Claude invocation to prevent duplicate observations.
 
 External evidence and optional tracing are configured in the same ignored repository-root `.env`:
 
@@ -272,7 +265,7 @@ No additional proxy configuration is required. VAMINER loads these variables bef
 
 Set `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` to enable optional tracing. `LANGFUSE_BASE_URL` is needed only for a custom Langfuse server; otherwise the SDK default is used. General Miner limits live in `src/miner/utils/config.py`; Pydantic-specific model and compaction settings live in `src/miner/runtimes/pydantic/config.py`.
 
-One mining input produces one trace named `VAS-XXXX Miner @<runtime>`, whose root input is the original typed mining input and whose root output is the final saved VAS rule. Pydantic AI contributes its native `invoke_agent` → `chat`/`execute_tool` OpenTelemetry spans. The official Claude plugin contributes Conversational Turn → Generation/Tool observations beneath VAMINER-owned phase spans; the cross-process synthesis orchestration span remains application-owned so child Claude runs can inherit live W3C context. Rich Hook/stream events are console and run-file diagnostics only and do not create duplicate Langfuse observations.
+One mining input produces one trace named `VAS-XXXX Miner @<runtime>`, whose root input is the original typed mining input and whose root output is the final saved VAS rule. Pydantic AI contributes its native `invoke_agent` → `chat`/`execute_tool` OpenTelemetry spans. The bundled Claude transcript hook contributes Conversational Turn → Generation/Tool observations beneath VAMINER-owned phase spans; the cross-process synthesis orchestration span remains application-owned so child Claude runs can inherit live W3C context. Rich Hook/stream events are console and run-file diagnostics only and do not create duplicate Langfuse observations.
 
 Both Runtime Adapters enforce the same Phase Authority. RCA reads source through typed list/search/read operations and writes only valid top-level Case Artifacts. Rule Generation reads only Case Artifacts and invokes synthesis. Synthesizers read scoped evidence and run ast-grep without write, network, shell, or delegation tools. RCA cleanup is explicit before pure validation; cache loading and final VAS validation never mutate the filesystem.
 

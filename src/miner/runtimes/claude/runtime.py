@@ -44,6 +44,7 @@ from .mcp import SERVER_NAME
 from .policy import PolicyCompiler, cleanup_session_transcript, model_output_type
 from .process import ProcessRunner, clip, redact
 from .protocol import ClaudeStreamDecoder
+from .tracing import emit_session_trace
 
 
 def _sum(left: int | None, right: int | None) -> int | None:
@@ -269,6 +270,15 @@ class ClaudeCodeRuntime:
                         if relay_task is not None:
                             relay_finished.set()
                             await relay_task
+                        try:
+                            await emit_session_trace(
+                                files.session_id,
+                                environment=environment,
+                                state_dir=files.trace_state,
+                                executable=executable,
+                            )
+                        except Exception:  # noqa: BLE001 - tracing must never affect Agent execution.
+                            logger.debug("Failed to run bundled Claude Langfuse hook", exc_info=True)
                     decoded = None
                     final = None
                     try:

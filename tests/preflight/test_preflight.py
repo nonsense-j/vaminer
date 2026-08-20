@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from src.miner.preflight import claude as claude_preflight
 from src.miner.preflight import runner, tracing
-from src.miner.preflight.claude import check_claude_langfuse_plugin, check_claude_live, check_mcp_server
+from src.miner.preflight.claude import check_claude_langfuse_hook, check_claude_live, check_mcp_server
 from src.miner.preflight.cli import parse_args
 from src.miner.preflight import common
 from src.miner.preflight.models import CheckResult, CheckStatus, PreflightReport
@@ -89,34 +89,17 @@ async def test_trace_ingestion_requires_runtime_observations():
     assert "2 probe observations" in result.summary
 
 
-def test_claude_plugin_check_requires_installed_official_plugin(monkeypatch: pytest.MonkeyPatch):
-    def completed(enabled: bool | None) -> subprocess.CompletedProcess[str]:
-        plugins = (
-            "[]"
-            if enabled is None
-            else (
-                '[{"id":"langfuse-observability@langfuse-observability",'
-                f'"version":"1.0.0","scope":"user","enabled":{str(enabled).lower()}}}]'
-            )
-        )
-        return subprocess.CompletedProcess(
-            args=["claude"],
-            returncode=0,
-            stdout=plugins,
-            stderr="",
-        )
+def test_claude_hook_check_exercises_bundled_in_process_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    skipped = check_claude_langfuse_hook(None, "claude", required=False)
+    available = check_claude_langfuse_hook(object(), "/usr/local/bin/codeagent", required=True)
+    monkeypatch.setattr(claude_preflight, "BUNDLED_HOOK", tmp_path / "missing-hook.py")
+    missing = check_claude_langfuse_hook(object(), "claude", required=True)
 
-    monkeypatch.setattr("src.miner.preflight.claude._run_cli", lambda *_args, **_kwargs: completed(None))
-    missing = check_claude_langfuse_plugin("claude", required=True, timeout_seconds=1)
-    monkeypatch.setattr("src.miner.preflight.claude._run_cli", lambda *_args, **_kwargs: completed(False))
-    disabled = check_claude_langfuse_plugin("claude", required=True, timeout_seconds=1)
-    monkeypatch.setattr("src.miner.preflight.claude._run_cli", lambda *_args, **_kwargs: completed(True))
-    enabled = check_claude_langfuse_plugin("claude", required=True, timeout_seconds=1)
-
+    assert skipped.status is CheckStatus.SKIP
+    assert available.status is CheckStatus.PASS
+    assert "api=in-process" in (available.detail or "")
+    assert "codeagent" in (available.detail or "")
     assert missing.status is CheckStatus.FAIL
-    assert disabled.status is CheckStatus.PASS
-    assert "activation per invocation" in (disabled.detail or "")
-    assert enabled.status is CheckStatus.PASS
 
 
 @pytest.mark.asyncio
@@ -187,8 +170,8 @@ async def test_failed_claude_live_probe_does_not_wait_for_trace(tmp_path: Path, 
     monkeypatch.setattr(runner, "check_claude_cli", lambda *_args, **_kwargs: (passed("claude.cli"), "claude"))
     monkeypatch.setattr(
         runner,
-        "check_claude_langfuse_plugin",
-        lambda *_args, **_kwargs: passed("claude.langfuse-plugin"),
+        "check_claude_langfuse_hook",
+        lambda *_args, **_kwargs: passed("claude.langfuse-hook"),
     )
 
     async def check_mcp(*_args, **_kwargs):

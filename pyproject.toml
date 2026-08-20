@@ -30,3 +30,6 @@ line-length = 120
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"miner.runtimes.claude" = ["_vendor/LICENSE.langfuse-observability"]

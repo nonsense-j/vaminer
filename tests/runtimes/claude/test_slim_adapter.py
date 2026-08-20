@@ -139,6 +139,7 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
     assert "--disallowedTools" not in argv
     assert "stream-json" in argv
     assert files.receipt is None
+    assert files.trace_state == temporary / "langfuse-state"
     assert json.loads(files.settings.read_text(encoding="utf-8"))["enabledPlugins"] == {
         LANGFUSE_CLAUDE_PLUGIN_ID: False
     }
@@ -187,7 +188,7 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
         model_id="session",
     )
     assert json.loads(traced_files.settings.read_text(encoding="utf-8"))["enabledPlugins"] == {
-        LANGFUSE_CLAUDE_PLUGIN_ID: True
+        LANGFUSE_CLAUDE_PLUGIN_ID: False
     }
 
 
@@ -602,7 +603,10 @@ async def test_runtime_uses_ephemeral_invocation_and_returns_typed_delta(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_runtime_repairs_output_with_remaining_turn_budget(tmp_path: Path):
+async def test_runtime_repairs_output_with_remaining_turn_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     workspace, source, cases = _workspace(tmp_path)
     intent = AnchorIntent(
         id="copy-site",
@@ -663,11 +667,18 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(tmp_path: Path)
 
     runner = Runner()
     runtime._runner = runner
+    traced_sessions: list[str] = []
+
+    async def emit_trace(session_id: str, **_kwargs):
+        traced_sessions.append(session_id)
+
+    monkeypatch.setattr("src.miner.runtimes.claude.runtime.emit_session_trace", emit_trace)
     result = await runtime.run(task)
     assert result.attempts == 2
     assert runner.max_turns == [task.limits.request_limit, task.limits.request_limit - 1]
     assert runner.session_flags == ["--session-id", "--resume"]
     assert runner.session_ids[0] == runner.session_ids[1]
+    assert traced_sessions == runner.session_ids
     assert runner.mcp_paths[0] == runner.mcp_paths[1]
     assert task.prompt == runner.prompts[0]
     assert task.prompt not in runner.prompts[1]

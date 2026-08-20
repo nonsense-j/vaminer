@@ -1,4 +1,4 @@
-"""Claude CLI, plugin, MCP, and live Agent preflight checks."""
+"""Claude CLI, bundled tracing, MCP, and live Agent preflight checks."""
 
 from __future__ import annotations
 
@@ -29,6 +29,13 @@ from ..runtimes.claude.mcp import (
 from ..runtimes.claude.policy import PolicyCompiler, cleanup_session_transcript
 from ..runtimes.claude.process import ProcessRunner, redact
 from ..runtimes.claude.protocol import ClaudeStreamDecoder
+from ..runtimes.claude.tracing import (
+    BUNDLED_HOOK,
+    BUNDLED_HOOK_LICENSE,
+    BUNDLED_HOOK_VERSION,
+    emit_session_trace,
+    probe_bundled_hook,
+)
 from ..utils.log import RuntimeLog
 from ..utils.telemetry import claude_trace_environment, propagated_trace_environment
 from .models import CheckResult
@@ -136,58 +143,61 @@ def check_claude_cli(config: ClaudeCodeConfig, *, timeout_seconds: float) -> tup
     )
 
 
-def check_claude_langfuse_plugin(
+def check_claude_langfuse_hook(
+    langfuse_client: object | None,
     executable: str | None,
     *,
     required: bool,
-    timeout_seconds: float,
 ) -> CheckResult:
     if not required:
-        return CheckResult.skipped("claude.langfuse-plugin", "Langfuse tracing is not enabled for this run")
+        return CheckResult.skipped("claude.langfuse-hook", "Langfuse tracing is not enabled for this run")
+    if langfuse_client is None:
+        return CheckResult.failed(
+            "claude.langfuse-hook",
+            "The bundled hook cannot be exercised without an authenticated Langfuse client",
+        )
     if executable is None:
         return CheckResult.failed(
-            "claude.langfuse-plugin",
-            "Claude CLI is unavailable, so its plugin cannot be checked",
+            "claude.langfuse-hook",
+            "Claude CLI is unavailable, so its tracing identity cannot be checked",
         )
+    started = time.monotonic()
     try:
-        completed = _run_cli(
-            [executable, "plugin", "list", "--json"],
-            environment=os.environ.copy(),
-            timeout_seconds=timeout_seconds,
-        )
-        if completed.returncode != 0:
+        if not BUNDLED_HOOK.is_file() or not BUNDLED_HOOK_LICENSE.is_file():
+            missing = [str(path) for path in (BUNDLED_HOOK, BUNDLED_HOOK_LICENSE) if not path.is_file()]
             return CheckResult.failed(
-                "claude.langfuse-plugin",
-                "Claude plugin inventory command failed",
-                detail=redact(completed.stderr or completed.stdout).strip(),
+                "claude.langfuse-hook",
+                "Bundled Langfuse hook assets are missing",
+                detail=", ".join(missing),
             )
-        plugins = json.loads(completed.stdout)
-        plugin = next(
-            (
-                item
-                for item in plugins
-                if isinstance(item, dict) and item.get("id") == LANGFUSE_CLAUDE_PLUGIN_ID
-            ),
-            None,
-        )
-        if plugin is None:
+        compile(BUNDLED_HOOK.read_text(encoding="utf-8"), str(BUNDLED_HOOK), "exec")
+        with tempfile.TemporaryDirectory(prefix="vaminer-preflight-langfuse-hook-") as raw_temp:
+            temporary_root = Path(raw_temp)
+            transcript = temporary_root / "empty-session.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            emitted = probe_bundled_hook(
+                langfuse_client,
+                transcript_path=transcript,
+                state_dir=temporary_root / "state",
+                executable=executable,
+                traceparent="00-0123456789abcdef0123456789abcdef-fedcba9876543210-01",
+            )
+        if emitted != 0:
             return CheckResult.failed(
-                "claude.langfuse-plugin",
-                "The official Langfuse Claude plugin is not installed",
-                detail=f"missing {LANGFUSE_CLAUDE_PLUGIN_ID}",
+                "claude.langfuse-hook",
+                "Bundled Langfuse hook probe emitted observations for an empty transcript",
+                detail=f"emitted={emitted}",
             )
         return CheckResult.passed(
-            "claude.langfuse-plugin",
-            f"Langfuse Claude plugin {plugin.get('version') or 'unknown version'} is installed",
-            detail=(
-                f"scope={plugin.get('scope') or 'unknown'}; "
-                "VAMiner manages activation per invocation"
-            ),
+            "claude.langfuse-hook",
+            f"Bundled Langfuse hook {BUNDLED_HOOK_VERSION} loaded and parsed an empty transcript",
+            detail=f"cli={Path(executable).name}; api=in-process",
+            duration_ms=round((time.monotonic() - started) * 1000),
         )
     except Exception as exc:  # noqa: BLE001
         return CheckResult.failed(
-            "claude.langfuse-plugin",
-            "Claude plugin inventory could not be validated",
+            "claude.langfuse-hook",
+            "Bundled Langfuse hook probe failed",
             detail=f"{type(exc).__name__}: {exc}",
         )
 
@@ -306,7 +316,7 @@ async def check_claude_live(
             settings: dict[str, object] = {
                 "permissions": {"defaultMode": "dontAsk", "allow": [_MCP_TOOL]},
                 "enableAllProjectMcpServers": False,
-                "enabledPlugins": {LANGFUSE_CLAUDE_PLUGIN_ID: tracing_active},
+                "enabledPlugins": {LANGFUSE_CLAUDE_PLUGIN_ID: False},
             }
             settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
             prompt_path.write_text(
@@ -385,6 +395,7 @@ async def check_claude_live(
                 terminate_grace_seconds=config.terminate_grace_seconds,
             )
             first_event = False
+            hook_result = None
 
             def feed_line(raw: str) -> None:
                 nonlocal first_event
@@ -412,6 +423,13 @@ async def check_claude_live(
                 )
             finally:
                 await stop_heartbeat(heartbeat)
+                if tracing_active:
+                    hook_result = await emit_session_trace(
+                        session_id,
+                        environment=environment,
+                        state_dir=workspace / "langfuse-state",
+                        executable=executable,
+                    )
             notify(progress, "Claude subprocess exited; validating the terminal structured output ...")
             decoded = decoder.finish(process)
             if decoded.validation_errors or decoded.output is None:
@@ -432,6 +450,26 @@ async def check_claude_live(
                     "Claude completed, but no Langfuse traceparent reached the child process",
                     detail=f"active carrier now present={bool(trace_carrier)}",
                 )
+            if tracing_active and (
+                hook_result is None
+                or hook_result.transcript_count == 0
+                or hook_result.invoked_count == 0
+                or hook_result.emitted_turn_count == 0
+                or not hook_result.ok
+            ):
+                detail = "bundled hook was not invoked"
+                if hook_result is not None:
+                    detail = (
+                        f"transcripts={hook_result.transcript_count}; "
+                        f"invocations={hook_result.invoked_count}; "
+                        f"emitted_turns={hook_result.emitted_turn_count}; "
+                        f"errors={'; '.join(hook_result.errors) or 'none'}"
+                    )
+                return CheckResult.failed(
+                    "claude.agent-live",
+                    "Claude completed, but the bundled Langfuse hook did not process its transcript",
+                    detail=detail,
+                )
     except Exception as exc:  # noqa: BLE001
         return CheckResult.failed(
             "claude.agent-live",
@@ -449,7 +487,7 @@ async def check_claude_live(
 
 __all__ = [
     "check_claude_cli",
-    "check_claude_langfuse_plugin",
+    "check_claude_langfuse_hook",
     "check_claude_live",
     "check_mcp_server",
 ]

@@ -47,8 +47,8 @@ uv run python -m src.miner.preflight --runtime claude-cli
 
 交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用
 模型。它会验证 Python 与内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、
-已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数、tracing
-启用时是否已安装 Langfuse 插件，以及真实的 MCP handshake、工具列表和只读工具调用。
+已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数，在 tracing
+启用时加载并执行内置 Langfuse transcript hook，以及运行真实的 MCP handshake、工具列表和只读工具调用。
 
 增加 `--live` 后会发起一次很小的真实模型请求。Agent 必须调用探针工具并返回结构化输出；如果已启用
 Langfuse，还必须在同一条 preflight trace 下产生至少一个 runtime observation。该请求可能产生模型费用。
@@ -175,7 +175,7 @@ Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Sy
 - `src/miner/tools/`：提供运行时无关的证据、仓库、用例、Skill 和 ast-grep 操作。
 - `src/miner/runtimes/shared/`：包含 host-owned Anchor Synthesis Session。
 - `src/miner/runtimes/pydantic/`：包含进程内 Pydantic AI Adapter、LLM 构建、Hook 和精确 typed 工具。
-- `src/miner/runtimes/claude/`：包含 Claude CLI Adapter、策略编译、有界子进程解码和精确的 Phase-scoped MCP 工具。
+- `src/miner/runtimes/claude/`：包含 Claude CLI Adapter、策略编译、内置 Langfuse transcript hook、有界子进程解码和精确的 Phase-scoped MCP 工具。
 - `src/miner/anchors/`：负责生成规则扫描和生成后审查。
 - `src/miner/main.py`：作为 CLI 组合入口，负责运行时选择、工作流执行、组装和持久化。
 
@@ -217,16 +217,9 @@ MINER_AGENT_RUNTIME=claude-cli
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
 ```
 
-也可以传入 `--claude-model claude-sonnet-4-6`。VAMINER 使用 `user` setting source、严格的临时 MCP 配置和 fresh session id 调用 Claude。启用 tracing 时，session transcript 仅保留到 Claude 的同步 Stop/SessionEnd Hook 完成，随后连同其 tool-result 目录一起删除。子进程完整继承父进程环境以沿用 Claude 鉴权和 provider 选择；环境值绝不写入 log 或 trace。checkout 中的 project/local settings、instructions 和 MCP 配置均不加载。
+也可以传入 `--claude-model claude-sonnet-4-6`。VAMINER 使用 `user` setting source、严格的临时 MCP 配置和 fresh session id 调用 Claude。启用 tracing 时，每个 Claude 进程返回后，VAMINER 会在删除 session transcript 及 tool-result 目录之前，通过进程内 Python API 调用内置 Langfuse transcript hook。子进程完整继承父进程环境以沿用 Claude 鉴权和 provider 选择；环境值绝不写入 log 或 trace。checkout 中的 project/local settings、instructions 和 MCP 配置均不加载。
 
-使用 `claude-cli` tracing 前，需要在 Claude user scope 安装一次 Langfuse 官方 Observability Plugin：
-
-```bash
-claude plugin marketplace add langfuse/Claude-Observability-Plugin
-claude plugin install langfuse-observability@langfuse-observability
-```
-
-VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使插件产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。有可用父 trace 时，VAMINER 会在每次 Claude 调用的临时 settings 中显式启用该插件，不依赖用户态是否启用；tracing 不可用时则仅为本次调用禁用。
+不再需要在 Claude user scope 安装插件。VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使内置 hook 产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。hook 复用 VAMINER 已完成鉴权的 Langfuse client，并把增量 cursor state 放在本次 invocation 的临时目录。每次临时 Claude invocation 都会显式禁用用户已安装的 Langfuse 插件，避免重复上报。
 
 外部证据和可选链路追踪也通过仓库根目录中不会提交到 Git 的 `.env` 配置：
 
@@ -271,7 +264,7 @@ NO_PROXY=localhost,127.0.0.1,::1
 
 如需启用可选的 Langfuse 链路追踪，请同时设置 `LANGFUSE_PUBLIC_KEY` 和 `LANGFUSE_SECRET_KEY`。只有使用自定义 Langfuse 服务时才需要设置 `LANGFUSE_BASE_URL`，否则使用 SDK 默认地址。通用 Miner 限制位于 `src/miner/utils/config.py`；Pydantic 专用模型和上下文压缩设置位于 `src/miner/runtimes/pydantic/config.py`。
 
-每个 mining input 只产生一个名为 `VAS-XXXX Miner @<runtime>` 的 trace；根 input 是原始 typed mining input，根 output 是最终保存的 VAS 规则。Pydantic AI 通过原生 OpenTelemetry 产生 `invoke_agent` → `chat`/`execute_tool` spans。Langfuse 官方 Claude Plugin 在 VAMINER 自有的 Phase span 下产生 Conversational Turn → Generation/Tool observations；跨进程 synthesis orchestration span 仍由应用创建，以便子 Claude run 继承实时 W3C context。Rich Hook/stream event 只用于 console 和 run-file diagnostics，不再创建重复的 Langfuse observation。
+每个 mining input 只产生一个名为 `VAS-XXXX Miner @<runtime>` 的 trace；根 input 是原始 typed mining input，根 output 是最终保存的 VAS 规则。Pydantic AI 通过原生 OpenTelemetry 产生 `invoke_agent` → `chat`/`execute_tool` spans。内置 Claude transcript hook 在 VAMINER 自有的 Phase span 下产生 Conversational Turn → Generation/Tool observations；跨进程 synthesis orchestration span 仍由应用创建，以便子 Claude run 继承实时 W3C context。Rich Hook/stream event 只用于 console 和 run-file diagnostics，不再创建重复的 Langfuse observation。
 
 两个 Runtime Adapter 执行同一份 Phase Authority。RCA 通过 typed list/search/read 操作读取 source，只能写入合法的顶层 Case Artifact；Rule Generation 只读 Case Artifact 并调用 synthesis；Synthesizer 只读 scoped evidence 并运行 ast-grep，没有 write、network、shell 或 delegation 工具。RCA cleanup 在纯验收前显式执行，cache load 与最终 VAS 验证绝不修改文件系统。
 

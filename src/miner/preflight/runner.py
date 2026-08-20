@@ -10,7 +10,7 @@ from ..runtimes.claude.config import ClaudeCodeConfig
 from ..utils.telemetry import trace_pipeline
 from .claude import (
     check_claude_cli,
-    check_claude_langfuse_plugin,
+    check_claude_langfuse_hook,
     check_claude_live,
     check_mcp_server,
 )
@@ -89,14 +89,14 @@ async def run_preflight(
         )
         checks.append(cli_check)
         notify(progress, result_message(cli_check))
-        notify(progress, "checking Claude Langfuse plugin ...")
-        plugin_check = check_claude_langfuse_plugin(
+        notify(progress, "checking bundled Claude Langfuse hook ...")
+        hook_check = check_claude_langfuse_hook(
+            langfuse_client,
             executable,
             required=tracing_requested(),
-            timeout_seconds=options.timeout_seconds,
         )
-        checks.append(plugin_check)
-        notify(progress, result_message(plugin_check))
+        checks.append(hook_check)
+        notify(progress, result_message(hook_check))
         notify(progress, "checking VAMiner MCP handshake and tool call ...")
         mcp_check = await check_mcp_server(
             active_claude_config,
