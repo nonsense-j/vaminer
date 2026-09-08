@@ -20,7 +20,6 @@ MINER_SRC_DIR = BASE_SRC_DIR / "miner"
 VAMINER_DIR = BASE_SRC_DIR / ".vaminer"
 VAS_RULES_DIR = (VAMINER_DIR / "skills" / "vas-scanner" / "rules").resolve()
 MINER_OUTPUT_DIR = Path(os.getenv("VAMINER_OUTPUT_DIR") or PROJECT_ROOT / "output").expanduser().resolve()
-MINER_LOG_DIR = MINER_OUTPUT_DIR / "logs" / "miner"
 VAS_WORKSPACE_DIR = (
     Path(os.getenv("VAMINER_WORKSPACE_DIR") or PROJECT_ROOT.parent / "vas_ws" / "miner").expanduser().resolve()
 )

@@ -114,9 +114,9 @@ src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 output/
 ├── miner/VAS-XXXX/<input-id>/
 │   ├── caches/                         # Issue Collection、RCA、Rule Generation 三种缓存
+│   ├── logs/                           # 每次运行的 workflow 日志
+│   │   └── <trace-id>__<runtime>.log
 │   └── anchor_review.md
-└── logs/miner/VAS-XXXX/<input-id>/
-    └── <trace-id>__<runtime>.log
 ```
 
 启用 Langfuse 时，`<trace-id>` 就是整个 workflow 的 Langfuse Trace ID；未启用时，VAMINER 会生成相同格式的本地 ID。可以通过 `VAMINER_OUTPUT_DIR` 或 `--output-dir` 整体调整 `output/` 的位置。

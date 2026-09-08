@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -63,7 +64,7 @@ def _has_top_level_key(query: str, key: str) -> bool:
     return any(line.startswith(f"{key}:") for line in query.splitlines())
 
 
-def _make_inline_rule(query: str, language: str) -> str:
+def _make_rule(query: str, language: str) -> str:
     prefix = []
     if not _has_top_level_key(query, "id"):
         prefix.append("id: agent-query")
@@ -127,6 +128,22 @@ def _normalize_site(root: Path, raw: dict[str, Any], *, include_metavariables: b
     return site
 
 
+def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            cwd=root,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AstGrepRunnerError(f"ast-grep timed out after {timeout_seconds} seconds") from exc
+    except OSError as exc:
+        raise AstGrepRunnerError(f"ast-grep could not start: {exc}") from exc
+
+
 def run_ast_grep(
     target_dir: str | Path,
     *,
@@ -166,29 +183,20 @@ def run_ast_grep(
             "--json=compact",
             ".",
         ]
+        completed = _run_ast_grep(command, root=root, timeout_seconds=timeout_seconds)
     else:
-        command = [
-            binary,
-            "scan",
-            "--inline-rules",
-            _make_inline_rule(query, language),
-            "--json=compact",
-            ".",
-        ]
-
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=root,
-            text=True,
-            capture_output=True,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise AstGrepRunnerError(f"ast-grep timed out after {timeout_seconds} seconds") from exc
-    except OSError as exc:
-        raise AstGrepRunnerError(f"ast-grep could not start: {exc}") from exc
+        with tempfile.TemporaryDirectory(prefix="vaminer-ast-grep-") as temp_dir:
+            rule_file = Path(temp_dir) / "rule.yml"
+            rule_file.write_text(_make_rule(query, language), encoding="utf-8")
+            command = [
+                binary,
+                "scan",
+                "--rule",
+                str(rule_file),
+                "--json=compact",
+                ".",
+            ]
+            completed = _run_ast_grep(command, root=root, timeout_seconds=timeout_seconds)
 
     if completed.returncode not in {0, 1} or completed.stderr.strip():
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"

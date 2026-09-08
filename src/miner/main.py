@@ -30,7 +30,6 @@ from .runtimes.claude.config import (
 )
 from .utils.config import (
     MINER_AGENT_RUNTIME,
-    MINER_LOG_DIR,
     MINER_OUTPUT_DIR,
     VAS_RULES_DIR,
     VAS_WORKSPACE_DIR,
@@ -69,12 +68,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Root for caches, logs, and reviews.",
     )
     parser.add_argument("--rules-dir", type=Path, default=VAS_RULES_DIR)
-    parser.add_argument(
-        "--log-dir",
-        type=Path,
-        default=None,
-        help=f"Optional workflow log root override; defaults to {MINER_LOG_DIR}.",
-    )
 
     claude = parser.add_argument_group("Claude CLI Runtime")
     claude.add_argument("--claude-command", default=CLAUDE_CODE_COMMAND)
@@ -134,7 +127,6 @@ async def main(args: argparse.Namespace) -> VASFull | list[VASFull]:
             workspace_dir=args.workspace_dir,
             output_dir=args.output_dir,
             rules_dir=args.rules_dir,
-            log_dir=args.log_dir,
         ),
     )
     try:

@@ -14,8 +14,6 @@ def test_runtime_log_mirrors_one_redacted_rich_panel_to_stdout_and_run_file(tmp_
 
     with run_log_file(
         tmp_path,
-        "VAS-0001",
-        input_id="input",
         trace_id="trace",
         runtime="test",
     ) as path:
@@ -25,6 +23,7 @@ def test_runtime_log_mirrors_one_redacted_rich_panel_to_stdout_and_run_file(tmp_
             {"authorization": "Bearer top-secret-token", "plan": "inspect the copy"},
         )
 
+    assert path.parent == tmp_path
     rendered = stdout.getvalue()
     persisted = path.read_text(encoding="utf-8")
     assert "🤖 Root Cause Analyzer — 🧠 Thinking" in rendered
@@ -65,8 +64,6 @@ def test_runtime_log_relay_preserves_console_color_and_plain_run_file(tmp_path):
     )
     with run_log_file(
         tmp_path,
-        "VAS-0002",
-        input_id="input",
         trace_id="trace",
         runtime="test",
     ) as path:

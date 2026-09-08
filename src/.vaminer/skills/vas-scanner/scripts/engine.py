@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -153,7 +154,7 @@ def has_top_level_key(query: str, key: str) -> bool:
     return any(line.startswith(f"{key}:") for line in query.splitlines())
 
 
-def make_inline_rule(query: str, language: str, rule_id: str) -> str:
+def make_rule(query: str, language: str, rule_id: str) -> str:
     prefix = []
     if not has_top_level_key(query, "id"):
         prefix.append(f"id: {rule_id}")
@@ -197,6 +198,21 @@ def relative_source_path(root: Path, file_value: Any, anchor_id: str) -> str:
     return relative.as_posix()
 
 
+def run_ast_grep(command: list[str], *, timeout_seconds: int = 60) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AnchorExecutionError(f"ast-grep timed out after {timeout_seconds} seconds") from exc
+    except OSError as exc:
+        raise AnchorExecutionError(f"ast-grep could not start: {exc}") from exc
+
+
 def run_anchor(
     anchor: dict[str, Any],
     root: Path,
@@ -220,30 +236,26 @@ def run_anchor(
             "--json=compact",
             str(root),
         ]
+        completed = run_ast_grep(command)
     elif query_type == "rule":
-        command = [
-            ast_grep,
-            "scan",
-            "--inline-rules",
-            make_inline_rule(anchor["query"], language, anchor["id"]),
-            "--json=compact",
-            str(root),
-        ]
+        with tempfile.TemporaryDirectory(prefix="vaminer-ast-grep-") as temp_dir:
+            rule_file = Path(temp_dir) / "rule.yml"
+            rule_file.write_text(
+                make_rule(anchor["query"], language, anchor["id"]),
+                encoding="utf-8",
+            )
+            command = [
+                ast_grep,
+                "scan",
+                "--rule",
+                str(rule_file),
+                "--json=compact",
+                str(root),
+            ]
+            completed = run_ast_grep(command)
     else:
         raise AnchorQueryError(f"unsupported anchor type: {query_type!r}")
 
-    try:
-        completed = subprocess.run(
-            command,
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise AnchorExecutionError("ast-grep timed out after 60 seconds") from exc
-    except OSError as exc:
-        raise AnchorExecutionError(f"ast-grep could not start: {exc}") from exc
     if completed.returncode not in {0, 1} or completed.stderr.strip():
         detail = (
             completed.stderr.strip()

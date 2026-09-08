@@ -109,7 +109,12 @@ async def test_issue_and_example_inputs_share_one_post_prepare_workflow(tmp_path
     )
     assert example_runtime.phases == [AgentPhase.ROOT_CAUSE, AgentPhase.RULE_GENERATION]
     assert example_vas.sources[0].type == "example_suite"
-    assert (example_options.output_dir / "miner" / example_vas.vas_id / "exp-CWE-120").is_dir()
+    run_dir = example_options.output_dir / "miner" / example_vas.vas_id / "exp-CWE-120"
+    assert run_dir.is_dir()
+    assert (run_dir / "caches").is_dir()
+    assert (run_dir / "logs").is_dir()
+    assert list((run_dir / "logs").glob("*.log"))
+    assert not (example_options.output_dir / "logs").exists()
 
 
 @pytest.mark.asyncio

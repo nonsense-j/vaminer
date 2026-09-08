@@ -28,6 +28,14 @@ def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Pat
         / "CVE-2099-0001"
         / "caches"
     )
+    assert workspace.log_dir == (
+        tmp_path
+        / "output"
+        / "miner"
+        / "VAS-0001"
+        / "CVE-2099-0001"
+        / "logs"
+    )
     assert not hasattr(workspace, "artifact_root")
 
 

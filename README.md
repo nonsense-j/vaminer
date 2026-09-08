@@ -115,9 +115,9 @@ Caches and diagnostics are kept outside the model workspace:
 output/
 ├── miner/VAS-XXXX/<input-id>/
 │   ├── caches/                         # Issue Collection, RCA, and Rule Generation caches
+│   ├── logs/                           # Per-trace workflow logs
+│   │   └── <trace-id>__<runtime>.log
 │   └── anchor_review.md
-└── logs/miner/VAS-XXXX/<input-id>/
-    └── <trace-id>__<runtime>.log
 ```
 
 `<trace-id>` is the overall Langfuse workflow trace id when tracing is enabled. Without Langfuse, VAMINER generates a local id with the same format. Set `VAMINER_OUTPUT_DIR` or pass `--output-dir` to relocate the complete `output/` tree.

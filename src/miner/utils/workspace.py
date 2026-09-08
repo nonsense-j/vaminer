@@ -123,8 +123,9 @@ class Workspace:
                 cases/                       # Extracted root-cause cases and simple variants
                 src/                         # Cloned repo or example-suite snapshot
         output/
-            miner/VAS-XXXX/<input-id>/       # Caches and review output
-            logs/miner/VAS-XXXX/<input-id>/  # Per-trace workflow logs
+            miner/VAS-XXXX/<input-id>/       # Caches, review output, and logs
+                caches/
+                logs/                        # Per-trace workflow logs
         src/.vaminer/skills/vas-scanner/rules/
             VAS-XXXX.json                    # Final VAS specification
     """
@@ -285,6 +286,10 @@ class Workspace:
     @property
     def cache_dir(self) -> Path:
         return self.run_output_dir / "caches"
+
+    @property
+    def log_dir(self) -> Path:
+        return self.run_output_dir / "logs"
 
     @property
     def cases_dir(self) -> Path:

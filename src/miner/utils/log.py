@@ -311,15 +311,13 @@ def mirror_run_log_file(path: Path | None) -> Iterator[None]:
 
 @contextmanager
 def run_log_file(
-    log_root: Path,
-    vas_id: str,
+    run_dir: Path,
     *,
-    input_id: str,
     trace_id: str,
     runtime: str,
 ) -> Iterator[Path]:
-    """Attach one append-only log file for the duration of a VAS run."""
-    run_dir = log_root / vas_id / input_id
+    """Attach one append-only log file under one run's output directory."""
+    run_dir = run_dir.expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{trace_id}__{runtime}"
     log_path = run_dir / f"{stem}.log"

@@ -32,7 +32,6 @@ class WorkflowOptions:
     workspace_dir: Path = VAS_WORKSPACE_DIR
     output_dir: Path = MINER_OUTPUT_DIR
     rules_dir: Path = VAS_RULES_DIR
-    log_dir: Path | None = None
 
 
 def _assemble_vas(vas_id: str, prepared: PreparedAnalysis, core: VASCoreInfo) -> VASFull:
@@ -158,11 +157,8 @@ class VAMiner:
                     trace_id=pipeline.trace_id,
                     rules_dir=self.options.rules_dir.expanduser().resolve(),
                 )
-                log_root = self.options.log_dir or output_dir / "logs" / "miner"
                 with run_log_file(
-                    log_root.expanduser().resolve(),
-                    vas_id,
-                    input_id=workspace.input_id,
+                    workspace.log_dir,
                     trace_id=pipeline.trace_id,
                     runtime=self.runtime.identity.runtime_id,
                 ) as log_path:
