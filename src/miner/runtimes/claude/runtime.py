@@ -36,7 +36,10 @@ from .config import ClaudeCodeConfig
 from .errors import (
     ClaudeCodeChildSynthesisError,
     ClaudeCodeError,
+    ClaudeCodeOutputLimitError,
+    ClaudeCodeProcessError,
     ClaudeCodeProtocolError,
+    ClaudeCodeTimeoutError,
     ClaudeCodeToolExecutionError,
     ClaudeCodeValidationError,
 )
@@ -338,6 +341,37 @@ class ClaudeCodeRuntime:
             cli_name=self.config.display_name,
         )
 
+    async def _run_with_process_retries(
+        self,
+        task: AgentTask[OutputT],
+    ) -> AgentRunResult[OutputT]:
+        """Restart a crashed Synthesizer with a fresh Claude session."""
+
+        max_attempts = (
+            1 + self.config.max_synthesis_process_retries
+            if task.phase is AgentPhase.AST_GREP_SYNTHESIS
+            else 1
+        )
+        for process_attempt in range(1, max_attempts + 1):
+            try:
+                result = await self._run(task)
+            except (ClaudeCodeProcessError, ClaudeCodeTimeoutError, ClaudeCodeOutputLimitError) as exc:
+                if process_attempt >= max_attempts:
+                    raise
+                logger.warning(
+                    "%s process failed for %s (attempt %s/%s); retrying with a fresh session: %s",
+                    self.config.display_name,
+                    task.task_id,
+                    process_attempt,
+                    max_attempts,
+                    redact(clip(str(exc), 2_000)),
+                )
+                continue
+            if process_attempt == 1:
+                return result
+            return replace(result, attempts=result.attempts + process_attempt - 1)
+        raise AssertionError("unreachable")
+
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:
         self._runtime_log.started(task.agent_name, {"task_id": task.task_id, "prompt": task.prompt})
         try:
@@ -347,7 +381,7 @@ class ClaudeCodeRuntime:
                 metadata={"phase": task.phase.value, "runtime": self.runtime_id, "model": self.identity.model_id},
                 truncate=False,
             ) as observation:
-                result = await self._run(task)
+                result = await self._run_with_process_retries(task)
                 if observation is not None:
                     try:
                         observation.update(

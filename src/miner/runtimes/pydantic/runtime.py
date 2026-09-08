@@ -158,9 +158,15 @@ class PydanticAIRuntime:
             path: str | None = None,
             glob: str | None = None,
             max_results: int = 500,
-        ) -> dict[str, object]:
+        ) -> str:
             try:
-                return await asyncio.to_thread(list_src_impl, root, path=path, glob=glob, max_results=max_results)
+                return await asyncio.to_thread(
+                    list_src_impl,
+                    root,
+                    path=path,
+                    glob=glob,
+                    max_results=max_results,
+                )
             except (ValueError, RuntimeError, OSError) as exc:
                 _raise_tool_feedback(exc)
 
@@ -172,7 +178,7 @@ class PydanticAIRuntime:
             mode: Literal["literal", "regex"] = "literal",
             glob: str | None = None,
             max_results: int = 100,
-        ) -> dict[str, object]:
+        ) -> str:
             try:
                 return await asyncio.to_thread(
                     search_src_impl,
@@ -193,7 +199,7 @@ class PydanticAIRuntime:
             start_line: int = 1,
             end_line: int | None = None,
             full_file: bool = False,
-        ) -> dict[str, object]:
+        ) -> str:
             try:
                 return read_src_impl(
                     root,
@@ -211,7 +217,7 @@ class PydanticAIRuntime:
 
     @staticmethod
     def _case_tools(cases_dir: Path, *, writable: bool) -> list[Any]:
-        def list_case_artifacts() -> list[str]:
+        def list_case_artifacts() -> str:
             try:
                 return list_cases_impl(cases_dir)
             except (ValueError, RuntimeError, OSError) as exc:
@@ -221,7 +227,7 @@ class PydanticAIRuntime:
             path: str,
             start_line: int = 1,
             end_line: int | None = None,
-        ) -> dict[str, Any]:
+        ) -> str:
             try:
                 return read_case_impl(cases_dir, path, start_line=start_line, end_line=end_line)
             except (ValueError, RuntimeError, OSError) as exc:
@@ -229,7 +235,7 @@ class PydanticAIRuntime:
 
         tools: list[Any] = [list_case_artifacts, read_case_artifact]
         if writable:
-            def write_case_artifact(path: str, content: str) -> dict[str, Any]:
+            def write_case_artifact(path: str, content: str) -> str:
                 try:
                     return write_case_impl(cases_dir, path, content)
                 except (ValueError, RuntimeError, OSError) as exc:
@@ -301,9 +307,13 @@ class PydanticAIRuntime:
             tools.extend(self._src_tools(authority.source_root))
             tools.extend(self._case_tools(authority.cases_dir, writable=False))
 
-            def list_skill_resources(max_files: int = 100) -> dict[str, object]:
+            def list_skill_resources(max_files: int = 100) -> str:
                 try:
-                    return list_skills_impl({"ast-grep": authority.skill_root}, "ast-grep", max_files=max_files)
+                    return list_skills_impl(
+                        {"ast-grep": authority.skill_root},
+                        "ast-grep",
+                        max_files=max_files,
+                    )
                 except (ValueError, RuntimeError, OSError) as exc:
                     _raise_tool_feedback(exc)
 
@@ -311,7 +321,7 @@ class PydanticAIRuntime:
                 resource: str,
                 start_line: int = 1,
                 end_line: int | None = None,
-            ) -> dict[str, object]:
+            ) -> str:
                 try:
                     return read_skill_impl(
                         {"ast-grep": authority.skill_root},
@@ -330,8 +340,15 @@ class PydanticAIRuntime:
                 query: str,
                 output: Literal["count", "sample", "full"] = "sample",
                 sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
-            ) -> dict[str, Any]:
-                if sample_size < 1 or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE:
+            ) -> str:
+                if target not in {"src", "cases"}:
+                    raise ModelRetry("target must be 'src' or 'cases'")
+                if (
+                    not isinstance(sample_size, int)
+                    or isinstance(sample_size, bool)
+                    or sample_size < 1
+                    or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE
+                ):
                     raise ModelRetry(f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}")
                 root = authority.source_root if target == "src" else authority.cases_dir
                 try:

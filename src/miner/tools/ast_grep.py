@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded ast-grep JSON runner for typed agent tools and the skill CLI."""
+"""Bounded ast-grep runner for typed agent tools and the skill CLI."""
 
 from __future__ import annotations
 
@@ -137,18 +137,22 @@ def run_ast_grep(
     sample_size: int = 20,
     timeout_seconds: int = 60,
     executable: str | None = None,
-) -> dict[str, Any]:
-    """Run one ast-grep query against a directory and return normalized JSON data."""
+) -> str:
+    """Run one ast-grep query and return a fixed plain-text match report."""
     root = Path(target_dir).resolve()
     if not root.is_dir():
         raise AstGrepRunnerError(f"target directory does not exist: {root}")
     _enforce_allowed_root(root)
+    if not isinstance(language, str) or not language.strip():
+        raise AstGrepQueryError("language must be a non-empty string")
     if query_type not in {"pattern", "rule"}:
-        raise AstGrepRunnerError(f"unsupported query type: {query_type!r}")
+        raise AstGrepQueryError(f"unsupported query type: {query_type!r}")
+    if not isinstance(query, str) or not query.strip():
+        raise AstGrepQueryError("query must be a non-empty string")
     if output not in {"count", "sample", "full"}:
-        raise AstGrepRunnerError(f"unsupported output mode: {output!r}")
-    if sample_size < 1:
-        raise AstGrepRunnerError("sample_size must be positive")
+        raise AstGrepQueryError(f"unsupported output mode: {output!r}")
+    if not isinstance(sample_size, int) or isinstance(sample_size, bool) or sample_size < 1:
+        raise AstGrepQueryError("sample_size must be a positive integer")
 
     binary = _find_ast_grep(executable)
     if query_type == "pattern":
@@ -209,19 +213,40 @@ def run_ast_grep(
         )
     )
 
-    result: dict[str, Any] = {
-        "target_dir": root.as_posix(),
-        "output": output,
-        "match_count": len(matches),
-        "matched_file_count": len({site["file"] for site in matches}),
-    }
+    rendered = [
+        f"matches: {len(matches)}",
+        f"matched files: {len({site['file'] for site in matches})}",
+    ]
     if output == "sample":
-        result["matches"] = matches[:sample_size]
-        result["truncated"] = len(matches) > sample_size
+        visible_matches = matches[:sample_size]
     elif output == "full":
-        result["matches"] = matches
-        result["truncated"] = False
-    return result
+        visible_matches = matches
+    else:
+        visible_matches = []
+
+    for site in visible_matches:
+        start = site["start"]
+        end = site["end"]
+        rendered.extend(
+            (
+                "--",
+                (
+                    f"==> {site['file']}:"
+                    f"{start['line']}:{start['column']}-"
+                    f"{end['line']}:{end['column']} <=="
+                ),
+                str(site["text"]).rstrip("\n"),
+            )
+        )
+        for group, captures in site.get("meta_variables", {}).items():
+            for name, capture in captures.items():
+                values = capture if isinstance(capture, list) else [capture]
+                for value in values:
+                    text = value["text"] if isinstance(value, dict) else str(value)
+                    rendered.append(f"capture {group}.{name}: {text}")
+    if output == "sample" and len(matches) > sample_size:
+        rendered.append("-- truncated")
+    return "\n".join(rendered)
 
 
 def main() -> None:
@@ -235,17 +260,14 @@ def main() -> None:
     parser.add_argument("--timeout-seconds", type=int, default=60)
     args = parser.parse_args()
     print(
-        json.dumps(
-            run_ast_grep(
-                args.target_dir,
-                language=args.language,
-                query_type=args.query_type,
-                query=args.query,
-                output=args.output,
-                sample_size=args.sample_size,
-                timeout_seconds=args.timeout_seconds,
-            ),
-            indent=2,
+        run_ast_grep(
+            args.target_dir,
+            language=args.language,
+            query_type=args.query_type,
+            query=args.query,
+            output=args.output,
+            sample_size=args.sample_size,
+            timeout_seconds=args.timeout_seconds,
         )
     )
 

@@ -18,6 +18,7 @@ _VALIDATION_CASE_EXCERPT_LINE_LIMIT = 60
 _VALIDATION_CASE_EXCERPT_CHAR_LIMIT = 4_000
 _VALIDATION_RCA_COMPONENT_LIMIT = 8
 _VALIDATION_RCA_SNIPPET_CHAR_LIMIT = 2_000
+_VALIDATION_MIN_ANCHOR_WEIGHT = 2
 
 
 def _bounded_text(value: str, limit: int) -> str:
@@ -104,28 +105,25 @@ def _format_rca_target_evidence(
     if omitted:
         rendered.append(f"... <{omitted} RCA components omitted>")
     label = (
-        "accepted RCA bad-span target sites"
+        "RCA-declared bad-example source files"
         if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
-        else "accepted RCA repository target sites"
+        else "RCA-declared repository source files"
     )
-    return f"{label} (match must overlap at least one):\n" + "\n\n".join(rendered)
+    return (
+        f"{label} (a faithful match may occur elsewhere in any listed file):\n"
+        + "\n\n".join(rendered)
+    )
 
 
-def _match_overlaps_buggy_component(
-    *,
-    file: str,
-    start_line: int,
-    end_line: int,
-    root_cause: RootCauseAnalysis,
-) -> bool:
-    """Return whether a real query match overlaps an RCA-declared causal site."""
-    return any(
-        Path(file).as_posix().removeprefix("./")
-        == Path(span.file).as_posix().removeprefix("./")
-        and start_line <= span.end_line
-        and end_line >= span.start_line
-        for span in root_cause_source_spans(root_cause)
-    )
+def _normalized_source_path(value: str) -> str:
+    return Path(value).as_posix().removeprefix("./")
+
+
+def _root_cause_source_files(root_cause: RootCauseAnalysis) -> set[str]:
+    return {
+        _normalized_source_path(component.file)
+        for component in root_cause_source_spans(root_cause)
+    }
 
 
 def disabled_anchor_ids(value: VASCoreInfo) -> tuple[str, ...]:
@@ -146,7 +144,7 @@ def disabled_anchor_warnings(value: VASCoreInfo) -> tuple[str, ...]:
         for anchor_id in disabled
     ]
     warnings.append(
-        "collective case and source-span coverage are advisory while disabled anchors exist"
+        "collective case and source-file admission are advisory while disabled anchors exist"
     )
     return tuple(warnings)
 
@@ -203,21 +201,27 @@ def validate_anchors(
         for path in cases_dir.rglob("*")
         if path.is_file()
     )
-    actual_coverage: dict[str, set[str]] = {path: set() for path in case_files}
     anchor_case_matches: dict[str, list[AnchorMatch]] = {
         anchor.id: [] for anchor in enabled_anchors
     }
     for match in case_scan.matches:
         if match.anchor_id in disabled_ids:
             continue
-        actual_coverage.setdefault(match.file, set()).add(match.anchor_id)
         anchor_case_matches.setdefault(match.anchor_id, []).append(match)
 
-    missing_cases = [path for path, matched_ids in actual_coverage.items() if not matched_ids]
+    admitted_case_files = {
+        candidate["file"]
+        for candidate in case_scan.candidates(
+            min_anchor_weight=_VALIDATION_MIN_ANCHOR_WEIGHT
+        )
+    }
+    missing_cases = sorted(set(case_files) - admitted_case_files)
     if missing_cases and not disabled_ids:
         errors.extend(
             (
-                "anchors do not cover case files: " + ", ".join(missing_cases),
+                "case files are not admitted by any anchor with query_weight >= "
+                f"{_VALIDATION_MIN_ANCHOR_WEIGHT}: "
+                + ", ".join(missing_cases),
                 _format_missing_case_evidence(cases_dir, missing_cases),
             )
         )
@@ -232,61 +236,53 @@ def validate_anchors(
                 )
             )
 
-    if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE:
-        uncovered_spans = [
-            f"{span.file}:{span.start_line}-{span.end_line}"
-            for span in root_cause_source_spans(root_cause)
-            if not any(
-                Path(match.file).as_posix().removeprefix("./")
-                == Path(span.file).as_posix().removeprefix("./")
-                and match.start_line <= span.end_line
-                and match.end_line >= span.start_line
-                for match in source_scan.matches
-                if match.anchor_id not in disabled_ids
-            )
-        ]
-        if uncovered_spans and not disabled_ids:
+    component_files = _root_cause_source_files(root_cause)
+    source_matches_by_anchor: dict[str, list[AnchorMatch]] = {
+        anchor.id: [] for anchor in enabled_anchors
+    }
+    grounded_ids: set[str] = set()
+    for match in source_scan.matches:
+        if match.anchor_id in disabled_ids:
+            continue
+        source_matches_by_anchor.setdefault(match.anchor_id, []).append(match)
+        if _normalized_source_path(match.file) in component_files:
+            grounded_ids.add(match.anchor_id)
+    for anchor in enabled_anchors:
+        if anchor.id not in grounded_ids:
             errors.extend(
                 (
-                    "inferred bad spans are not covered by anchors: "
-                    + ", ".join(uncovered_spans),
+                    f"anchor {anchor.id!r} has no match in an RCA-declared source file",
+                    _format_match_summary(
+                        "source",
+                        source_matches_by_anchor.get(anchor.id, []),
+                    ),
                     _format_rca_target_evidence(
                         root_cause,
                         grounding_policy=grounding_policy,
                     ),
                 )
             )
-    else:
-        source_matches_by_anchor: dict[str, list[AnchorMatch]] = {
-            anchor.id: [] for anchor in enabled_anchors
+
+    if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE:
+        admitted_source_files = {
+            _normalized_source_path(candidate["file"])
+            for candidate in source_scan.candidates(
+                min_anchor_weight=_VALIDATION_MIN_ANCHOR_WEIGHT
+            )
         }
-        grounded_ids: set[str] = set()
-        for match in source_scan.matches:
-            if match.anchor_id in disabled_ids:
-                continue
-            source_matches_by_anchor.setdefault(match.anchor_id, []).append(match)
-            if _match_overlaps_buggy_component(
-                file=match.file,
-                start_line=match.start_line,
-                end_line=match.end_line,
-                root_cause=root_cause,
-            ):
-                grounded_ids.add(match.anchor_id)
-        for anchor in enabled_anchors:
-            if anchor.id not in grounded_ids:
-                errors.extend(
-                    (
-                        f"anchor {anchor.id!r} has no RCA-declared repository-site match",
-                        _format_match_summary(
-                            "repository",
-                            source_matches_by_anchor.get(anchor.id, []),
-                        ),
-                        _format_rca_target_evidence(
-                            root_cause,
-                            grounding_policy=grounding_policy,
-                        ),
-                    )
+        missing_source_files = sorted(component_files - admitted_source_files)
+        if missing_source_files and not disabled_ids:
+            errors.extend(
+                (
+                    "RCA-declared bad-example files are not admitted by any anchor "
+                    f"with query_weight >= {_VALIDATION_MIN_ANCHOR_WEIGHT}: "
+                    + ", ".join(missing_source_files),
+                    _format_rca_target_evidence(
+                        root_cause,
+                        grounding_policy=grounding_policy,
+                    ),
                 )
+            )
 
     return errors
 

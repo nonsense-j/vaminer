@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+from .text import format_file_read, truncation_footer
+
 MAX_SKILL_RESOURCE_FILES = 100
 MAX_SKILL_RESOURCE_BYTES = 256 * 1024
 MAX_SKILL_RESOURCE_LINES = 200
@@ -52,7 +54,7 @@ def list_skill_resources(
     skill_name: str,
     *,
     max_files: int = MAX_SKILL_RESOURCE_FILES,
-) -> dict[str, object]:
+) -> str:
     """List regular non-symlink files under one task-declared skill root."""
     if max_files < 1 or max_files > MAX_SKILL_RESOURCE_FILES:
         raise ValueError(f"max_files must be between 1 and {MAX_SKILL_RESOURCE_FILES}")
@@ -69,11 +71,10 @@ def list_skill_resources(
             truncated = True
             break
         resources.append(relative.as_posix())
-    return {
-        "skill": skill_name,
-        "resources": resources,
-        "truncated": truncated,
-    }
+    rendered = resources or ["(no skill resources)"]
+    if truncated:
+        rendered.append(truncation_footer())
+    return "\n".join(rendered)
 
 
 def read_skill_resource(
@@ -84,7 +85,7 @@ def read_skill_resource(
     start_line: int = 1,
     end_line: int | None = None,
     max_lines: int = MAX_SKILL_RESOURCE_LINES,
-) -> dict[str, object]:
+) -> str:
     """Read one bounded line range from a task-declared skill resource."""
     if start_line < 1 or max_lines < 1 or max_lines > MAX_SKILL_RESOURCE_LINES:
         raise ValueError(
@@ -99,15 +100,14 @@ def read_skill_resource(
     resolved_end = min(len(lines), end_line if end_line is not None else start_line + max_lines - 1)
     if resolved_end < start_line or resolved_end - start_line + 1 > max_lines:
         raise ValueError(f"requested line range exceeds the {max_lines}-line read limit")
-    return {
-        "skill": skill_name,
-        "path": source.relative_to(root).as_posix(),
-        "content": "".join(lines[start_line - 1 : resolved_end]),
-        "start_line": start_line,
-        "end_line": resolved_end,
-        "total_lines": len(lines),
-        "truncated": resolved_end < len(lines),
-    }
+    return format_file_read(
+        path=f"{skill_name}/{source.relative_to(root).as_posix()}",
+        content="".join(lines[start_line - 1 : resolved_end]),
+        start_line=start_line,
+        end_line=resolved_end,
+        total_lines=len(lines),
+        truncated=resolved_end < len(lines),
+    )
 
 
 __all__ = [

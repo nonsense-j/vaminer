@@ -6,10 +6,13 @@ import json
 import subprocess
 from pathlib import Path
 
+from .text import format_file_read, truncation_footer
+
 MAX_SRC_READ_BYTES = 512 * 1024
 MAX_SRC_READ_LINES = 200
 MAX_SRC_SEARCH_RESULTS = 100
 MAX_SRC_SEARCH_BYTES = 512 * 1024
+SRC_SEARCH_CONTEXT_LINES = 1
 MAX_SRC_LIST_RESULTS = 500
 MAX_SRC_ERROR_CHARS = 2_000
 
@@ -86,15 +89,15 @@ def list_src_files(
     path: str | None = None,
     glob: str | None = None,
     max_results: int = MAX_SRC_LIST_RESULTS,
-) -> dict[str, object]:
+) -> str:
     """List Src-Root-relative files under one directory.
 
     The tool is already rooted at the analyzed Src Root. ``path`` must be an
     existing directory relative to that root; do not include its workspace
     prefix. Omit it to list from the root. ``glob`` uses ripgrep glob syntax.
-    Results are sorted and report whether they were truncated. Broad listings
-    that exceed the output budget return the collected prefix and a message
-    asking for a narrower scope.
+    Results are sorted and returned as one path per line. Broad listings that
+    exceed the output budget return the collected prefix and a message asking
+    for a narrower scope.
     """
 
     if max_results < 1 or max_results > MAX_SRC_LIST_RESULTS:
@@ -140,16 +143,17 @@ def list_src_files(
             continue
         files.append(relative)
     files.sort()
-    result: dict[str, object] = {
-        "files": files[:max_results],
-        "truncated": output_truncated or len(files) > max_results,
-    }
+    rendered = files[:max_results] or ["(no source files)"]
     if output_truncated:
-        result["message"] = (
-            f"src file listing exceeded the {MAX_SRC_SEARCH_BYTES}-byte output limit; "
-            "results collected before the limit were returned; narrow path or glob for complete results"
+        rendered.append(
+            truncation_footer(
+                f"src file listing exceeded the {MAX_SRC_SEARCH_BYTES}-byte output limit; "
+                "results collected before the limit were returned; narrow path or glob for complete results"
+            )
         )
-    return result
+    elif len(files) > max_results:
+        rendered.append(truncation_footer())
+    return "\n".join(rendered)
 
 
 def read_src_file(
@@ -160,17 +164,17 @@ def read_src_file(
     end_line: int | None = None,
     max_lines: int = MAX_SRC_READ_LINES,
     full_file: bool = False,
-) -> dict[str, object]:
+) -> str:
     """Read a bounded line range or one complete Src-Root-relative file.
 
     The tool is already rooted at the analyzed Src Root, so ``path`` must be
     relative to that root and must not include its workspace prefix. Line
     numbers are one-based and ``end_line`` is inclusive. Reads are capped at
-    the configured line limit; continue from one line after the returned
-    ``end_line`` when ``truncated`` is true. Set ``full_file`` to read the whole
-    file without line bounds; the byte limit still applies. A start position
-    past EOF returns empty content together with the file length and a recovery
-    message. Oversized files are rejected.
+    the configured line limit; when the result header says ``more available``,
+    continue from one line after its displayed end line. Set ``full_file`` to
+    read the whole file without line bounds; the byte limit still applies. A
+    start position past EOF returns the file length and a recovery message.
+    Oversized files are rejected.
     """
 
     if not path:
@@ -186,40 +190,40 @@ def read_src_file(
         raise ValueError(f"src file exceeds the {MAX_SRC_READ_BYTES}-byte read limit: {path}")
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     if not lines and start_line == 1:
-        return {
-            "path": Path(path).as_posix(),
-            "content": "",
-            "start_line": 1,
-            "end_line": 0,
-            "total_lines": 0,
-            "truncated": False,
-        }
+        return format_file_read(
+            path=Path(path).as_posix(),
+            content="",
+            start_line=1,
+            end_line=0,
+            total_lines=0,
+            truncated=False,
+        )
     if start_line > len(lines):
-        return {
-            "path": Path(path).as_posix(),
-            "content": "",
-            "start_line": start_line,
-            "end_line": len(lines),
-            "total_lines": len(lines),
-            "truncated": False,
-            "message": (
+        return format_file_read(
+            path=Path(path).as_posix(),
+            content="",
+            start_line=start_line,
+            end_line=len(lines),
+            total_lines=len(lines),
+            truncated=False,
+            message=(
                 f"start_line {start_line} is past EOF; {path} has {len(lines)} lines; "
                 "no content was returned"
             ),
-        }
+        )
     effective_max_lines = MAX_SRC_READ_BYTES if full_file else max_lines
     requested_end = end_line if end_line is not None else start_line + effective_max_lines - 1
     if requested_end < start_line:
         raise ValueError("end_line must be greater than or equal to start_line")
     resolved_end = min(len(lines), requested_end, start_line + effective_max_lines - 1)
-    return {
-        "path": Path(path).as_posix(),
-        "content": "".join(lines[start_line - 1 : resolved_end]),
-        "start_line": start_line,
-        "end_line": resolved_end,
-        "total_lines": len(lines),
-        "truncated": resolved_end < len(lines),
-    }
+    return format_file_read(
+        path=Path(path).as_posix(),
+        content="".join(lines[start_line - 1 : resolved_end]),
+        start_line=start_line,
+        end_line=resolved_end,
+        total_lines=len(lines),
+        truncated=resolved_end < len(lines),
+    )
 
 
 def search_src_files(
@@ -230,17 +234,22 @@ def search_src_files(
     mode: str = "literal",
     glob: str | None = None,
     max_results: int = MAX_SRC_SEARCH_RESULTS,
-) -> dict[str, object]:
+) -> str:
     """Search one Src-Root-relative file or directory.
 
     The tool is already rooted at the analyzed Src Root. ``path`` may be an
     existing file or directory relative to that root; do not include its
     workspace prefix. Omit it to search from the root. Literal mode preserves
-    ``pattern`` exactly. Results include paths, line numbers, and text. Broad
-    searches that exceed the output budget return a truncated result and a
-    message asking for a narrower scope.
+    ``pattern`` exactly. Every match always includes one line of code context
+    before and after when those lines exist; the context size is intentionally
+    fixed and is not a tool argument. Broad searches that exceed the output
+    budget return a truncated result and a message asking for a narrower scope.
+    Matched lines use ``path:line:text`` and context lines use
+    ``path-line-text``.
     """
 
+    if not isinstance(pattern, str):
+        raise ValueError("search pattern must be a string")
     if not pattern.strip() or len(pattern) > 500:
         raise ValueError("search pattern must be between 1 and 500 characters")
     if mode not in {"literal", "regex"}:
@@ -257,6 +266,8 @@ def search_src_files(
         "--hidden",
         "--glob",
         "!.git/**",
+        "--context",
+        str(SRC_SEARCH_CONTEXT_LINES),
         "--color",
         "never",
     ]
@@ -282,13 +293,15 @@ def search_src_files(
         raise _bounded_process_error("rg search", completed.stderr, completed.returncode)
     bounded_stdout, output_truncated = _bounded_complete_output(completed.stdout)
 
-    matches: list[dict[str, object]] = []
+    matches: list[tuple[str, int, str]] = []
+    source_lines: dict[tuple[str, int], str] = {}
     for line in bounded_stdout.splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") != "match":
+        event_type = event.get("type")
+        if event_type not in {"match", "context"}:
             continue
         data = event.get("data")
         if not isinstance(data, dict):
@@ -306,18 +319,45 @@ def search_src_files(
             relative = Path(absolute).resolve().relative_to(root).as_posix()
         except ValueError:
             continue
-        matches.append({"file": relative, "line": line_number, "text": text.rstrip("\n")})
-    matches.sort(key=lambda item: (str(item["file"]), int(item["line"]), str(item["text"])))
-    result: dict[str, object] = {
-        "matches": matches[:max_results],
-        "truncated": output_truncated or len(matches) > max_results,
-    }
+        source_lines[(relative, line_number)] = text.rstrip("\n")
+        if event_type == "match":
+            matches.append((relative, line_number, text.rstrip("\n")))
+    matches.sort()
+    selected_matches = matches[:max_results]
+    selected_lines = {(file, line_number) for file, line_number, _ in selected_matches}
+    snippets: dict[tuple[str, int], str] = {}
+    for file, line_number, _ in selected_matches:
+        for context_line in range(
+            max(1, line_number - SRC_SEARCH_CONTEXT_LINES),
+            line_number + SRC_SEARCH_CONTEXT_LINES + 1,
+        ):
+            key = (file, context_line)
+            if key in source_lines:
+                snippets[key] = source_lines[key]
+
+    rendered: list[str] = []
+    previous_file: str | None = None
+    previous_line = 0
+    for (file, line_number), text in sorted(snippets.items()):
+        if previous_file is not None and (file != previous_file or line_number > previous_line + 1):
+            rendered.append("--")
+        separator = ":" if (file, line_number) in selected_lines else "-"
+        rendered.append(f"{file}{separator}{line_number}{separator}{text}")
+        previous_file = file
+        previous_line = line_number
+    if not rendered:
+        rendered.append("(no matches)")
     if output_truncated:
-        result["message"] = (
-            f"src search output exceeded the {MAX_SRC_SEARCH_BYTES}-byte limit; "
-            "matches collected before the limit were returned; narrow path, glob, or pattern for complete results"
+        rendered.append(
+            truncation_footer(
+                f"src search output exceeded the {MAX_SRC_SEARCH_BYTES}-byte limit; "
+                "matches collected before the limit were returned; "
+                "narrow path, glob, or pattern for complete results"
+            )
         )
-    return result
+    elif len(matches) > max_results:
+        rendered.append(truncation_footer())
+    return "\n".join(rendered)
 
 
 __all__ = [
@@ -327,6 +367,7 @@ __all__ = [
     "MAX_SRC_READ_LINES",
     "MAX_SRC_SEARCH_BYTES",
     "MAX_SRC_SEARCH_RESULTS",
+    "SRC_SEARCH_CONTEXT_LINES",
     "list_src_files",
     "read_src_file",
     "search_src_files",

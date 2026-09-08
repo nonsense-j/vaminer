@@ -69,17 +69,14 @@ def test_runner_normalizes_directory_results(tmp_path: Path):
         output="full",
     )
 
-    assert count == {
-        "target_dir": target.as_posix(),
-        "output": "count",
-        "match_count": 2,
-        "matched_file_count": 2,
-    }
-    assert sample["truncated"] is True
-    assert sample["matches"][0]["file"] == "a.c"
-    assert sample["matches"][0]["start"] == {"line": 2, "column": 3}
-    assert [site["file"] for site in full["matches"]] == ["a.c", "b.c"]
-    assert all("meta_variables" in site for site in full["matches"])
+    assert count == "matches: 2\nmatched files: 2"
+    assert "==> a.c:2:3-2:13 <==" in sample
+    assert "==> b.c:" not in sample
+    assert sample.endswith("-- truncated")
+    assert "==> a.c:2:3-2:13 <==" in full
+    assert "==> b.c:2:3-2:13 <==" in full
+    assert "capture single.ARG: 1" in full
+    assert "capture single.ARG: 2" in full
 
 
 def test_runner_classifies_model_authored_invalid_pattern_as_repairable(tmp_path: Path):
@@ -96,4 +93,17 @@ def test_runner_classifies_model_authored_invalid_pattern_as_repairable(tmp_path
             language="c",
             query_type="pattern",
             query="danger(",
+        )
+
+
+def test_runner_rejects_null_query_before_process_execution(tmp_path: Path):
+    target = tmp_path / "target"
+    target.mkdir()
+
+    with pytest.raises(AstGrepQueryError, match="query must be a non-empty string"):
+        _load_runner().run_ast_grep(
+            target,
+            language="c",
+            query_type="pattern",
+            query=None,
         )

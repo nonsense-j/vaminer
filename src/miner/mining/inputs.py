@@ -130,6 +130,10 @@ class IssueInputAdapter:
 
 class ExampleSuiteInputAdapter:
     @staticmethod
+    def _input_id(suite_name: str) -> str:
+        return f"exp-{suite_name}"
+
+    @staticmethod
     def resolve(
         value: ExampleSuiteInput,
         *,
@@ -141,7 +145,7 @@ class ExampleSuiteInputAdapter:
             content_digest=inspection.content_digest,
             base_dir=workspace_dir,
         )
-        return vas_id, inspection.registry_key, inspection
+        return vas_id, ExampleSuiteInputAdapter._input_id(inspection.suite_name), inspection
 
     async def prepare(self, value: ExampleSuiteInspection, run: InputRun) -> PreparedAnalysis:
         intake = materialize_example_suite(value, workspace=run.workspace)
@@ -152,7 +156,7 @@ class ExampleSuiteInputAdapter:
             base_dir=run.workspace.root.parent,
         )
         return PreparedAnalysis(
-            input_id=value.registry_key,
+            input_id=self._input_id(value.suite_name),
             source_root=Path(intake.snapshot_path).resolve(),
             grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
             source=intake,

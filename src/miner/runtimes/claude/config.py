@@ -39,6 +39,7 @@ class ClaudeCodeConfig:
     max_stdout_bytes: int = 16 * 1024 * 1024
     max_stderr_bytes: int = 2 * 1024 * 1024
     max_repair_attempts: int = 2
+    max_synthesis_process_retries: int = 2
     max_repair_payload_chars: int = 50_000
     display_name: str = NAME
 
@@ -59,6 +60,8 @@ class ClaudeCodeConfig:
             raise ValueError("stdout and stderr limits must be positive")
         if self.max_repair_attempts < 0 or self.max_repair_attempts > 2:
             raise ValueError("max_repair_attempts must be between zero and two")
+        if self.max_synthesis_process_retries < 0 or self.max_synthesis_process_retries > 5:
+            raise ValueError("max_synthesis_process_retries must be between zero and five")
         if self.max_repair_payload_chars < 1:
             raise ValueError("max_repair_payload_chars must be positive")
         if self.effort is not None and self.effort not in _EFFORTS:

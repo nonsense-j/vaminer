@@ -12,6 +12,8 @@ from ..models.vas import VASCoreInfo
 from ..utils.log import logger
 from .scanner import AnchorRunResult, AnchorScanResult, scan_anchors
 
+_REVIEW_MIN_ANCHOR_WEIGHT = 2
+
 
 def review_anchors(
     vas_id: str,
@@ -39,36 +41,43 @@ def review_anchors(
     )
     warnings = list(disabled_anchor_warnings(core))
     if warnings:
-        matched_case_files = {match.file for match in case_scan.matches}
+        admitted_case_files = {
+            candidate["file"]
+            for candidate in case_scan.candidates(
+                min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT
+            )
+        }
         missing_cases = [
             path
             for path in list_files(cases_dir)
-            if path not in matched_case_files
+            if path not in admitted_case_files
         ]
         if missing_cases:
             warnings.append(
-                "enabled anchors do not cover case files: "
+                "enabled anchors do not admit case files: "
                 + ", ".join(missing_cases)
             )
         if (
             root_cause is not None
             and grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
         ):
-            uncovered_spans = [
-                f"{span.file}:{span.start_line}-{span.end_line}"
-                for span in root_cause_source_spans(root_cause)
-                if not any(
-                    Path(match.file).as_posix().removeprefix("./")
-                    == Path(span.file).as_posix().removeprefix("./")
-                    and match.start_line <= span.end_line
-                    and match.end_line >= span.start_line
-                    for match in repo_scan.matches
+            admitted_files = {
+                Path(candidate["file"]).as_posix().removeprefix("./")
+                for candidate in repo_scan.candidates(
+                    min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT
                 )
-            ]
-            if uncovered_spans:
+            }
+            missing_source_files = sorted(
+                {
+                    Path(component.file).as_posix().removeprefix("./")
+                    for component in root_cause_source_spans(root_cause)
+                }
+                - admitted_files
+            )
+            if missing_source_files:
                 warnings.append(
-                    "enabled anchors do not cover source spans: "
-                    + ", ".join(uncovered_spans)
+                    "enabled anchors do not admit RCA-declared bad-example files: "
+                    + ", ".join(missing_source_files)
                 )
         for warning in warnings:
             logger.warning("Degraded VAS: %s", warning)

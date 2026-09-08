@@ -47,6 +47,7 @@ class ClaudeSynthesisHostContext(BaseModel):
     max_stdout_bytes: int
     max_stderr_bytes: int
     max_repair_attempts: int
+    max_synthesis_process_retries: int
     max_repair_payload_chars: int
 
     @classmethod
@@ -80,6 +81,7 @@ class ClaudeSynthesisHostContext(BaseModel):
             max_stdout_bytes=config.max_stdout_bytes,
             max_stderr_bytes=config.max_stderr_bytes,
             max_repair_attempts=config.max_repair_attempts,
+            max_synthesis_process_retries=config.max_synthesis_process_retries,
             max_repair_payload_chars=config.max_repair_payload_chars,
         )
 
@@ -96,6 +98,7 @@ class ClaudeSynthesisHostContext(BaseModel):
             max_stdout_bytes=self.max_stdout_bytes,
             max_stderr_bytes=self.max_stderr_bytes,
             max_repair_attempts=self.max_repair_attempts,
+            max_synthesis_process_retries=self.max_synthesis_process_retries,
             max_repair_payload_chars=self.max_repair_payload_chars,
         )
 

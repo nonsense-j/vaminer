@@ -266,7 +266,12 @@ async def check_mcp_server(
                                     )
                                 result = await session.call_tool("list_src_files", {"max_results": 10})
                                 structured = result.structured_content or {}
-                                if result.is_error or _SENTINEL_FILE not in structured.get("files", []):
+                                rendered = structured.get("result")
+                                if (
+                                    result.is_error
+                                    or not isinstance(rendered, str)
+                                    or _SENTINEL_FILE not in rendered.splitlines()
+                                ):
                                     return CheckResult.failed(
                                         "claude.mcp",
                                         "VAMiner MCP tool call returned an unexpected result",

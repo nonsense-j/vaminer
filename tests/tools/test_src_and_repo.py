@@ -1,3 +1,4 @@
+import inspect
 import json
 import subprocess
 from pathlib import Path
@@ -54,22 +55,24 @@ def test_rg_listing_and_literal_search_are_scoped_and_compact(tmp_path: Path):
     (tmp_path / "src" / "a.c").write_text("foo(1);\nfoo.bar();\nexact\n exact \n", encoding="utf-8")
     (tmp_path / "src" / "b.py").write_text("foo(2)\n", encoding="utf-8")
     listed = list_src_files(tmp_path, path="src", glob="*.c")
-    assert listed == {"files": ["src/a.c"], "truncated": False}
+    assert listed == "src/a.c"
 
     literal = search_src_files(tmp_path, "foo.", path="src")
-    assert [(item["file"], item["line"]) for item in literal["matches"]] == [("src/a.c", 2)]
+    assert literal == "src/a.c-1-foo(1);\nsrc/a.c:2:foo.bar();\nsrc/a.c-3-exact"
+    assert "context" not in inspect.signature(search_src_files).parameters
     single_file = search_src_files(tmp_path, r"foo\(\d\)", path="src/a.c", mode="regex")
-    assert [(item["file"], item["line"]) for item in single_file["matches"]] == [("src/a.c", 1)]
+    assert single_file == "src/a.c:1:foo(1);\nsrc/a.c-2-foo.bar();"
     spaced = search_src_files(tmp_path, " exact ", path="src/a.c")
-    assert [(item["file"], item["line"]) for item in spaced["matches"]] == [("src/a.c", 4)]
+    assert spaced == "src/a.c-3-exact\nsrc/a.c:4: exact "
     regex = search_src_files(tmp_path, r"foo\(\d\)", path="src", mode="regex")
-    assert len(regex["matches"]) == 2
-    assert search_src_files(tmp_path, "absent")["matches"] == []
-    assert read_src_file(tmp_path, "src/a.c", start_line=2, end_line=2)["content"] == "foo.bar();\n"
+    assert regex == "src/a.c:1:foo(1);\nsrc/a.c-2-foo.bar();\n--\nsrc/b.py:1:foo(2)"
+    assert search_src_files(tmp_path, "absent") == "(no matches)"
+    assert read_src_file(tmp_path, "src/a.c", start_line=2, end_line=2) == (
+        "==> src/a.c | lines 2-2 of 4 | more available <==\nfoo.bar();"
+    )
 
     truncated = list_src_files(tmp_path, path="src", max_results=1)
-    assert truncated["files"] == ["src/a.c"]
-    assert truncated["truncated"] is True
+    assert truncated == "src/a.c\n-- truncated"
     with pytest.raises(ValueError, match="not a directory"):
         list_src_files(tmp_path, path="src/a.c")
     with pytest.raises(ValueError) as missing:
@@ -80,7 +83,7 @@ def test_rg_listing_and_literal_search_are_scoped_and_compact(tmp_path: Path):
     )
 
     read = read_src_file(tmp_path, "src/a.c", start_line=1, end_line=1)
-    assert (read["total_lines"], read["end_line"], read["truncated"]) == (4, 1, True)
+    assert read == "==> src/a.c | lines 1-1 of 4 | more available <==\nfoo(1);"
 
 
 def test_search_path_rejects_repeated_checkout_prefix(tmp_path: Path):
@@ -101,21 +104,16 @@ def test_src_read_caps_large_ranges_for_paging(tmp_path: Path):
     path.write_text("".join(f"line {line}\n" for line in range(1, 251)), encoding="utf-8")
 
     first = read_src_file(tmp_path, "large.txt", start_line=1, end_line=250)
-    assert (first["start_line"], first["end_line"], first["total_lines"], first["truncated"]) == (
-        1,
-        200,
-        250,
-        True,
-    )
-    assert len(str(first["content"]).splitlines()) == 200
+    assert first.startswith("==> large.txt | lines 1-200 of 250 | more available <==\n")
+    assert len(first.splitlines()[1:]) == 200
 
     second = read_src_file(tmp_path, "large.txt", start_line=201, end_line=250)
-    assert (second["start_line"], second["end_line"], second["truncated"]) == (201, 250, False)
+    assert second.startswith("==> large.txt | lines 201-250 of 250 <==\n")
     with pytest.raises(ValueError, match="end_line"):
         read_src_file(tmp_path, "large.txt", start_line=10, end_line=9)
 
     complete = read_src_file(tmp_path, "large.txt", full_file=True)
-    assert (complete["start_line"], complete["end_line"], complete["truncated"]) == (1, 250, False)
+    assert complete.startswith("==> large.txt | lines 1-250 of 250 <==\n")
     with pytest.raises(ValueError, match="full_file cannot be combined"):
         read_src_file(tmp_path, "large.txt", end_line=250, full_file=True)
 
@@ -129,26 +127,14 @@ def test_src_read_past_eof_returns_recovery_information(tmp_path: Path):
     path = tmp_path / "short.txt"
     path.write_text("line 1\nline 2\n", encoding="utf-8")
 
-    assert read_src_file(tmp_path, "short.txt", start_line=120, end_line=160) == {
-        "path": "short.txt",
-        "content": "",
-        "start_line": 120,
-        "end_line": 2,
-        "total_lines": 2,
-        "truncated": False,
-        "message": "start_line 120 is past EOF; short.txt has 2 lines; no content was returned",
-    }
+    assert read_src_file(tmp_path, "short.txt", start_line=120, end_line=160) == (
+        "==> short.txt | requested line 120; EOF at 2 <==\n"
+        "-- start_line 120 is past EOF; short.txt has 2 lines; no content was returned"
+    )
 
     empty = tmp_path / "empty.txt"
     empty.write_text("", encoding="utf-8")
-    assert read_src_file(tmp_path, "empty.txt") == {
-        "path": "empty.txt",
-        "content": "",
-        "start_line": 1,
-        "end_line": 0,
-        "total_lines": 0,
-        "truncated": False,
-    }
+    assert read_src_file(tmp_path, "empty.txt") == "==> empty.txt | empty <=="
 
 
 def test_rg_tools_reject_escape_and_symlink(tmp_path: Path):
@@ -167,6 +153,8 @@ def test_rg_tools_reject_escape_and_symlink(tmp_path: Path):
         read_src_file(tmp_path, "internal-link/target.c")
     with pytest.raises(RuntimeError, match="regex parse error"):
         search_src_files(tmp_path, "[", mode="regex")
+    with pytest.raises(ValueError, match="search pattern must be a string"):
+        search_src_files(tmp_path, None)
 
 
 @pytest.mark.parametrize(
@@ -208,13 +196,10 @@ def test_rg_output_and_stderr_are_bounded(tmp_path: Path, monkeypatch: pytest.Mo
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=huge, stderr=""),
     )
     result = search_src_files(tmp_path, "needle")
-    assert result["matches"] == [{"file": "a.c", "line": 7, "text": "needle"}]
-    assert result["truncated"] is True
-    assert "output exceeded" in str(result["message"])
+    assert result.startswith("a.c:7:needle\n-- truncated: src search output exceeded")
 
     listed = list_src_files(tmp_path)
-    assert listed["truncated"] is True
-    assert "listing exceeded" in str(listed["message"])
+    assert "-- truncated: src file listing exceeded" in listed
 
     monkeypatch.setattr(
         src_module.subprocess,

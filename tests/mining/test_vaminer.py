@@ -103,11 +103,13 @@ async def test_issue_and_example_inputs_share_one_post_prepare_workflow(tmp_path
     suite.mkdir(parents=True)
     (suite / "bad.c").write_text("copy();\n", encoding="utf-8")
     example_runtime = ScriptedRuntime()
-    example_vas = await VAMiner(example_runtime, options=_options(tmp_path / "example")).mine(
+    example_options = _options(tmp_path / "example")
+    example_vas = await VAMiner(example_runtime, options=example_options).mine(
         ExampleSuiteInput(path=suite)
     )
     assert example_runtime.phases == [AgentPhase.ROOT_CAUSE, AgentPhase.RULE_GENERATION]
     assert example_vas.sources[0].type == "example_suite"
+    assert (example_options.output_dir / "miner" / example_vas.vas_id / "exp-CWE-120").is_dir()
 
 
 @pytest.mark.asyncio

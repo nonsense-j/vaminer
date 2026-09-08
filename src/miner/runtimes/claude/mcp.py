@@ -194,7 +194,7 @@ def _register_src_tools(server: Any, root: Path) -> None:
         path: str | None = None,
         glob: str | None = None,
         max_results: int = 500,
-    ) -> dict[str, object]:
+    ) -> str:
         return list_src_impl(root, path=path, glob=glob, max_results=max_results)
 
     list_src_files.__doc__ = f"{list_src_impl.__doc__}{root_note}"
@@ -205,8 +205,15 @@ def _register_src_tools(server: Any, root: Path) -> None:
         mode: Literal["literal", "regex"] = "literal",
         glob: str | None = None,
         max_results: int = 100,
-    ) -> dict[str, object]:
-        return search_src_impl(root, pattern, path=path, mode=mode, glob=glob, max_results=max_results)
+    ) -> str:
+        return search_src_impl(
+            root,
+            pattern,
+            path=path,
+            mode=mode,
+            glob=glob,
+            max_results=max_results,
+        )
 
     search_src_files.__doc__ = f"{search_src_impl.__doc__}{root_note}"
 
@@ -215,7 +222,7 @@ def _register_src_tools(server: Any, root: Path) -> None:
         start_line: int = 1,
         end_line: int | None = None,
         full_file: bool = False,
-    ) -> dict[str, object]:
+    ) -> str:
         return read_src_impl(
             root,
             path,
@@ -232,16 +239,16 @@ def _register_src_tools(server: Any, root: Path) -> None:
 
 
 def _register_case_tools(server: Any, cases_dir: Path, *, writable: bool) -> None:
-    def list_case_artifacts() -> list[str]:
+    def list_case_artifacts() -> str:
         return list_cases_impl(cases_dir)
 
-    def read_case_artifact(path: str, start_line: int = 1, end_line: int | None = None) -> dict[str, Any]:
+    def read_case_artifact(path: str, start_line: int = 1, end_line: int | None = None) -> str:
         return read_case_impl(cases_dir, path, start_line=start_line, end_line=end_line)
 
     _register(server, "list_case_artifacts", list_case_artifacts)
     _register(server, "read_case_artifact", read_case_artifact)
     if writable:
-        def write_case_artifact(path: str, content: str) -> dict[str, Any]:
+        def write_case_artifact(path: str, content: str) -> str:
             return write_case_impl(cases_dir, path, content)
 
         _register(server, "write_case_artifact", write_case_artifact)
@@ -341,10 +348,10 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
     _register_src_tools(server, settings.source_root)
     _register_case_tools(server, settings.cases_dir, writable=False)
 
-    def list_skill_resources(max_files: int = 100) -> dict[str, object]:
+    def list_skill_resources(max_files: int = 100) -> str:
         return list_skills_impl({"ast-grep": settings.skill_root}, "ast-grep", max_files=max_files)
 
-    def read_skill_resource(resource: str, start_line: int = 1, end_line: int | None = None) -> dict[str, object]:
+    def read_skill_resource(resource: str, start_line: int = 1, end_line: int | None = None) -> str:
         return read_skill_impl(
             {"ast-grep": settings.skill_root},
             "ast-grep",
@@ -360,8 +367,15 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
         query: str,
         output: Literal["count", "sample", "full"] = "sample",
         sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
-    ) -> dict[str, Any]:
-        if sample_size < 1 or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE:
+    ) -> str:
+        if target not in {"src", "cases"}:
+            raise ValueError("target must be 'src' or 'cases'")
+        if (
+            not isinstance(sample_size, int)
+            or isinstance(sample_size, bool)
+            or sample_size < 1
+            or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE
+        ):
             raise ValueError(f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}")
         root = settings.source_root if target == "src" else settings.cases_dir
         try:

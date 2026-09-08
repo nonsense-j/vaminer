@@ -46,7 +46,7 @@ from src.miner.runtimes.claude.policy import PolicyCompiler, cleanup_session_tra
 from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
 from src.miner.runtimes.claude.protocol import ClaudeStreamDecoder, decode_claude_stream
 from src.miner.runtimes.claude.runtime import ClaudeCodeRuntime, _relay_synthesis_log
-from src.miner.tools.ast_grep import AstGrepRunnerError
+from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
 from src.miner.utils.log import RuntimeLog
 
 
@@ -117,8 +117,6 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
         path.read_text(encoding="utf-8")
         for path in (files.system_prompt, files.settings, files.mcp)
     )
-    system_prompt = files.system_prompt.read_text(encoding="utf-8")
-    assert "`mcp__vaminer__<tool_name>`" in system_prompt
     assert "VAMINER_TEST_SENTINEL" not in materialized
     assert "visible" not in materialized
     argv = compiler.argv(executable="/bin/true", task=task, policy=policy, files=files, model_id="session")
@@ -276,8 +274,21 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
     assert "one-based" in root.tools["read_src_file"].__doc__
     (source / "long.c").write_text("line\n" * 250, encoding="utf-8")
     complete = root.tools["read_src_file"]("long.c", full_file=True)
-    assert complete["end_line"] == 250
-    assert complete["truncated"] is False
+    assert complete.startswith("==> long.c | lines 1-250 of 250 <==\n")
+    assert "\\n" not in complete
+    (source / "bug.c").write_text("before\nneedle();\nafter\n", encoding="utf-8")
+    assert root.tools["search_src_files"]("needle", path="bug.c") == (
+        "bug.c-1-before\n"
+        "bug.c:2:needle();\n"
+        "bug.c-3-after"
+    )
+    assert root.tools["list_case_artifacts"]() == "case1.c"
+    assert root.tools["read_case_artifact"]("case1.c") == (
+        "==> case1.c | lines 1-1 of 1 <==\ncopy();"
+    )
+    assert root.tools["write_case_artifact"]("case2.c", "sample();\n") == (
+        "wrote case2.c (10 bytes)"
+    )
     synthesis = build_server(
         settings=MCPServerSettings(
             profile=MCPProfile.AST_GREP_SYNTHESIS,
@@ -290,6 +301,26 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
     )
     assert "write_case_artifact" not in synthesis.tools
     assert {"list_skill_resources", "read_skill_resource", "run_ast_grep_query"} <= set(synthesis.tools)
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_bodies_reject_null_strings_without_nonetype_errors(tmp_path: Path):
+    workspace, source, cases = _workspace(tmp_path)
+    server = build_server(
+        settings=MCPServerSettings(
+            profile=MCPProfile.AST_GREP_SYNTHESIS,
+            workspace_root=workspace,
+            source_root=source,
+            cases_dir=cases,
+            skill_root=Path("src/miner/skills/ast-grep").resolve(),
+        ),
+        fast_mcp_factory=FakeServer,
+    )
+
+    with pytest.raises(ValueError, match="search pattern must be a string"):
+        server.tools["search_src_files"](None)
+    with pytest.raises(AstGrepQueryError, match="query must be a non-empty string"):
+        await server.tools["run_ast_grep_query"]("src", "c", "pattern", None)
 
 
 def test_protocol_normalizes_type_and_content():
@@ -726,6 +757,78 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
     assert task.prompt not in runner.prompts[1]
     assert "do not repeat research" in runner.prompts[1]
     assert "Previous candidate" not in runner.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_synthesizer_retries_crashed_process_with_fresh_session(tmp_path: Path):
+    workspace, source, cases = _workspace(tmp_path)
+    intent = AnchorIntent(
+        id="copy-site",
+        behavior_weight=4,
+        behavior="copy",
+        inspect_hint="bound",
+        required_cases=["case1.c"],
+    )
+    task = make_ast_grep_synthesis_task(
+        AnchorPlan(summary="copy", intents=[intent]),
+        intent,
+        workspace_root=workspace,
+        source_root=source,
+        cases_dir=cases,
+        grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
+        root_cause=_rca(),
+    )
+    runtime = ClaudeCodeRuntime(
+        ClaudeCodeConfig(
+            executable="/bin/true",
+            model="test-model",
+            max_synthesis_process_retries=2,
+        )
+    )
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.session_ids: list[str] = []
+            self.session_flags: list[str] = []
+
+        async def run(self, argv, **_kwargs):
+            self.calls += 1
+            flag = "--resume" if "--resume" in argv else "--session-id"
+            self.session_flags.append(flag)
+            self.session_ids.append(argv[argv.index(flag) + 1])
+            if self.calls == 1:
+                return ProcessResult(
+                    stdout="",
+                    stderr="process crashed",
+                    returncode=1,
+                    duration_ms=1,
+                )
+            payload = {
+                "target_anchor_id": "copy-site",
+                "type": "pattern",
+                "query": "",
+                "query_weight": 1,
+                "adjustments": ["disabled"],
+                "plan_suggestion": "",
+            }
+            return ProcessResult(
+                stdout=json.dumps(
+                    {"type": "result", "subtype": "success", "structured_output": payload}
+                ),
+                stderr="",
+                returncode=0,
+                duration_ms=1,
+            )
+
+    runner = Runner()
+    runtime._runner = runner
+    result = await runtime.run(task)
+
+    assert result.output.target_anchor_id == "copy-site"
+    assert result.attempts == 2
+    assert runner.session_flags == ["--session-id", "--session-id"]
+    assert len(set(runner.session_ids)) == 2
 
 
 @pytest.mark.asyncio

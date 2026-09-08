@@ -88,11 +88,11 @@ def check_ast_grep(*, timeout_seconds: float) -> CheckResult:
                 output="count",
                 timeout_seconds=max(1, round(timeout_seconds)),
             )
-        if result.get("match_count") != 1:
+        if "matches: 1" not in result.splitlines():
             return CheckResult.failed(
                 "ast-grep",
                 "ast-grep started but did not return the expected probe match",
-                detail=f"match_count={result.get('match_count')!r}",
+                detail=result,
             )
     except Exception as exc:  # noqa: BLE001 - diagnostics must turn failures into a report.
         return CheckResult.failed("ast-grep", "ast-grep functional probe failed", detail=f"{type(exc).__name__}: {exc}")

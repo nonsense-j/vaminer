@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent.contracts import AgentRunResult, AgentTask, RuleGenerationAuthority
 from ..anchors.scanner import AnchorQueryError, scan_anchors
-from ..models.analysis import GroundingPolicy
 from ..models.anchors import (
     Anchor,
     AnchorIntent,
@@ -58,15 +57,12 @@ class AnchorSynthesisReceipt(BaseModel):
 
 
 def validate_anchor_plan(plan: AnchorPlan, declared_cases: Sequence[str]) -> tuple[str, ...]:
-    """Validate plan ownership and Case Artifact coverage before any child runs."""
+    """Validate only Case Artifact references that would make child runs invalid."""
 
     declared = set(declared_cases)
     errors: list[str] = []
-    assigned: set[str] = set()
     for intent in plan.intents:
         required = set(intent.required_cases)
-        if len(required) != len(intent.required_cases):
-            errors.append(f"intent {intent.id!r} repeats a required Case Artifact")
         invalid = sorted(name for name in required if Path(name).name != name or _CASE_NAME.fullmatch(name) is None)
         if invalid:
             errors.append(
@@ -75,18 +71,18 @@ def validate_anchor_plan(plan: AnchorPlan, declared_cases: Sequence[str]) -> tup
         unknown = sorted(required - declared)
         if unknown:
             errors.append(f"intent {intent.id!r} references unknown Case Artifacts: {', '.join(unknown)}")
-        assigned.update(required)
-        for name in sorted(required):
-            match = _CASE_NAME.fullmatch(name)
-            if match is None or match.group("variant") is None:
-                continue
-            original = f"case{match.group('number')}{match.group('suffix')}"
-            if original not in required:
-                errors.append(f"intent {intent.id!r} includes {name!r} without its original {original!r}")
-    missing = sorted(declared - assigned)
-    if missing:
-        errors.append("Anchor Plan does not assign declared Case Artifacts: " + ", ".join(missing))
     return tuple(errors)
+
+
+def _normalize_anchor_plan(plan: AnchorPlan) -> AnchorPlan:
+    """Return a plan with duplicate per-intent Case Artifact references removed."""
+    intents = [
+        intent.model_copy(
+            update={"required_cases": list(dict.fromkeys(intent.required_cases))}
+        )
+        for intent in plan.intents
+    ]
+    return plan.model_copy(update={"intents": intents})
 
 
 def _assemble_anchor(intent: AnchorIntent, delta: AnchorSynthesisDelta) -> Anchor:
@@ -127,22 +123,16 @@ def _query_errors(
     errors: list[str] = []
     if missing:
         errors.append("query misses required Case Artifacts: " + ", ".join(missing))
-    spans = authority.root_cause.buggy_components
+    component_files = {
+        Path(component.file).as_posix().removeprefix("./")
+        for component in authority.root_cause.buggy_components
+    }
     grounded = any(
-        Path(match.file).as_posix().removeprefix("./")
-        == Path(span.file).as_posix().removeprefix("./")
-        and match.start_line <= span.end_line
-        and match.end_line >= span.start_line
+        Path(match.file).as_posix().removeprefix("./") in component_files
         for match in source_scan.matches
-        for span in spans
     )
     if not grounded:
-        label = (
-            "RCA-declared bad span"
-            if authority.grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
-            else "RCA-declared repository span"
-        )
-        errors.append(f"query does not overlap any {label}")
+        errors.append("query does not match any RCA-declared source file")
     return tuple(errors)
 
 
@@ -189,7 +179,13 @@ class AnchorSynthesisSession:
     def receipt(self) -> AnchorSynthesisReceipt | None:
         return self._latest
 
-    async def _synthesize_one(self, plan: AnchorPlan, intent: AnchorIntent) -> AnchorSynthesisResult:
+    async def _synthesize_one(
+        self,
+        plan: AnchorPlan,
+        intent: AnchorIntent,
+        *,
+        iteration: int,
+    ) -> AnchorSynthesisResult:
         task = make_ast_grep_synthesis_task(
             plan,
             intent,
@@ -198,6 +194,7 @@ class AnchorSynthesisSession:
             cases_dir=self.authority.cases_dir,
             grounding_policy=self.authority.grounding_policy,
             root_cause=self.authority.root_cause,
+            iteration=iteration,
         )
         last_delta: AnchorSynthesisDelta | None = None
         last_errors: tuple[str, ...] = ()
@@ -206,6 +203,11 @@ class AnchorSynthesisSession:
             if repair and last_errors:
                 repair_task = replace(
                     task,
+                    task_id=f"{task.task_id}:repair:{repair}",
+                    definition=replace(
+                        task.definition,
+                        agent_name=f"{task.agent_name} (repair {repair})",
+                    ),
                     prompt=(
                         task.prompt
                         + "\n\nDeterministic query validation failed. Return a corrected delta only:\n- "
@@ -242,18 +244,32 @@ class AnchorSynthesisSession:
         self._calls += 1
         if self._calls > 2:
             raise AnchorSynthesisLimitError("Rule Generation may invoke Anchor synthesis at most twice")
-        errors = validate_anchor_plan(plan, self.authority.root_cause.extracted_case_files)
+        normalized_plan = _normalize_anchor_plan(plan)
+        errors = validate_anchor_plan(
+            normalized_plan,
+            self.authority.root_cause.extracted_case_files,
+        )
         if errors:
             raise AnchorPlanError("Anchor Plan rejected:\n- " + "\n- ".join(errors))
 
         semaphore = asyncio.Semaphore(self._max_parallel)
 
+        iteration = self._calls
+
         async def bounded(intent: AnchorIntent) -> AnchorSynthesisResult:
             async with semaphore:
-                return await self._synthesize_one(plan, intent)
+                return await self._synthesize_one(
+                    normalized_plan,
+                    intent,
+                    iteration=iteration,
+                )
 
-        results = list(await asyncio.gather(*(bounded(intent) for intent in plan.intents)))
-        self._latest = AnchorSynthesisReceipt(plan=plan, results=results)
+        results = list(
+            await asyncio.gather(
+                *(bounded(intent) for intent in normalized_plan.intents)
+            )
+        )
+        self._latest = AnchorSynthesisReceipt(plan=normalized_plan, results=results)
         return results
 
     def finalize(self, draft: RuleGenerationDraft) -> VASCoreInfo:

@@ -40,9 +40,11 @@ def test_example_suite_intake_finds_source_files_and_materializes_snapshot(tmp_p
     assert {path.name for path in workspace.root.iterdir()} == {"src", "cases"}
 
     src_root = Path(intake.snapshot_path)
-    assert list_src_files(src_root)["files"] == ["bad.c", "manifest.json"]
-    assert search_src_files(src_root, "danger", path="bad.c")["matches"][0]["file"] == "bad.c"
-    assert read_src_file(src_root, "bad.c", end_line=1)["content"] == "void f(void) { danger(1); }\n"
+    assert list_src_files(src_root) == "bad.c\nmanifest.json"
+    assert "bad.c:1:void f(void) { danger(1); }" in search_src_files(src_root, "danger", path="bad.c")
+    assert read_src_file(src_root, "bad.c", end_line=1) == (
+        "==> bad.c | lines 1-1 of 1 <==\nvoid f(void) { danger(1); }"
+    )
     with pytest.raises(ValueError, match="repeats the bound Src Root"):
         list_src_files(src_root, path="src/input_snapshot")
 

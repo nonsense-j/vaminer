@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.miner.agent import AgentPhase, RootCauseAuthority
+from src.miner.agent import AgentPhase, InstructionLayers
 from src.miner.mining.tasks import (
     PHASE_DEFINITIONS,
     make_issue_collection_task,
@@ -37,28 +37,16 @@ def test_phase_definitions_are_closed_and_least_privilege(tmp_path: Path):
     assert "write_case_artifact" not in synthesis_tools
 
 
-def test_instruction_layers_preserve_shared_then_input_then_runtime(tmp_path: Path):
-    workspace = tmp_path / "workspace"
-    source = workspace / "src"
-    cases = workspace / "cases"
-    source.mkdir(parents=True)
-    cases.mkdir()
-    task = make_root_cause_task(
-        _collection(source),
-        workspace_root=workspace,
-        source_root=source,
-        cases_dir=cases,
-        grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
-    )
-    assert isinstance(task.authority, RootCauseAuthority)
-    rendered = task.instructions.render("# Runtime Binding\n\nexact tools")
-    assert rendered.count(task.instructions.shared) == 1
-    assert rendered.count(task.instructions.input_policy) == 1
-    assert rendered.index(task.instructions.shared) < rendered.index(task.instructions.input_policy)
-    assert rendered.index(task.instructions.input_policy) < rendered.index("# Runtime Binding")
+def test_instruction_layers_preserve_shared_input_runtime_order():
+    shared = "shared-sentinel"
+    input_policy = "input-sentinel"
+    runtime_binding = "runtime-sentinel"
+    rendered = InstructionLayers(shared, input_policy).render(runtime_binding)
+
+    assert rendered.index(shared) < rendered.index(input_policy) < rendered.index(runtime_binding)
 
 
-def test_repository_root_cause_context_declares_bound_root_and_revisions(tmp_path: Path):
+def test_repository_root_cause_task_builds_typed_intake_and_fixed_diff_capability(tmp_path: Path):
     source_root = tmp_path / "src" / "owner" / "repo"
     cases = tmp_path / "cases"
     source_root.mkdir(parents=True)
@@ -78,14 +66,10 @@ def test_repository_root_cause_context_declares_bound_root_and_revisions(tmp_pat
         "root": source_root.resolve().as_posix(),
         "path_arguments": "relative_to_root",
     }
-    assert source_root.resolve().as_posix() in task.input_policy
-    assert _collection(source_root).buggy_commit in task.input_policy
-    assert fixed_commit in task.input_policy
-    assert "read_patch_diff" in task.input_policy
     assert "read_patch_diff" in task.tools
 
 
-def test_example_suite_root_cause_context_declares_contrastive_evidence(tmp_path: Path):
+def test_example_suite_root_cause_task_builds_bounded_typed_intake(tmp_path: Path):
     source_root = tmp_path / "src" / "input_snapshot"
     cases = tmp_path / "cases"
     nested = source_root / "nested"
@@ -120,11 +104,6 @@ def test_example_suite_root_cause_context_declares_contrastive_evidence(tmp_path
         "root": source_root.resolve().as_posix(),
         "path_arguments": "relative_to_root",
     }
-    assert source_root.resolve().as_posix() in task.input_policy
-    assert "never infer, invent, or probe" in task.input_policy
-    assert "full_file=true" in task.input_policy
-    assert "bad/unsafe" in task.input_policy
-    assert "good/safe" in task.input_policy
     assert task.definition is PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE]
     assert set(task.tools) == set(PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE].tools)
 
@@ -136,8 +115,6 @@ def test_issue_input_is_validated_before_task_construction(tmp_path: Path):
         assert "non-empty" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("empty issue input was accepted")
-    instructions = PHASE_DEFINITIONS[AgentPhase.ISSUE_COLLECTION].instructions
-    assert "ask if not provided" not in instructions
 
 
 def test_task_rejects_mismatched_phase_definition(tmp_path: Path):

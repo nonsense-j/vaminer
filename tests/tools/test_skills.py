@@ -19,26 +19,14 @@ def test_resources_are_task_scoped_and_bounded(tmp_path: Path):
     )
     roots = {"ast-grep": skill}
 
-    assert list_skill_resources(roots, "ast-grep") == {
-        "skill": "ast-grep",
-        "resources": ["SKILL.md", "references/rules.md"],
-        "truncated": False,
-    }
+    assert list_skill_resources(roots, "ast-grep") == "SKILL.md\nreferences/rules.md"
     assert read_skill_resource(
         roots,
         "ast-grep",
         "references/rules.md",
         start_line=2,
         end_line=3,
-    ) == {
-        "skill": "ast-grep",
-        "path": "references/rules.md",
-        "content": "second\nthird\n",
-        "start_line": 2,
-        "end_line": 3,
-        "total_lines": 3,
-        "truncated": False,
-    }
+    ) == "==> ast-grep/references/rules.md | lines 2-3 of 3 <==\nsecond\nthird"
     with pytest.raises(ValueError, match="unknown task skill"):
         read_skill_resource(roots, "other", "SKILL.md")
     with pytest.raises(ValueError, match="stay inside"):

@@ -122,8 +122,8 @@ def test_pydantic_phase_tools_match_closed_authority(tmp_path: Path):
 
     (source / "long.c").write_text("line\n" * 250, encoding="utf-8")
     complete = src_tools["read_src_file"]("long.c", full_file=True)
-    assert complete["end_line"] == 250
-    assert complete["truncated"] is False
+    assert complete.startswith("==> long.c | lines 1-250 of 250 <==\n")
+    assert "\\n" not in complete
 
     rule_task = make_rule_generation_task(
         root_cause,
@@ -189,6 +189,24 @@ async def test_pydantic_src_tools_return_expected_failures_to_the_model(tmp_path
         await src_tools["list_src_files"]("../outside")
     with pytest.raises(ToolFailed, match="regex parse error"):
         await src_tools["search_src_files"]("[", mode="regex")
+
+
+@pytest.mark.asyncio
+async def test_pydantic_navigation_tools_return_fixed_plain_text(tmp_path: Path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "bug.c").write_text("before\nneedle();\nafter\n", encoding="utf-8")
+    tools = {tool.__name__: tool for tool in PydanticAIRuntime._src_tools(source)}
+
+    assert await tools["list_src_files"]() == "bug.c"
+    assert await tools["search_src_files"]("needle") == (
+        "bug.c-1-before\n"
+        "bug.c:2:needle();\n"
+        "bug.c-3-after"
+    )
+    assert tools["read_src_file"]("bug.c", start_line=2, end_line=2) == (
+        "==> bug.c | lines 2-2 of 3 | more available <==\nneedle();"
+    )
 
 
 @pytest.mark.asyncio

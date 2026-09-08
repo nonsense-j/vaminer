@@ -85,6 +85,8 @@ The repository includes a synthetic input inspired by Juliet naming and flow-var
 uv run python -m src.miner.main --example-suite data/CWE134_Uncontrolled_Format_String
 ```
 
+For a presentation-ready example of the generated safety specification, complementary anchors, and hotspot scoring, see [the CWE-134 anchor showcase](docs/anchor_showcase_cwe134.md). The executable showcase rule is [VAS-0134.json](examples/anchor_showcase/VAS-0134.json).
+
 At the domain-input level, the miner only requires an existing non-empty directory containing at least one recognizable source file recursively. It imposes no case-count, layout, source-language-count, or manifest requirement. Good/bad evidence may be expressed through filenames, directories, comments, labels, or an optional manifest and is interpreted against source behavior during RCA. Symbolic links and special filesystem entries remain excluded so the immutable snapshot cannot escape the input directory.
 
 Use `--use-cache` to reuse valid outputs from a previous attempt:
@@ -323,8 +325,8 @@ An empty `query` is the disabled-anchor sentinel. Disabled anchors remain in the
 
 A complete anchor set is recall-oriented and behavior-distinct:
 
-- Every enabled anchor matches at least one generated case and, for issue inputs, an RCA-declared site in the buggy repository.
-- When no anchor is disabled, the enabled set covers every generated case and every required example-suite source span.
+- Every enabled anchor matches at least one generated case and at least one source file named by an RCA component; exact component-span overlap is not required.
+- When no anchor is disabled, every generated case and every RCA-declared bad-example source file is admitted by at least one anchor with `query_weight >= 2`.
 - Each anchor represents one distinct observable behavior in the causal chain, even when case coverage overlaps.
 - `behavior` describes only the local operation matched by that anchor; cross-site relationships, exploit conditions, and review questions belong in `inspect_hint`.
 - Each per-anchor query is centered on its target `behavior`. To reduce overlap with sibling anchors, one precision pass may add local defect-relevant structure supported by every required case and the RCA site, such as requiring the target operation to appear inside an `if` statement. Project-specific or full-chain constraints remain out of bounds.

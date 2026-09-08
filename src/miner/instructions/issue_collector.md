@@ -29,10 +29,7 @@ Note: Only keep the fixing commit that targets the supplied issue scope. Do not 
 ## Step 3: Resolve the affected and fixed revisions
 
 - If a fix is identified, use the parent of the first causal fix as `buggy_commit` and the last causal fix as `fixed_commit`.
-
-step is only needed if the fixing revision is not clearly identified in step 1. Use the following approach:
-
-- If no fix is identified, select an evidence-supported affected revision as `buggy_commit` and leave `fixed_commit` absent. If not specified, select the affected revision by searching tags and timestamps in the commit history.
+- If no fix is identified, select an evidence-supported affected revision as `buggy_commit` and leave `fixed_commit` absent. Use tag or timestamp search only when the affected revision is not otherwise established.
 
 ## Step 4: Prepare the downstream result
 

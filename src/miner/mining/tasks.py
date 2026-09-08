@@ -225,15 +225,17 @@ def _rule_input_policy(grounding: GroundingPolicy) -> str:
 
 ## Example Suite grounding
 
-- Design intents from RCA-declared bad spans.
-- The accepted Anchor Plan must collectively cover every declared bad span.
+- Design complementary retrieval signals from the RCA and Case Artifacts.
+- After synthesis, every Case Artifact and every bad-example source file named by an RCA component should be admitted at the default candidate threshold.
+- RCA component spans identify defect evidence and relevant files; they are not mandatory Anchor match locations.
 """
     return """# Input Policy
 
 ## Issue grounding
 
-- Design intents from RCA-declared repository spans.
-- Every enabled synthesized query must overlap an applicable declared span.
+- Design complementary retrieval signals from the RCA and Case Artifacts.
+- After synthesis, every Case Artifact should be admitted at the default candidate threshold.
+- Each enabled query must faithfully match its target behavior in at least one source file named by an RCA component; exact component-span overlap is not required.
 """
 
 
@@ -250,7 +252,8 @@ def _synthesis_input_policy(
 
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
 - `src` is the complete immutable Example Suite snapshot analyzed by RCA. Files may be flat or nested and may contain multiple bad/unsafe and good/safe demonstrations.
-- Ground the query against the applicable RCA-declared bad/unsafe spans. Good/safe source is contrastive evidence only and is not a required positive match.
+- Ground the target behavior in at least one bad-example source file named by an RCA component. The faithful query match may be outside the exact component span.
+- Good/safe source is contrastive evidence only and is not a required positive match.
 - Interpret additional `src` matches as other suite examples; accept them only when they remain plausible instances of the target behavior.
 """
     return f"""# Input Context
@@ -259,7 +262,7 @@ def _synthesis_input_policy(
 
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
 - `src` is the affected repository source corpus analyzed by RCA.
-- Ground the query by overlapping at least one applicable RCA-declared source span for this intent.
+- Ground the target behavior in at least one source file named by an RCA component. The faithful query match may be outside the exact component span.
 - Treat other repository matches as precision evidence, not automatically as required positives or confirmed defects.
 """
 
@@ -402,9 +405,12 @@ def make_ast_grep_synthesis_task(
     cases_dir: Path,
     grounding_policy: GroundingPolicy,
     root_cause: RootCauseAnalysis,
+    iteration: int = 1,
     task_id: str | None = None,
     limits: RunLimits | None = None,
 ) -> AgentTask[AnchorSynthesisDelta]:
+    if iteration < 1:
+        raise ValueError("iteration must be positive")
     position = next(
         (index for index, item in enumerate(plan.intents, start=1) if item.id == intent.id),
         None,
@@ -421,15 +427,14 @@ def make_ast_grep_synthesis_task(
         skill_root=AST_GREP_SKILL_ROOT,
     )
     requirement = (
-        "Match at least one applicable RCA-declared bad span."
-        if grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
-        else "Overlap at least one applicable RCA-declared source span."
+        "Match the target behavior in at least one source file named by an "
+        "RCA component; exact component-span overlap is not required."
     )
     return AgentTask(
-        task_id=task_id or f"ast-grep-synthesis:{intent.id}",
+        task_id=task_id or f"ast-grep-synthesis:{iteration}:{intent.id}",
         definition=replace(
             AST_GREP_SYNTHESIS,
-            agent_name=f"AST-Grep Synthesizer [{position}/{len(plan.intents)}]",
+            agent_name=f"AST-Grep Synthesizer [{iteration}.{position}/{len(plan.intents)}]",
         ),
         authority=authority,
         prompt=json.dumps(

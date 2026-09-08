@@ -84,6 +84,8 @@ uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
 uv run python -m src.miner.main --example-suite data/CWE134_Uncontrolled_Format_String
 ```
 
+面向 IDEA 宣传的完整示例见 [CWE-134 Anchor 展示](docs/anchor_showcase_cwe134.md)，其中包含安全规范、互补 Anchor、热点排序和可复现查询。对应的示例规则是 [VAS-0134.json](examples/anchor_showcase/VAS-0134.json)。
+
 在业务输入层，Miner 只要求该路径是非空目录，并且递归后至少包含一个可识别的源码文件。它不限制示例数量、目录布局或源码语言数量，也不要求 manifest。good/bad 信息可以通过文件名、目录名、注释、标签或可选 manifest 表达，并由 RCA 阶段结合源码行为判断。为保证生成的快照不会越过输入目录，符号链接和特殊文件系统条目仍不接收。
 
 如果需要复用上一次执行中仍然有效的结果，可添加 `--use-cache`：
@@ -322,8 +324,8 @@ uv run pytest
 
 完整的锚点集合以召回为目标，并且各锚点行为互不重复：
 
-- 每个非空锚点至少匹配一个生成用例；对于问题输入，还必须匹配 RCA 在有缺陷代码仓库中声明的位置。
-- 没有禁用锚点时，非空锚点集合必须覆盖全部生成用例以及示例套件要求的全部源码区间。
+- 每个非空锚点至少匹配一个生成用例，并至少匹配一个 RCA component 所在的源码文件；不要求与 component 的精确区间重叠。
+- 没有禁用锚点时，每个生成用例和每个 RCA 声明的缺陷示例源码文件都必须被至少一个 `query_weight >= 2` 的锚点真正纳入候选集。
 - 每个锚点代表因果链中一个不同且可观察的行为，即使不同锚点的用例覆盖发生重叠。
 - `behavior` 只描述该锚点匹配的局部操作；跨位置关系、漏洞触发条件和检查问题属于 `inspect_hint`。
 - 每个查询以目标 `behavior` 为语义核心。为了减少与兄弟锚点的重叠，可以在一次精度优化中加入所有必要用例和 RCA 位置都支持的局部缺陷相关结构，例如要求目标操作位于 `if` 语句内；仍禁止项目特有约束或完整因果链约束。

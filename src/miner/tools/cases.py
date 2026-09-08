@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 import tempfile
 from pathlib import Path
-from typing import Any
+
+from .text import format_file_read
 
 CASE_ARTIFACT_RE = re.compile(r"^case\d+(?:_var\d+)?\.[A-Za-z0-9]+$")
 MAX_CASE_ARTIFACT_BYTES = 128 * 1024
@@ -38,16 +39,17 @@ def _case_artifact_path(cases_dir: Path, path: str, *, create_root: bool = False
     return resolved
 
 
-def list_case_artifacts(cases_dir: Path) -> list[str]:
+def list_case_artifacts(cases_dir: Path) -> str:
     """List valid top-level case artifacts in deterministic order."""
     root = Path(cases_dir).resolve()
     if not root.is_dir():
         raise ValueError(f"cases directory is not an existing directory: {root}")
-    return sorted(
+    paths = sorted(
         path.name
         for path in root.iterdir()
         if path.is_file() and not path.is_symlink() and CASE_ARTIFACT_RE.fullmatch(path.name)
     )
+    return "\n".join(paths) if paths else "(no case artifacts)"
 
 
 def read_case_artifact(
@@ -57,7 +59,7 @@ def read_case_artifact(
     start_line: int = 1,
     end_line: int | None = None,
     max_lines: int = MAX_CASE_READ_LINES,
-) -> dict[str, Any]:
+) -> str:
     """Read a bounded line range from one case artifact.
 
     A start position past EOF returns empty content together with the artifact
@@ -77,49 +79,50 @@ def read_case_artifact(
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     total_lines = len(lines)
     if total_lines == 0:
-        result: dict[str, Any] = {
-            "path": path,
-            "content": "",
-            "start_line": start_line,
-            "end_line": 0,
-            "total_lines": 0,
-            "truncated": False,
-        }
+        message = None
         if start_line != 1 or end_line not in {None, 0, 1}:
-            result["message"] = (
+            message = (
                 f"requested range starts past EOF; {path} is empty; no content was returned"
             )
-        return result
+        return format_file_read(
+            path=path,
+            content="",
+            start_line=start_line,
+            end_line=0,
+            total_lines=0,
+            truncated=False,
+            message=message,
+        )
     if start_line > total_lines:
-        return {
-            "path": path,
-            "content": "",
-            "start_line": start_line,
-            "end_line": total_lines,
-            "total_lines": total_lines,
-            "truncated": False,
-            "message": (
+        return format_file_read(
+            path=path,
+            content="",
+            start_line=start_line,
+            end_line=total_lines,
+            total_lines=total_lines,
+            truncated=False,
+            message=(
                 f"start_line {start_line} is past EOF; {path} has {total_lines} lines; "
                 "no content was returned"
             ),
-        }
+        )
 
     resolved_end = min(total_lines, end_line if end_line is not None else start_line + max_lines - 1)
     if resolved_end < start_line:
         raise ValueError("end_line must be greater than or equal to start_line")
     if resolved_end - start_line + 1 > max_lines:
         raise ValueError(f"requested line range exceeds the {max_lines}-line read limit")
-    return {
-        "path": path,
-        "content": "".join(lines[start_line - 1 : resolved_end]),
-        "start_line": start_line,
-        "end_line": resolved_end,
-        "total_lines": total_lines,
-        "truncated": resolved_end < total_lines,
-    }
+    return format_file_read(
+        path=path,
+        content="".join(lines[start_line - 1 : resolved_end]),
+        start_line=start_line,
+        end_line=resolved_end,
+        total_lines=total_lines,
+        truncated=resolved_end < total_lines,
+    )
 
 
-def write_case_artifact(cases_dir: Path, path: str, content: str) -> dict[str, Any]:
+def write_case_artifact(cases_dir: Path, path: str, content: str) -> str:
     """Atomically write one bounded, non-empty case artifact."""
     target = _case_artifact_path(cases_dir, path, create_root=True)
     encoded = content.encode("utf-8")
@@ -142,7 +145,7 @@ def write_case_artifact(cases_dir: Path, path: str, content: str) -> dict[str, A
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
-    return {"path": path, "bytes_written": len(encoded)}
+    return f"wrote {path} ({len(encoded)} bytes)"
 
 
 __all__ = [
