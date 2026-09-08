@@ -213,6 +213,35 @@ def run_ast_grep(command: list[str], *, timeout_seconds: int = 60) -> subprocess
         raise AnchorExecutionError(f"ast-grep could not start: {exc}") from exc
 
 
+def captured_output(
+    completed: subprocess.CompletedProcess[str],
+    anchor_id: str,
+) -> tuple[str, str]:
+    """Return captured text or a scanner error that identifies the affected anchor."""
+
+    streams = {"stdout": completed.stdout, "stderr": completed.stderr}
+    missing = [name for name, value in streams.items() if value is None]
+    if missing:
+        labels = " and ".join(missing)
+        raise AnchorExecutionError(
+            f"anchor {anchor_id!r} did not receive captured {labels} from ast-grep "
+            f"(exit code {completed.returncode})"
+        )
+
+    normalized: dict[str, str] = {}
+    for name, value in streams.items():
+        if isinstance(value, str):
+            normalized[name] = value
+        elif isinstance(value, bytes):
+            normalized[name] = value.decode("utf-8", errors="replace")
+        else:
+            raise AnchorExecutionError(
+                f"anchor {anchor_id!r} received an invalid ast-grep {name} value "
+                f"(exit code {completed.returncode})"
+            )
+    return normalized["stdout"], normalized["stderr"]
+
+
 def run_anchor(
     anchor: dict[str, Any],
     root: Path,
@@ -256,10 +285,11 @@ def run_anchor(
     else:
         raise AnchorQueryError(f"unsupported anchor type: {query_type!r}")
 
-    if completed.returncode not in {0, 1} or completed.stderr.strip():
+    stdout, stderr = captured_output(completed, anchor["id"])
+    if completed.returncode not in {0, 1} or stderr.strip():
         detail = (
-            completed.stderr.strip()
-            or completed.stdout.strip()
+            stderr.strip()
+            or stdout.strip()
             or f"exit code {completed.returncode}"
         )
         error_type = (
@@ -270,7 +300,7 @@ def run_anchor(
         raise error_type(f"anchor {anchor['id']!r} failed: {detail}")
 
     matches = []
-    for raw in parse_ast_grep_output(completed.stdout, anchor["id"]):
+    for raw in parse_ast_grep_output(stdout, anchor["id"]):
         range_info = raw.get("range") or {}
         start = range_info.get("start") or {}
         end = range_info.get("end") or {}

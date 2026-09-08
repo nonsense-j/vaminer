@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = PROJECT_ROOT / "src" / ".vaminer" / "skills" / "vas-scanner" / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import engine as scanner_engine
 from core import finalize_scan, next_candidates, prepare_scan, record_analysis
 
 
@@ -90,6 +92,35 @@ def test_packaged_scanner_accepts_all_disabled_rule(tmp_path: Path):
     assert scan["rule"]["anchors"][0]["query"] == ""
     assert scan["candidates"] == []
     assert next_candidates(scan_dir)["done"] is True
+
+
+def test_packaged_scanner_reports_missing_captured_output_as_execution_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        scanner_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=None,
+            stderr=None,
+        ),
+    )
+
+    with pytest.raises(
+        scanner_engine.AnchorExecutionError,
+        match=r"did not receive captured stdout and stderr from ast-grep \(exit code 0\)",
+    ):
+        scanner_engine.scan_anchors(
+            [make_rule()["anchors"][0]],
+            repo,
+            "c",
+            ast_grep="ast-grep",
+        )
 
 
 def test_scanner_ranks_hotspots_and_merges_analysis(tmp_path: Path):

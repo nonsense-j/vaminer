@@ -56,6 +56,16 @@ class _ConsoleHandler(logging.StreamHandler):
     """Marker type preventing duplicate console handlers."""
 
 
+class _MirrorFileHandler(logging.FileHandler):
+    """Append one record at a time without retaining a Windows file lock."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            super().emit(record)
+        finally:
+            self.close()
+
+
 class _RunFormatter(logging.Formatter):
     """Keep Rich panels intact while formatting ordinary miner records."""
 
@@ -294,10 +304,11 @@ def mirror_run_log_file(path: Path | None) -> Iterator[None]:
     if resolved is None or not resolved.is_file():
         yield
         return
-    file_handler = logging.FileHandler(
+    file_handler = _MirrorFileHandler(
         resolved,
         mode="a",
         encoding="utf-8",
+        delay=True,
     )
     file_handler.setLevel(LOG_LEVEL)
     file_handler.setFormatter(_RunFormatter())

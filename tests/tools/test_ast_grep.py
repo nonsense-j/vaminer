@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
-from src.miner.tools.ast_grep import AstGrepQueryError
+from src.miner.tools import ast_grep as ast_grep_module
+from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
 
 RUNNER_PATH = (
     Path(__file__).resolve().parents[2]
@@ -106,4 +108,34 @@ def test_runner_rejects_null_query_before_process_execution(tmp_path: Path):
             language="c",
             query_type="pattern",
             query=None,
+        )
+
+
+def test_runner_reports_missing_captured_output_as_runner_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.setattr(
+        ast_grep_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=None,
+            stderr=None,
+        ),
+    )
+
+    with pytest.raises(
+        AstGrepRunnerError,
+        match=r"did not provide captured stdout and stderr \(exit code 0\)",
+    ):
+        _load_runner().run_ast_grep(
+            target,
+            language="c",
+            query_type="pattern",
+            query="danger($A);",
+            executable="ast-grep",
         )

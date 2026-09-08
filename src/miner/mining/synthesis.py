@@ -264,11 +264,13 @@ class AnchorSynthesisSession:
                     iteration=iteration,
                 )
 
-        results = list(
-            await asyncio.gather(
-                *(bounded(intent) for intent in normalized_plan.intents)
-            )
-        )
+        tasks = [asyncio.create_task(bounded(intent)) for intent in normalized_plan.intents]
+        try:
+            results = list(await asyncio.gather(*tasks))
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._latest = AnchorSynthesisReceipt(plan=normalized_plan, results=results)
         return results
 

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,40 @@ async def test_rejected_second_plan_keeps_first_receipt(tmp_path: Path, monkeypa
     with pytest.raises(AnchorPlanError):
         await session.synthesize(bad)
     assert session.receipt is not None and session.receipt.plan.summary == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_session_waits_for_sibling_cleanup_before_propagating_failure(tmp_path: Path):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
+    sibling_started = asyncio.Event()
+    sibling_stopped = asyncio.Event()
+
+    async def execute(task):
+        if task.authority.target_anchor_id == "copy-site":
+            await sibling_started.wait()
+            raise RuntimeError("synthesis failed")
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            sibling_stopped.set()
+
+    second = _plan().intents[0].model_copy(update={"id": "second-site"})
+    plan = _plan().model_copy(update={"intents": [*_plan().intents, second]})
+    session = AnchorSynthesisSession(
+        authority,
+        workspace_root=tmp_path,
+        execute=execute,
+        max_parallel=2,
+    )
+
+    with pytest.raises(RuntimeError, match="synthesis failed"):
+        await session.synthesize(plan)
+    assert sibling_stopped.is_set()
 
 
 def test_plan_validation_only_rejects_invalid_or_unknown_case_names():

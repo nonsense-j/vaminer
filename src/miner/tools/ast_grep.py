@@ -144,6 +144,30 @@ def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> su
         raise AstGrepRunnerError(f"ast-grep could not start: {exc}") from exc
 
 
+def _captured_output(completed: subprocess.CompletedProcess[str]) -> tuple[str, str]:
+    """Return captured text without letting a broken process result leak AttributeError."""
+
+    streams = {"stdout": completed.stdout, "stderr": completed.stderr}
+    missing = [name for name, value in streams.items() if value is None]
+    if missing:
+        labels = " and ".join(missing)
+        raise AstGrepRunnerError(
+            f"ast-grep did not provide captured {labels} (exit code {completed.returncode})"
+        )
+
+    normalized: dict[str, str] = {}
+    for name, value in streams.items():
+        if isinstance(value, str):
+            normalized[name] = value
+        elif isinstance(value, bytes):
+            normalized[name] = value.decode("utf-8", errors="replace")
+        else:
+            raise AstGrepRunnerError(
+                f"ast-grep returned an invalid {name} value (exit code {completed.returncode})"
+            )
+    return normalized["stdout"], normalized["stderr"]
+
+
 def run_ast_grep(
     target_dir: str | Path,
     *,
@@ -198,8 +222,9 @@ def run_ast_grep(
             ]
             completed = _run_ast_grep(command, root=root, timeout_seconds=timeout_seconds)
 
-    if completed.returncode not in {0, 1} or completed.stderr.strip():
-        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
+    stdout, stderr = _captured_output(completed)
+    if completed.returncode not in {0, 1} or stderr.strip():
+        detail = stderr.strip() or stdout.strip() or f"exit code {completed.returncode}"
         error_type = (
             AstGrepQueryError
             if any(marker in detail.lower() for marker in _QUERY_ERROR_MARKERS)
@@ -207,7 +232,7 @@ def run_ast_grep(
         )
         raise error_type(f"ast-grep query failed: {detail}")
 
-    raw_matches = _parse_output(completed.stdout)
+    raw_matches = _parse_output(stdout)
     include_metavariables = output == "full"
     matches = [_normalize_site(root, raw, include_metavariables=include_metavariables) for raw in raw_matches]
     matches.sort(

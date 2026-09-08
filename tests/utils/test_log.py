@@ -2,7 +2,7 @@ from io import StringIO
 
 from rich.console import Console
 
-from src.miner.utils.log import RuntimeLog, mirror_run_log_file, run_log_file
+from src.miner.utils.log import RuntimeLog, logger, mirror_run_log_file, run_log_file
 
 
 def test_runtime_log_mirrors_one_redacted_rich_panel_to_stdout_and_run_file(tmp_path):
@@ -43,11 +43,24 @@ def test_runtime_log_relay_preserves_console_color_and_plain_run_file(tmp_path):
     transport = tmp_path / "synthesis.log"
     transport.touch()
     with mirror_run_log_file(transport):
-        RuntimeLog(emit_console=False, ansi_transport=True).event(
+        nested_log = RuntimeLog(emit_console=False, ansi_transport=True)
+        nested_log.event(
             "AST-Grep Synthesizer [1/1]",
             "thinking",
             "compile the source shape",
         )
+        mirror = next(
+            handler
+            for handler in logger.handlers
+            if getattr(handler, "baseFilename", None) == str(transport)
+        )
+        assert mirror.stream is None
+        nested_log.event(
+            "AST-Grep Synthesizer [1/1]",
+            "message",
+            "validate the resulting query",
+        )
+        assert mirror.stream is None
 
     wire = transport.read_text(encoding="utf-8")
     assert "\x1b[" in wire
@@ -75,3 +88,4 @@ def test_runtime_log_relay_preserves_console_color_and_plain_run_file(tmp_path):
     assert "\x1b[" not in persisted
     assert "AST-Grep Synthesizer [1/1]" in persisted
     assert "compile the source shape" in persisted
+    assert "validate the resulting query" in persisted
