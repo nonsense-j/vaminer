@@ -35,6 +35,7 @@ def test_patch_diff_without_specific_path_is_a_summary(
 
 def test_patch_diff_with_path_is_the_full_patch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     commands: list[list[str]] = []
+    relative_path = (Path("src") / "example.py").as_posix()
 
     def run(command, **_kwargs):
         commands.append(command)
@@ -42,62 +43,67 @@ def test_patch_diff_with_path_is_the_full_patch(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(repo_module.subprocess, "run", run)
 
-    result = read_patch_diff_from_repo(tmp_path, "src/example.py")
+    result = read_patch_diff_from_repo(tmp_path, relative_path)
 
     assert "@@ -1 +1 @@" in result
-    assert commands == [["git", "diff", "--no-ext-diff", "buggy", "fixed", "--", "src/example.py"]]
+    assert commands == [["git", "diff", "--no-ext-diff", "buggy", "fixed", "--", relative_path]]
     with pytest.raises(ValueError, match="must be relative"):
         read_patch_diff_from_repo(tmp_path, str(tmp_path / "src/example.py"))
 
 
 def test_rg_listing_and_literal_search_are_scoped_and_compact(tmp_path: Path):
+    src_dir = Path("src").as_posix()
+    src_a = (Path("src") / "a.c").as_posix()
+    src_b = (Path("src") / "b.py").as_posix()
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.c").write_bytes(
         b"foo(1);\r\nfoo.bar();\r\nexact\r\n exact \r\n"
     )
     (tmp_path / "src" / "b.py").write_text("foo(2)\n", encoding="utf-8")
-    listed = list_src_files(tmp_path, path="src", glob="*.c")
-    assert listed == "src/a.c"
+    listed = list_src_files(tmp_path, path=src_dir, glob="*.c")
+    assert listed == src_a
 
-    literal = search_src_files(tmp_path, "foo.", path="src")
-    assert literal == "src/a.c-1-foo(1);\nsrc/a.c:2:foo.bar();\nsrc/a.c-3-exact"
+    literal = search_src_files(tmp_path, "foo.", path=src_dir)
+    assert literal == f"{src_a}-1-foo(1);\n{src_a}:2:foo.bar();\n{src_a}-3-exact"
     assert "context" not in inspect.signature(search_src_files).parameters
-    single_file = search_src_files(tmp_path, r"foo\(\d\)", path="src/a.c", mode="regex")
-    assert single_file == "src/a.c:1:foo(1);\nsrc/a.c-2-foo.bar();"
-    spaced = search_src_files(tmp_path, " exact ", path="src/a.c")
-    assert spaced == "src/a.c-3-exact\nsrc/a.c:4: exact "
-    regex = search_src_files(tmp_path, r"foo\(\d\)", path="src", mode="regex")
-    assert regex == "src/a.c:1:foo(1);\nsrc/a.c-2-foo.bar();\n--\nsrc/b.py:1:foo(2)"
+    single_file = search_src_files(tmp_path, r"foo\(\d\)", path=src_a, mode="regex")
+    assert single_file == f"{src_a}:1:foo(1);\n{src_a}-2-foo.bar();"
+    spaced = search_src_files(tmp_path, " exact ", path=src_a)
+    assert spaced == f"{src_a}-3-exact\n{src_a}:4: exact "
+    regex = search_src_files(tmp_path, r"foo\(\d\)", path=src_dir, mode="regex")
+    assert regex == f"{src_a}:1:foo(1);\n{src_a}-2-foo.bar();\n--\n{src_b}:1:foo(2)"
     assert search_src_files(tmp_path, "absent") == "(no matches)"
-    assert read_src_file(tmp_path, "src/a.c", start_line=2, end_line=2) == (
-        "==> src/a.c | lines 2-2 of 4 | more available <==\nfoo.bar();"
+    assert read_src_file(tmp_path, src_a, start_line=2, end_line=2) == (
+        f"==> {src_a} | lines 2-2 of 4 | more available <==\nfoo.bar();"
     )
 
-    truncated = list_src_files(tmp_path, path="src", max_results=1)
-    assert truncated == "src/a.c\n-- truncated"
+    truncated = list_src_files(tmp_path, path=src_dir, max_results=1)
+    assert truncated == f"{src_a}\n-- truncated"
     with pytest.raises(ValueError, match="not a directory"):
-        list_src_files(tmp_path, path="src/a.c")
+        list_src_files(tmp_path, path=src_a)
+    missing_scope = Path("src", "apache", "cassandra").as_posix()
     with pytest.raises(ValueError) as missing:
-        list_src_files(tmp_path, path="src/apache/cassandra")
+        list_src_files(tmp_path, path=missing_scope)
     assert str(missing.value) == (
-        f"src path does not exist relative to bound root {tmp_path}: src/apache/cassandra; "
-        "nearest existing directory: src"
+        f"src path does not exist relative to bound root {tmp_path.resolve().as_posix()}: "
+        f"{missing_scope}; nearest existing directory: {src_dir}"
     )
 
-    read = read_src_file(tmp_path, "src/a.c", start_line=1, end_line=1)
-    assert read == "==> src/a.c | lines 1-1 of 4 | more available <==\nfoo(1);"
+    read = read_src_file(tmp_path, src_a, start_line=1, end_line=1)
+    assert read == f"==> {src_a} | lines 1-1 of 4 | more available <==\nfoo(1);"
 
 
 def test_search_path_rejects_repeated_checkout_prefix(tmp_path: Path):
     root = tmp_path / "vas_ws" / "miner" / "VAS-test" / "src" / "apache" / "cassandra"
+    repeated_scope = Path("src", "apache", "cassandra").as_posix()
     root.mkdir(parents=True)
 
     with pytest.raises(ValueError) as repeated:
-        list_src_files(root, path="src/apache/cassandra")
+        list_src_files(root, path=repeated_scope)
 
     assert str(repeated.value) == (
-        "src path repeats the bound Src Root: src/apache/cassandra; "
-        f"bound root: {root}; use '.' or omit path for the root"
+        f"src path repeats the bound Src Root: {repeated_scope}; "
+        f"bound root: {root.resolve().as_posix()}; use '.' or omit path for the root"
     )
 
 
