@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "langfuse>=4.0,<5",
+#   "portalocker[win32]>=4.3,<5",
 # ]
 # ///
 """
@@ -28,6 +29,8 @@ from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import portalocker
 
 
 # ----------------- Configuration -----------------
@@ -411,49 +414,43 @@ class FileLock:
     def __init__(self, path: Path, timeout_s: float = 2.0):
         self.path = path
         self.timeout_s = timeout_s
+        self._lock = None
         self._fh = None
+        self.acquired = False
 
     def __enter__(self):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self.path, "a+", encoding="utf-8")
-        self.acquired = False
+        self._lock = portalocker.Lock(
+            self.path,
+            mode="a+",
+            timeout=self.timeout_s,
+            check_interval=0.05,
+            flags=(
+                portalocker.LockFlags.EXCLUSIVE
+                | portalocker.LockFlags.NON_BLOCKING
+            ),
+            encoding="utf-8",
+        )
         try:
-            import fcntl  # Unix only
-        except ImportError:
-            # No fcntl available (e.g. Windows) — proceed without lock.
-            return self
-        deadline = time.time() + self.timeout_s
-        try:
-            while True:
-                try:
-                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self.acquired = True
-                    return self
-                except BlockingIOError:
-                    if time.time() > deadline:
-                        raise TimeoutError(
-                            f"could not acquire {self.path} within {self.timeout_s}s"
-                        )
-                    time.sleep(0.05)
+            self._fh = self._lock.acquire()
+        except portalocker.exceptions.AlreadyLocked as exc:
+            self._lock = None
+            raise TimeoutError(
+                f"could not acquire {self.path} within {self.timeout_s}s"
+            ) from exc
         except BaseException:
-            # __exit__ is not called when __enter__ raises — close the fh
-            # we just opened so it doesn't leak.
-            try:
-                self._fh.close()
-            except Exception:
-                pass
+            self._lock = None
             raise
+        self.acquired = True
+        return self
 
     def __exit__(self, exc_type, exc, tb):
-        try:
-            import fcntl
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try:
-            self._fh.close()
-        except Exception:
-            pass
+        lock = self._lock
+        self._lock = None
+        self._fh = None
+        self.acquired = False
+        if lock is not None:
+            lock.release()
 
 
 # ----------------- State file reading and writing -----------------

@@ -123,6 +123,35 @@ def test_concurrent_ast_grep_experience_writes_do_not_lose_updates(tmp_path: Pat
     assert all(item.lesson in bounded for item in overflow)
 
 
+def test_skill_resource_readers_can_share_the_lock(tmp_path: Path):
+    skill = tmp_path / "ast-grep"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    first_entered = Event()
+    second_entered = Event()
+    release_first = Event()
+
+    def hold_first_reader() -> None:
+        with skills_module._skill_resource_lock(skill, exclusive=False):
+            first_entered.set()
+            assert release_first.wait(timeout=2)
+
+    def enter_second_reader() -> None:
+        with skills_module._skill_resource_lock(skill, exclusive=False):
+            second_entered.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(hold_first_reader)
+        assert first_entered.wait(timeout=2)
+        second = executor.submit(enter_second_reader)
+        try:
+            assert second_entered.wait(timeout=2)
+        finally:
+            release_first.set()
+        first.result(timeout=2)
+        second.result(timeout=2)
+
+
 def test_skill_resource_reader_waits_for_experience_writer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

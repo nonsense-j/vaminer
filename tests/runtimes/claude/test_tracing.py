@@ -9,6 +9,25 @@ import pytest
 from src.miner.runtimes.claude import tracing
 
 
+def test_bundled_file_lock_times_out_on_contention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(tracing.langfuse_hook, "STATE_DIR", tmp_path)
+    lock_path = tmp_path / "state.lock"
+    first = tracing.langfuse_hook.FileLock(lock_path, timeout_s=1)
+
+    with first:
+        assert first.acquired
+        with pytest.raises(TimeoutError, match="could not acquire"):
+            with tracing.langfuse_hook.FileLock(lock_path, timeout_s=0.05):
+                pytest.fail("a contending process must not enter the protected block")
+
+    assert not first.acquired
+    with tracing.langfuse_hook.FileLock(lock_path, timeout_s=0.05):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_emit_session_trace_calls_bundled_api_in_process(
     tmp_path: Path,

@@ -9,6 +9,7 @@ dependencies = [
     "httpx>=0.28.1",
     "langfuse>=4.14.1,<5",
     "mcp[cli]>=2.0.0",
+    "portalocker[win32]>=4.3,<5",
     "pydantic>=2.13.4",
     "pydantic-ai-harness>=0.11.0",
     "pydantic-ai-slim[duckduckgo,openai]>=2.18.0",

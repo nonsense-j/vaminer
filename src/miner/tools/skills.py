@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import fcntl
 import os
 import re
 import tempfile
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+
+import portalocker
 
 from ..models.anchors import AstGrepExperience, AstGrepExperienceOutcome
 from .text import format_file_read, truncation_footer
@@ -44,12 +46,21 @@ def _skill_resource_lock(root: Path, *, exclusive: bool) -> Iterator[None]:
     """Coordinate skill reads and evolution writes across processes."""
 
     with (root / "SKILL.md").open("rb") as handle:
-        operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(handle.fileno(), operation)
+        operation = (
+            portalocker.LockFlags.EXCLUSIVE
+            if exclusive
+            else portalocker.LockFlags.SHARED
+        ) | portalocker.LockFlags.NON_BLOCKING
+        while True:
+            try:
+                portalocker.lock(handle, operation)
+                break
+            except portalocker.exceptions.AlreadyLocked:
+                time.sleep(0.05)
         try:
             yield
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            portalocker.unlock(handle)
 
 
 def _skill_file(skill_roots: Mapping[str, Path], skill_name: str, resource: str) -> tuple[Path, Path]:
