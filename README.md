@@ -159,7 +159,7 @@ The miner runs a deterministic sequence:
 1. **Issue Collection** gathers issue text, repository provenance, and buggy/fixed commits.
 2. **Root Cause Analysis** identifies the concrete defect behavior and fixing pattern, then extracts minimal original and variant cases.
 3. **Rule Generation** produces the rule summary, independent unsafe/safe scenarios, and one queryless anchor intent for each distinct, local, rule-sensitive causal-chain site.
-4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context. A child returns only query fields for one target id; the host combines them with the canonical intent.
+4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context. A child returns query fields plus concise reusable ast-grep experiences for one target id; the host combines the query with the canonical intent and safely merges new experiences into the skill.
 5. **Assembly and Validation** uses the authoritative RCA, latest accepted Anchor Plan, Rule Generation draft, and accepted query deltas to build the complete VAS.
 6. **Post-generation Anchor Report** independently renders case coverage and repository hotspot results.
 
@@ -167,7 +167,7 @@ The Rule Generator never loads the ast-grep skill or authors query text. The AST
 
 One mining run selects exactly one Runtime Adapter and one configured model. All phases, including child Synthesizers, retain that identity; there is no per-phase routing or runtime fallback. `VAMiner` accepts either an Issue or Example Suite through an Input Adapter, then uses one shared RCA → Rule Generation → persistence workflow.
 
-`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts at most two plans, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates non-empty queries, and records only the latest successful batch. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; generic filesystem, shell, network, and further delegation are unavailable.
+`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts at most two plans, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates non-empty queries, and records only the latest successful batch. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; the query tool returns ast-grep stderr verbatim and accepts `debug_query` for raw patterns. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host deduplicates its bounded experience list and updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
 
 ### Miner module responsibilities
 

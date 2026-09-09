@@ -14,11 +14,25 @@ from typing import Any, Literal
 
 QueryType = Literal["pattern", "rule"]
 OutputMode = Literal["count", "sample", "full"]
+DebugQuery = Literal["pattern", "ast", "cst", "sexp"]
 _ALLOWED_ROOTS_ENV = "VAMINER_AST_GREP_ALLOWED_ROOTS"
 
 
 class AstGrepRunnerError(RuntimeError):
     """Raised when ast-grep cannot produce a trustworthy JSON result."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stderr: str = "",
+        stdout: str = "",
+        returncode: int | None = None,
+    ) -> None:
+        self.stderr = stderr
+        self.stdout = stdout
+        self.returncode = returncode
+        super().__init__(message)
 
 
 class AstGrepQueryError(AstGrepRunnerError):
@@ -26,13 +40,15 @@ class AstGrepQueryError(AstGrepRunnerError):
 
 
 _QUERY_ERROR_MARKERS = (
-    "pattern contains an error node",
     "cannot parse rule",
     "not a valid ast-grep rule",
     "fail to parse yaml as ruleconfig",
     "failed to parse pattern",
     "invalid pattern",
+    "for '--lang <lang>'",
+    "rule must specify a set of ast kinds",
 )
+_QUERY_WARNING_PREFIXES = ("warning: pattern contains an error node",)
 
 
 def _enforce_allowed_root(root: Path) -> None:
@@ -124,8 +140,47 @@ def _normalize_site(root: Path, raw: dict[str, Any], *, include_metavariables: b
         },
     }
     if include_metavariables:
-        site["meta_variables"] = raw.get("metaVariables") or {}
+        meta_variables = raw.get("metaVariables") or {}
+        if not isinstance(meta_variables, dict) or any(
+            not isinstance(captures, dict) for captures in meta_variables.values()
+        ):
+            raise AstGrepRunnerError("ast-grep returned malformed metavariable captures")
+        for captures in meta_variables.values():
+            for capture in captures.values():
+                values = capture if isinstance(capture, list) else [capture]
+                if any(
+                    not isinstance(value, str)
+                    and not (
+                        isinstance(value, dict)
+                        and isinstance(value.get("text"), str)
+                    )
+                    for value in values
+                ):
+                    raise AstGrepRunnerError(
+                        "ast-grep returned malformed metavariable captures"
+                    )
+        site["meta_variables"] = meta_variables
     return site
+
+
+def _with_verbatim_stderr(message: str, stderr: str) -> str:
+    if not stderr:
+        return message
+    return f"{message}\n\nast-grep stderr (verbatim):\n{stderr}"
+
+
+def _query_was_rejected(returncode: int, stdout: str, stderr: str) -> bool:
+    """Recognize authored-query diagnostics without inspecting debug-tree payloads."""
+
+    if any(
+        line.strip().casefold().startswith(_QUERY_WARNING_PREFIXES)
+        for line in stderr.splitlines()
+    ):
+        return True
+    if returncode in {0, 1}:
+        return False
+    diagnostic = (stderr or stdout).casefold()
+    return any(marker in diagnostic for marker in _QUERY_ERROR_MARKERS)
 
 
 def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> subprocess.CompletedProcess[str]:
@@ -139,9 +194,23 @@ def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> su
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        raise AstGrepRunnerError(f"ast-grep timed out after {timeout_seconds} seconds") from exc
+        stdout = _stream_text(exc.stdout)
+        stderr = _stream_text(exc.stderr)
+        message = _with_verbatim_stderr(
+            f"ast-grep timed out after {timeout_seconds} seconds",
+            stderr,
+        )
+        raise AstGrepRunnerError(message, stderr=stderr, stdout=stdout) from exc
     except OSError as exc:
         raise AstGrepRunnerError(f"ast-grep could not start: {exc}") from exc
+
+
+def _stream_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return value.decode("utf-8", errors="replace")
 
 
 def _captured_output(completed: subprocess.CompletedProcess[str]) -> tuple[str, str]:
@@ -149,23 +218,30 @@ def _captured_output(completed: subprocess.CompletedProcess[str]) -> tuple[str, 
 
     streams = {"stdout": completed.stdout, "stderr": completed.stderr}
     missing = [name for name, value in streams.items() if value is None]
-    if missing:
-        labels = " and ".join(missing)
-        raise AstGrepRunnerError(
-            f"ast-grep did not provide captured {labels} (exit code {completed.returncode})"
+    invalid = [
+        name
+        for name, value in streams.items()
+        if value is not None and not isinstance(value, (str, bytes))
+    ]
+    stdout = _stream_text(completed.stdout) if "stdout" not in [*missing, *invalid] else ""
+    stderr = _stream_text(completed.stderr) if "stderr" not in [*missing, *invalid] else ""
+    if missing or invalid:
+        problems = []
+        if missing:
+            problems.append(f"did not provide captured {' and '.join(missing)}")
+        if invalid:
+            problems.append(f"returned invalid {' and '.join(invalid)}")
+        message = _with_verbatim_stderr(
+            f"ast-grep {'; '.join(problems)} (exit code {completed.returncode})",
+            stderr,
         )
-
-    normalized: dict[str, str] = {}
-    for name, value in streams.items():
-        if isinstance(value, str):
-            normalized[name] = value
-        elif isinstance(value, bytes):
-            normalized[name] = value.decode("utf-8", errors="replace")
-        else:
-            raise AstGrepRunnerError(
-                f"ast-grep returned an invalid {name} value (exit code {completed.returncode})"
-            )
-    return normalized["stdout"], normalized["stderr"]
+        raise AstGrepRunnerError(
+            message,
+            stderr=stderr,
+            stdout=stdout,
+            returncode=completed.returncode,
+        )
+    return stdout, stderr
 
 
 def run_ast_grep(
@@ -176,24 +252,37 @@ def run_ast_grep(
     query: str,
     output: OutputMode = "sample",
     sample_size: int = 20,
+    debug_query: DebugQuery | None = None,
     timeout_seconds: int = 60,
     executable: str | None = None,
 ) -> str:
-    """Run one ast-grep query and return a fixed plain-text match report."""
+    """Test one raw pattern or YAML rule and return matches plus verbatim stderr.
+
+    ``full`` includes metavariable captures. ``debug_query`` exposes the native
+    pattern/AST/CST/S-expression tree and is valid only for raw patterns.
+    """
     root = Path(target_dir).resolve()
     if not root.is_dir():
         raise AstGrepRunnerError(f"target directory does not exist: {root}")
     _enforce_allowed_root(root)
     if not isinstance(language, str) or not language.strip():
         raise AstGrepQueryError("language must be a non-empty string")
-    if query_type not in {"pattern", "rule"}:
+    if not isinstance(query_type, str) or query_type not in {"pattern", "rule"}:
         raise AstGrepQueryError(f"unsupported query type: {query_type!r}")
     if not isinstance(query, str) or not query.strip():
         raise AstGrepQueryError("query must be a non-empty string")
-    if output not in {"count", "sample", "full"}:
+    if not isinstance(output, str) or output not in {"count", "sample", "full"}:
         raise AstGrepQueryError(f"unsupported output mode: {output!r}")
     if not isinstance(sample_size, int) or isinstance(sample_size, bool) or sample_size < 1:
         raise AstGrepQueryError("sample_size must be a positive integer")
+    if debug_query is not None and (
+        not isinstance(debug_query, str) or debug_query not in {"pattern", "ast", "cst", "sexp"}
+    ):
+        raise AstGrepQueryError(f"unsupported debug-query format: {debug_query!r}")
+    if debug_query is not None and query_type != "pattern":
+        raise AstGrepQueryError("debug_query is supported only for pattern queries")
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds < 1:
+        raise AstGrepRunnerError("timeout_seconds must be a positive integer")
 
     binary = _find_ast_grep(executable)
     if query_type == "pattern":
@@ -205,8 +294,10 @@ def run_ast_grep(
             "--lang",
             language,
             "--json=compact",
-            ".",
         ]
+        if debug_query is not None:
+            command.append(f"--debug-query={debug_query}")
+        command.append(".")
         completed = _run_ast_grep(command, root=root, timeout_seconds=timeout_seconds)
     else:
         with tempfile.TemporaryDirectory(prefix="vaminer-ast-grep-") as temp_dir:
@@ -223,18 +314,32 @@ def run_ast_grep(
             completed = _run_ast_grep(command, root=root, timeout_seconds=timeout_seconds)
 
     stdout, stderr = _captured_output(completed)
-    if completed.returncode not in {0, 1} or stderr.strip():
-        detail = stderr.strip() or stdout.strip() or f"exit code {completed.returncode}"
-        error_type = (
-            AstGrepQueryError
-            if any(marker in detail.lower() for marker in _QUERY_ERROR_MARKERS)
-            else AstGrepRunnerError
+    query_rejected = _query_was_rejected(completed.returncode, stdout, stderr)
+    if completed.returncode not in {0, 1} or query_rejected:
+        detail = stderr or stdout or f"exit code {completed.returncode}"
+        error_type = AstGrepQueryError if query_rejected else AstGrepRunnerError
+        raise error_type(
+            detail,
+            stderr=stderr,
+            stdout=stdout,
+            returncode=completed.returncode,
         )
-        raise error_type(f"ast-grep query failed: {detail}")
 
-    raw_matches = _parse_output(stdout)
-    include_metavariables = output == "full"
-    matches = [_normalize_site(root, raw, include_metavariables=include_metavariables) for raw in raw_matches]
+    try:
+        raw_matches = _parse_output(stdout)
+        include_metavariables = output == "full"
+        matches = [
+            _normalize_site(root, raw, include_metavariables=include_metavariables)
+            for raw in raw_matches
+        ]
+    except AstGrepRunnerError as exc:
+        message = _with_verbatim_stderr(str(exc), stderr)
+        raise AstGrepRunnerError(
+            message,
+            stderr=stderr,
+            stdout=stdout,
+            returncode=completed.returncode,
+        ) from exc
     matches.sort(
         key=lambda site: (
             site["file"],
@@ -279,7 +384,8 @@ def run_ast_grep(
                     rendered.append(f"capture {group}.{name}: {text}")
     if output == "sample" and len(matches) > sample_size:
         rendered.append("-- truncated")
-    return "\n".join(rendered)
+    report = "\n".join(rendered)
+    return _with_verbatim_stderr(report, stderr)
 
 
 def main() -> None:
@@ -290,6 +396,12 @@ def main() -> None:
     parser.add_argument("--query", required=True)
     parser.add_argument("--output", choices=("count", "sample", "full"), default="sample")
     parser.add_argument("--sample-size", type=int, default=20)
+    parser.add_argument(
+        "--debug-query",
+        nargs="?",
+        const="pattern",
+        choices=("pattern", "ast", "cst", "sexp"),
+    )
     parser.add_argument("--timeout-seconds", type=int, default=60)
     args = parser.parse_args()
     print(
@@ -300,6 +412,7 @@ def main() -> None:
             query=args.query,
             output=args.output,
             sample_size=args.sample_size,
+            debug_query=args.debug_query,
             timeout_seconds=args.timeout_seconds,
         )
     )
@@ -309,4 +422,4 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["AstGrepQueryError", "AstGrepRunnerError", "run_ast_grep"]
+__all__ = ["AstGrepQueryError", "AstGrepRunnerError", "DebugQuery", "run_ast_grep"]

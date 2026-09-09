@@ -14,14 +14,18 @@ from ..agent.contracts import AgentRunResult, AgentTask, RuleGenerationAuthority
 from ..anchors.scanner import AnchorQueryError, scan_anchors
 from ..models.anchors import (
     Anchor,
+    AstGrepExperience,
     AnchorIntent,
     AnchorPlan,
     AnchorSynthesisDelta,
     AnchorSynthesisResult,
+    MAX_SYNTHESIS_EXPERIENCES,
     QueryType,
 )
 from ..models.vas import RuleGenerationDraft, VASCoreInfo
+from ..tools.skills import record_ast_grep_experiences
 from ..utils.config import MINER_AST_GREP_MAX_PARALLEL_RUNS
+from ..utils.log import logger
 from .tasks import make_ast_grep_synthesis_task
 
 SynthesisExecutor = Callable[
@@ -198,6 +202,8 @@ class AnchorSynthesisSession:
         )
         last_delta: AnchorSynthesisDelta | None = None
         last_errors: tuple[str, ...] = ()
+        experiences: list[AstGrepExperience] = []
+        experience_keys: set[str] = set()
         for repair in range(1 + task.limits.output_retries):
             repair_task = task
             if repair and last_errors:
@@ -217,28 +223,49 @@ class AnchorSynthesisSession:
             run = await self._execute(repair_task)
             last_delta = run.output
             anchor = _assemble_anchor(intent, last_delta)
+            for experience in last_delta.experiences:
+                if len(experiences) >= MAX_SYNTHESIS_EXPERIENCES:
+                    break
+                key = experience.identity
+                if key not in experience_keys:
+                    experience_keys.add(key)
+                    experiences.append(experience)
             last_errors = _query_errors(anchor, intent, self.authority)
             if not last_errors:
-                return AnchorSynthesisResult(
+                result = AnchorSynthesisResult(
                     anchor=anchor,
                     adjustments=last_delta.adjustments,
+                    experiences=experiences,
                     plan_suggestion=last_delta.plan_suggestion,
                 )
-        assert last_delta is not None
-        disabled = Anchor(
-            id=intent.id,
-            behavior_weight=intent.behavior_weight,
-            query_weight=min(last_delta.query_weight, intent.behavior_weight),
-            type=last_delta.query_type if last_delta else QueryType.PATTERN,
-            query="",
-            behavior=intent.behavior,
-            inspect_hint=intent.inspect_hint,
-        )
-        return AnchorSynthesisResult(
-            anchor=disabled,
-            adjustments=[*last_delta.adjustments, "Disabled after deterministic query validation failed."],
-            plan_suggestion=last_delta.plan_suggestion,
-        )
+                break
+        else:
+            assert last_delta is not None
+            disabled = Anchor(
+                id=intent.id,
+                behavior_weight=intent.behavior_weight,
+                query_weight=min(last_delta.query_weight, intent.behavior_weight),
+                type=last_delta.query_type if last_delta else QueryType.PATTERN,
+                query="",
+                behavior=intent.behavior,
+                inspect_hint=intent.inspect_hint,
+            )
+            result = AnchorSynthesisResult(
+                anchor=disabled,
+                adjustments=[*last_delta.adjustments, "Disabled after deterministic query validation failed."],
+                experiences=experiences,
+                plan_suggestion=last_delta.plan_suggestion,
+            )
+        if experiences:
+            try:
+                await asyncio.to_thread(
+                    record_ast_grep_experiences,
+                    task.authority.skill_root,
+                    experiences,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.warning("Could not persist ast-grep synthesis experiences: %s", exc)
+        return result
 
     async def synthesize(self, plan: AnchorPlan) -> list[AnchorSynthesisResult]:
         self._calls += 1

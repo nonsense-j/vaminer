@@ -323,6 +323,62 @@ async def test_mcp_tool_bodies_reject_null_strings_without_nonetype_errors(tmp_p
         await server.tools["run_ast_grep_query"]("src", "c", "pattern", None)
 
 
+@pytest.mark.asyncio
+async def test_mcp_ast_grep_tool_forwards_query_debug_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace, source, cases = _workspace(tmp_path)
+    server = build_server(
+        settings=MCPServerSettings(
+            profile=MCPProfile.AST_GREP_SYNTHESIS,
+            workspace_root=workspace,
+            source_root=source,
+            cases_dir=cases,
+            skill_root=Path("src/miner/skills/ast-grep").resolve(),
+        ),
+        fast_mcp_factory=FakeServer,
+    )
+    captured: dict[str, object] = {}
+
+    def run(target_dir, **kwargs):
+        captured["target_dir"] = target_dir
+        captured.update(kwargs)
+        return "report\n\nast-grep stderr (verbatim):\nDebug CST:\n(tree)\n"
+
+    monkeypatch.setattr(mcp_module, "run_ast_grep", run)
+    result = await server.tools["run_ast_grep_query"](
+        "cases",
+        "c",
+        "pattern",
+        "copy($A);",
+        output="full",
+        sample_size=7,
+        debug_query="cst",
+    )
+
+    assert captured["target_dir"] == cases
+    assert captured["output"] == "full"
+    assert captured["sample_size"] == 7
+    assert captured["debug_query"] == "cst"
+    assert result.endswith("Debug CST:\n(tree)\n")
+
+    raw_stderr = "Error: Cannot parse rule\nRule must specify `kind`.\n"
+
+    def reject(*_args, **_kwargs):
+        raise AstGrepQueryError(raw_stderr, stderr=raw_stderr, returncode=8)
+
+    monkeypatch.setattr(mcp_module, "run_ast_grep", reject)
+    with pytest.raises(AstGrepQueryError) as raised:
+        await server.tools["run_ast_grep_query"](
+            "cases",
+            "c",
+            "rule",
+            "regex: danger",
+        )
+    assert str(raised.value) == raw_stderr
+
+
 def test_protocol_normalizes_type_and_content():
     stdout = "\n".join(
         [

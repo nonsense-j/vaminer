@@ -11,6 +11,7 @@ from src.miner.models import (
     Anchor,
     AnchorIntent,
     AnchorPlan,
+    AstGrepExperience,
     AnchorSynthesisDelta,
     AstGrepLanguage,
     BuggyComponent,
@@ -408,3 +409,128 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
     with pytest.raises(AnchorExecutionError, match="binary missing"):
         await session.synthesize(_plan())
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_session_returns_and_persists_deduplicated_synthesis_experiences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
+    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: ())
+    recorded: list[AstGrepExperience] = []
+
+    def record(_skill_root, experiences):
+        recorded.extend(experiences)
+        return len(experiences)
+
+    monkeypatch.setattr(synthesis_module, "record_ast_grep_experiences", record)
+    lesson = AstGrepExperience(
+        outcome="pitfall",
+        lesson="A C call fragment may require statement context.",
+    )
+
+    async def execute(task):
+        return AgentRunResult(
+            output=AnchorSynthesisDelta(
+                target_anchor_id=task.authority.target_anchor_id,
+                type="pattern",
+                query="copy($A)",
+                query_weight=1,
+                adjustments=[],
+                experiences=[lesson],
+                plan_suggestion="",
+            ),
+            identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
+        )
+
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    result = await session.synthesize(_plan())
+
+    assert result[0].experiences == [lesson]
+    assert recorded == [lesson]
+
+
+def test_delta_limits_and_deduplicates_query_writing_experiences():
+    common = {
+        "target_anchor_id": "copy-site",
+        "type": "pattern",
+        "query": "copy($A)",
+        "query_weight": 1,
+        "adjustments": [],
+        "plan_suggestion": "",
+    }
+    lessons = [
+        {"outcome": "success", "lesson": f"Reusable query lesson number {index}."}
+        for index in range(4)
+    ]
+
+    with pytest.raises(ValidationError, match="at most 3 items"):
+        AnchorSynthesisDelta.model_validate({**common, "experiences": lessons})
+    with pytest.raises(ValidationError, match="duplicate query-writing lessons"):
+        AnchorSynthesisDelta.model_validate(
+            {
+                **common,
+                "experiences": [
+                    {"outcome": "pitfall", "lesson": "Regex query needs a node kind."},
+                    {"outcome": "pitfall", "lesson": "regex query needs a node kind!"},
+                ],
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_repair_attempts_share_one_three_experience_write_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
+    validations = iter((("first miss",), ("second miss",), ()))
+    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: next(validations))
+    recorded_batches: list[list[AstGrepExperience]] = []
+    monkeypatch.setattr(
+        synthesis_module,
+        "record_ast_grep_experiences",
+        lambda _root, experiences: recorded_batches.append(list(experiences))
+        or len(experiences),
+    )
+    calls = 0
+
+    async def execute(task):
+        nonlocal calls
+        calls += 1
+        return AgentRunResult(
+            output=AnchorSynthesisDelta(
+                target_anchor_id=task.authority.target_anchor_id,
+                type="pattern",
+                query="copy($A)",
+                query_weight=1,
+                adjustments=[],
+                experiences=[
+                    AstGrepExperience(
+                        outcome="pitfall",
+                        lesson=f"Attempt {calls} produced a reusable query-writing lesson.",
+                    )
+                ],
+                plan_suggestion="",
+            ),
+            identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
+        )
+
+    result = await AnchorSynthesisSession(
+        authority,
+        workspace_root=tmp_path,
+        execute=execute,
+    ).synthesize(_plan())
+
+    assert calls == 3
+    assert len(result[0].experiences) == 3
+    assert recorded_batches == [result[0].experiences]

@@ -52,6 +52,7 @@ def check_project_assets() -> CheckResult:
         PROJECT_ROOT / "src" / "miner" / "instructions" / "root_cause_analyzer.md",
         PROJECT_ROOT / "src" / "miner" / "instructions" / "rule_generator.md",
         AST_GREP_SKILL_ROOT / "SKILL.md",
+        AST_GREP_SKILL_ROOT / "references" / "experiences.md",
         PROJECT_ROOT / "src" / ".vaminer" / "skills" / "vas-scanner" / "scripts" / "engine.py",
     )
     missing = [path.relative_to(PROJECT_ROOT).as_posix() for path in required if not path.is_file()]

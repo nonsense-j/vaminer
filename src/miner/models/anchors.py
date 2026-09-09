@@ -1,13 +1,49 @@
 """Anchor intent and per-run synthesis models."""
 
+import re
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class QueryType(StrEnum):
     PATTERN = "pattern"
     RULE = "rule"
+
+
+class AstGrepExperienceOutcome(StrEnum):
+    SUCCESS = "success"
+    PITFALL = "pitfall"
+
+
+MAX_SYNTHESIS_EXPERIENCES = 3
+_EXPERIENCE_SEPARATOR = re.compile(r"[^\w]+")
+
+
+class AstGrepExperience(BaseModel):
+    """One reusable, evidence-backed ast-grep query-writing lesson."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: AstGrepExperienceOutcome
+    lesson: str = Field(..., min_length=8, max_length=240)
+
+    @field_validator("lesson", mode="before")
+    @classmethod
+    def normalize_lesson(cls, value: object) -> object:
+        return " ".join(value.split()) if isinstance(value, str) else value
+
+    @property
+    def identity(self) -> str:
+        """Ignore casing, Markdown punctuation, and spacing when deduplicating lessons."""
+
+        return _EXPERIENCE_SEPARATOR.sub(" ", self.lesson.casefold()).strip()
+
+    @model_validator(mode="after")
+    def validate_meaningful_lesson(self) -> "AstGrepExperience":
+        if not self.identity:
+            raise ValueError("experience lesson must contain query-writing text")
+        return self
 
 
 class Anchor(BaseModel):
@@ -113,7 +149,7 @@ class AnchorPlan(BaseModel):
 
 
 class AnchorSynthesisDelta(BaseModel):
-    """Query-only fields returned by one contract-bound Synthesizer."""
+    """Query fields and reusable ast-grep lessons returned by one Synthesizer."""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
@@ -122,6 +158,14 @@ class AnchorSynthesisDelta(BaseModel):
     query: str
     query_weight: int = Field(..., ge=1, le=5)
     adjustments: list[str]
+    experiences: list[AstGrepExperience] = Field(
+        default_factory=list,
+        max_length=MAX_SYNTHESIS_EXPERIENCES,
+        description=(
+            "At most three materially new, concise, project-independent ast-grep "
+            "query-writing lessons; empty by default and never repeats existing guidance"
+        ),
+    )
     plan_suggestion: str = Field(
         ...,
         description=(
@@ -129,6 +173,13 @@ class AnchorSynthesisDelta(BaseModel):
             "intents; normally an empty string"
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_unique_experiences(self) -> "AnchorSynthesisDelta":
+        identities = [experience.identity for experience in self.experiences]
+        if len(identities) != len(set(identities)):
+            raise ValueError("experiences must not contain duplicate query-writing lessons")
+        return self
 
 
 class AnchorSynthesisResult(BaseModel):
@@ -138,4 +189,8 @@ class AnchorSynthesisResult(BaseModel):
 
     anchor: Anchor
     adjustments: list[str]
+    experiences: list[AstGrepExperience] = Field(
+        default_factory=list,
+        max_length=MAX_SYNTHESIS_EXPERIENCES,
+    )
     plan_suggestion: str

@@ -158,7 +158,7 @@ Miner 按照以下确定性顺序执行：
 1. **问题收集（Issue Collection）**：收集问题描述、仓库来源以及有缺陷和已修复的 Commit。
 2. **根因分析（Root Cause Analysis）**：确定具体缺陷行为和修复模式，并提取最小原始用例及其变体。
 3. **规则生成（Rule Generation）**：生成规则摘要、相互独立的不安全/安全场景，并为因果链中每个不同、局部且规则敏感的位置生成不含查询语法的锚点意图。
-4. **AST-Grep 合成（AST-Grep Synthesis）**：在隔离且有界的 Synthesizer 上下文中逐个处理 intent。child 只返回一个目标 id 的 query 字段，host 与 canonical intent 组装 Anchor。
+4. **AST-Grep 合成（AST-Grep Synthesis）**：在隔离且有界的 Synthesizer 上下文中逐个处理 intent。child 返回一个目标 id 的 query 字段与简洁、可复用的 ast-grep 经验，host 与 canonical intent 组装 Anchor，并安全地把新经验合并回 Skill。
 5. **组装与验证（Assembly and Validation）**：使用权威 RCA、最新验收的 Anchor Plan、Rule Generation draft 和已验收 query delta 构建完整 VAS。
 6. **生成后锚点报告（Post-generation Anchor Report）**：独立生成用例覆盖和仓库热点报告。
 
@@ -166,7 +166,7 @@ Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Sy
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序并验收非空 query。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`，没有通用文件系统、shell、网络或继续 delegation 权限。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序并验收非空 query。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 会去重其有界经验列表，并在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
 
 ### Miner 模块职责
 

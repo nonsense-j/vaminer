@@ -90,7 +90,12 @@ kind: call_expression
 
 ### regex: Text-Based Node Matching
 
-The `regex` rule matches the entire text content of an AST node using a Rust regular expression. It's not a "positive" rule, meaning it matches any node whose text satisfies the regex, regardless of its structural kind.
+The `regex` rule matches the entire text content of an AST node using a Rust regular expression. It is not a positive rule and cannot establish the candidate AST kinds by itself, so a regex-only Rule Object is rejected. Pair it with `kind` in the same Rule Object:
+
+```yaml
+kind: identifier
+regex: ^printf$
+```
 
 ### nthChild: Positional Node Matching
 

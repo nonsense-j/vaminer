@@ -367,7 +367,15 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
         query: str,
         output: Literal["count", "sample", "full"] = "sample",
         sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
+        debug_query: Literal["pattern", "ast", "cst", "sexp"] | None = None,
     ) -> str:
+        """Test a raw pattern or YAML rule against a bound target.
+
+        Full output includes metavariable captures. debug_query exposes the
+        native pattern/AST/CST/S-expression tree on verbatim stderr and applies
+        only to raw pattern queries.
+        """
+
         if target not in {"src", "cases"}:
             raise ValueError("target must be 'src' or 'cases'")
         if (
@@ -387,6 +395,7 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
                 query=query,
                 output=output,
                 sample_size=sample_size,
+                debug_query=debug_query,
                 timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
             )
         except AstGrepQueryError:

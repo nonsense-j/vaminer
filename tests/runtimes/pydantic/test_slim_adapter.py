@@ -355,7 +355,11 @@ async def test_pydantic_ast_grep_tool_repairs_only_query_failures(
         root_cause=_root_cause(),
     )
 
-    def fail(*_args, **_kwargs):
+    captured: dict[str, object] = {}
+
+    def fail(target_dir, **kwargs):
+        captured["target_dir"] = target_dir
+        captured.update(kwargs)
         raise failure
 
     monkeypatch.setattr(pydantic_runtime, "run_ast_grep", fail)
@@ -367,8 +371,22 @@ async def test_pydantic_ast_grep_tool_repairs_only_query_failures(
     )
     tool = agent._function_toolset.tools["run_ast_grep_query"]
 
-    with pytest.raises(expected, match=str(failure)):
-        await tool.function("src", "c", "pattern", "copy($A)")
+    with pytest.raises(expected) as raised:
+        await tool.function(
+            "src",
+            "c",
+            "pattern",
+            "copy($A)",
+            output="full",
+            sample_size=7,
+            debug_query="sexp",
+        )
+
+    assert str(raised.value) == str(failure)
+    assert captured["target_dir"] == source
+    assert captured["output"] == "full"
+    assert captured["sample_size"] == 7
+    assert captured["debug_query"] == "sexp"
 
 
 @pytest.mark.asyncio
