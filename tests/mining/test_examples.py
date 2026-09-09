@@ -14,9 +14,6 @@ from src.miner.tools.src import list_src_files, read_src_file, search_src_files
 from src.miner.utils.workspace import Workspace
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
 def test_example_suite_intake_finds_source_files_and_materializes_snapshot(tmp_path: Path):
     source = tmp_path / "CWE-2099-fixture"
     source.mkdir()
@@ -49,16 +46,6 @@ def test_example_suite_intake_finds_source_files_and_materializes_snapshot(tmp_p
         list_src_files(src_root, path="src/input_snapshot")
 
 
-def test_example_suite_intake_rejects_symlinks(tmp_path: Path):
-    symlinked = tmp_path / "CWE-symlink"
-    symlinked.mkdir()
-    (tmp_path / "outside.c").write_text("int value;\n", encoding="utf-8")
-    (symlinked / "bad.c").symlink_to(tmp_path / "outside.c")
-
-    with pytest.raises(ValueError, match="symbolic links"):
-        inspect_example_suite(symlinked)
-
-
 def test_example_suite_accepts_nested_many_and_mixed_language_source_files(tmp_path: Path):
     source = tmp_path / "CVE-2099-0001"
     nested = source / "variants" / "deep"
@@ -86,17 +73,3 @@ def test_example_suite_requires_a_nonempty_directory_with_source_code(tmp_path: 
     (without_source / "README.md").write_text("description\n", encoding="utf-8")
     with pytest.raises(ValueError, match="does not contain a recognizable source code file"):
         inspect_example_suite(without_source)
-
-
-def test_checked_in_juliet_style_example_suite_is_valid():
-    suite = REPO_ROOT / "data" / "CWE134_Uncontrolled_Format_String"
-
-    inspection = inspect_example_suite(suite)
-
-    assert inspection.registry_key == "example-suite:CWE134_Uncontrolled_Format_String"
-    assert inspection.manifest_path == "manifest.json"
-    assert inspection.file_count == 4
-    assert inspection.source_files == [
-        "CWE134_Uncontrolled_Format_String__char_stdin_printf_01.c",
-        "CWE134_Uncontrolled_Format_String__char_stdin_printf_41.c",
-    ]

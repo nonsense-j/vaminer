@@ -33,6 +33,12 @@ def clip(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[:limit].rstrip() + " ... [truncated]"
 
 
+def _decode_stream(value: bytes) -> str:
+    """Decode CLI output consistently across native line-ending conventions."""
+
+    return value.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     stdout: str
@@ -137,8 +143,8 @@ class ProcessRunner:
         except TimeoutError as exc:
             raise ClaudeCodeTimeoutError(timeout_seconds, cli_name=self.cli_name) from exc
         return ProcessResult(
-            stdout=stdout.decode("utf-8", errors="replace"),
-            stderr=stderr.decode("utf-8", errors="replace"),
+            stdout=_decode_stream(stdout),
+            stderr=_decode_stream(stderr),
             returncode=returncode,
             duration_ms=round((time.monotonic() - started) * 1000),
         )

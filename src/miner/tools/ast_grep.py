@@ -189,6 +189,8 @@ def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> su
             command,
             cwd=root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
@@ -208,9 +210,8 @@ def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> su
 def _stream_text(value: str | bytes | None) -> str:
     if value is None:
         return ""
-    if isinstance(value, str):
-        return value
-    return value.decode("utf-8", errors="replace")
+    text = value if isinstance(value, str) else value.decode("utf-8", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _captured_output(completed: subprocess.CompletedProcess[str]) -> tuple[str, str]:
@@ -373,7 +374,7 @@ def run_ast_grep(
                     f"{start['line']}:{start['column']}-"
                     f"{end['line']}:{end['column']} <=="
                 ),
-                str(site["text"]).rstrip("\n"),
+                str(site["text"]).rstrip("\r\n"),
             )
         )
         for group, captures in site.get("meta_variables", {}).items():

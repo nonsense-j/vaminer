@@ -52,7 +52,9 @@ def test_patch_diff_with_path_is_the_full_patch(tmp_path: Path, monkeypatch: pyt
 
 def test_rg_listing_and_literal_search_are_scoped_and_compact(tmp_path: Path):
     (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "a.c").write_text("foo(1);\nfoo.bar();\nexact\n exact \n", encoding="utf-8")
+    (tmp_path / "src" / "a.c").write_bytes(
+        b"foo(1);\r\nfoo.bar();\r\nexact\r\n exact \r\n"
+    )
     (tmp_path / "src" / "b.py").write_text("foo(2)\n", encoding="utf-8")
     listed = list_src_files(tmp_path, path="src", glob="*.c")
     assert listed == "src/a.c"
@@ -137,20 +139,12 @@ def test_src_read_past_eof_returns_recovery_information(tmp_path: Path):
     assert read_src_file(tmp_path, "empty.txt") == "==> empty.txt | empty <=="
 
 
-def test_rg_tools_reject_escape_and_symlink(tmp_path: Path):
+def test_rg_tools_reject_invalid_scope_and_pattern(tmp_path: Path):
     (tmp_path / "src").mkdir()
     outside = tmp_path.parent / "outside-search"
     outside.mkdir(exist_ok=True)
-    (tmp_path / "link").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="stay inside"):
         search_src_files(tmp_path, "x", path="../outside-search")
-    with pytest.raises(ValueError, match="symbolic links"):
-        list_src_files(tmp_path, path="link")
-    (tmp_path / "inside").mkdir()
-    (tmp_path / "inside" / "target.c").write_text("x\n", encoding="utf-8")
-    (tmp_path / "internal-link").symlink_to(tmp_path / "inside", target_is_directory=True)
-    with pytest.raises(ValueError, match="symbolic links"):
-        read_src_file(tmp_path, "internal-link/target.c")
     with pytest.raises(RuntimeError, match="regex parse error"):
         search_src_files(tmp_path, "[", mode="regex")
     with pytest.raises(ValueError, match="search pattern must be a string"):

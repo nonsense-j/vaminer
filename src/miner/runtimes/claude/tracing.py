@@ -64,7 +64,7 @@ def session_transcripts(
             continue
         if resolved.name == f"{session_id}.jsonl" and resolved.is_file():
             transcripts.append(resolved)
-    return tuple(sorted(transcripts))
+    return tuple(sorted(transcripts, key=lambda path: path.as_posix()))
 
 
 def probe_bundled_hook(

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from git import Repo
+from git import Actor, Repo
 
 from src.miner.agent import AgentPhase, AgentRunResult, RuntimeIdentity
 from src.miner.mining.inputs import ExampleSuiteInput, IssueInput
@@ -34,7 +34,12 @@ class ScriptedRuntime:
             (repo_path / "bug.c").write_text("copy();\n", encoding="utf-8")
             repo = Repo.init(repo_path)
             repo.index.add(["bug.c"])
-            commit = repo.index.commit("buggy")
+            test_actor = Actor("VAMiner Tests", "tests@vaminer.invalid")
+            commit = repo.index.commit(
+                "buggy",
+                author=test_actor,
+                committer=test_actor,
+            )
             output = IssueCollectionInfo(
                 issue_id="CVE-2099-0001",
                 issue_summary="copy issue",

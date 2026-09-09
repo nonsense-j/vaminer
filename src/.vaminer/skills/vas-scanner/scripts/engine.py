@@ -203,6 +203,8 @@ def run_ast_grep(command: list[str], *, timeout_seconds: int = 60) -> subprocess
         return subprocess.run(
             command,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
@@ -230,10 +232,9 @@ def captured_output(
 
     normalized: dict[str, str] = {}
     for name, value in streams.items():
-        if isinstance(value, str):
-            normalized[name] = value
-        elif isinstance(value, bytes):
-            normalized[name] = value.decode("utf-8", errors="replace")
+        if isinstance(value, (str, bytes)):
+            text = value if isinstance(value, str) else value.decode("utf-8", errors="replace")
+            normalized[name] = text.replace("\r\n", "\n").replace("\r", "\n")
         else:
             raise AnchorExecutionError(
                 f"anchor {anchor_id!r} received an invalid ast-grep {name} value "

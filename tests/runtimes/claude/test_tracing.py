@@ -54,7 +54,7 @@ async def test_emit_session_trace_calls_bundled_api_in_process(
             "CC_LANGFUSE_TRACEPARENT": "00-0123456789abcdef0123456789abcdef-fedcba9876543210-01",
         },
         state_dir=tmp_path / "state",
-        executable="/usr/local/bin/codeagent",
+        executable="codeagent",
         display_name="Custom CodeAgent",
     )
 

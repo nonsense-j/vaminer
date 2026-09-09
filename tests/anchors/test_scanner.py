@@ -85,7 +85,7 @@ def test_packaged_scanner_accepts_all_disabled_rule(tmp_path: Path):
         repo,
         rules_dir=rules,
         workspace_dir=workspace,
-        ast_grep="/definitely/not/an/ast-grep-binary",
+        ast_grep="unused-ast-grep",
     )
     scan = json.loads((scan_dir / "scan.json").read_text(encoding="utf-8"))
 

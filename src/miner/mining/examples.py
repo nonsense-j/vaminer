@@ -73,7 +73,10 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
     """Inspect a resolved directory while retaining the original suite identity."""
 
     paths: list[Path] = []
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+    for path in sorted(
+        root.rglob("*"),
+        key=lambda item: item.relative_to(root).as_posix(),
+    ):
         if path.is_symlink():
             raise ValueError(f"example suite must not contain symbolic links: {path}")
         if path.is_dir():

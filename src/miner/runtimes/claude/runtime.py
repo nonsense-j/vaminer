@@ -89,7 +89,9 @@ async def _relay_synthesis_log(
                     runtime_log.relay(raw_line.decode("utf-8", errors="replace").rstrip("\r"))
                 if finished.is_set():
                     if pending:
-                        runtime_log.relay(bytes(pending).decode("utf-8", errors="replace"))
+                        runtime_log.relay(
+                            bytes(pending).decode("utf-8", errors="replace").rstrip("\r")
+                        )
                     return
                 try:
                     await asyncio.wait_for(finished.wait(), timeout=0.05)

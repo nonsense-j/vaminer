@@ -13,6 +13,7 @@ from git import GitCommandError, Repo
 
 from ..models.issue import RepoCheckout
 from ..utils.config import GITHUB_MIRROR_ENABLED
+from ..utils.paths import is_windows_reserved_name
 
 GITHUB_URL = "https://github.com/"
 GHFAST_GITHUB_URL = "https://ghfast.top/https://github.com/"
@@ -46,7 +47,8 @@ def _parse_repo_url(url: str) -> tuple[str, str]:
 
 def _safe_path_part(value: str, fallback: str) -> str:
     safe_value = SAFE_PATH_CHARS_RE.sub("_", value).strip("._-")
-    return safe_value or fallback
+    safe_value = safe_value or fallback
+    return f"_{safe_value}" if is_windows_reserved_name(safe_value) else safe_value
 
 
 def _is_github_https_url(url: str) -> bool:
@@ -170,6 +172,8 @@ def read_patch_diff_from_repo(
             command,
             cwd=repo_path,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout_seconds,
             check=False,

@@ -14,6 +14,7 @@ from typing import Any
 from ..models.vas import VASFull
 from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .log import logger
+from .paths import is_windows_reserved_name
 
 
 def _next_vas_id(registry: SourceRegistry) -> str:
@@ -53,9 +54,11 @@ def safe_input_id(source_id: str) -> str:
     if not source_id:
         raise ValueError("source id must be non-empty")
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_id).strip("-.")
-    if safe == source_id and len(safe) <= 120:
+    if safe == source_id and len(safe) <= 120 and not is_windows_reserved_name(safe):
         return safe
     digest = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
+    if is_windows_reserved_name(safe):
+        safe = f"_{safe}"
     prefix = (safe or "input")[:96].rstrip("-.")
     return f"{prefix}--{digest}"
 
@@ -70,7 +73,7 @@ class SourceRegistry:
         self.path = (base_dir or VAS_WORKSPACE_DIR) / "source_registry.json"
 
     def _load(self) -> dict[str, list[str]]:
-        return json.loads(self.path.read_text()) if self.path.exists() else {}
+        return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
     def _save(self, data: dict[str, list[str]]) -> None:
         atomic_write_json(self.path, data)
@@ -96,7 +99,7 @@ class ExampleSuiteRegistry:
         self.path = (base_dir or VAS_WORKSPACE_DIR) / "example_suite_registry.json"
 
     def _load(self) -> dict[str, dict[str, str]]:
-        return json.loads(self.path.read_text()) if self.path.exists() else {}
+        return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
     def _save(self, data: dict[str, dict[str, str]]) -> None:
         atomic_write_json(self.path, data)
@@ -306,7 +309,10 @@ class Workspace:
 
     def save_rule(self, vas: VASFull) -> Path:
         self.rule_path.parent.mkdir(parents=True, exist_ok=True)
-        self.rule_path.write_text(vas.model_dump_json(indent=2, by_alias=True))
+        self.rule_path.write_text(
+            vas.model_dump_json(indent=2, by_alias=True),
+            encoding="utf-8",
+        )
         return self.rule_path
 
     def clear_cases(self) -> None:

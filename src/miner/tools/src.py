@@ -122,6 +122,8 @@ def list_src_files(
             command,
             cwd=root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=20,
             check=False,
@@ -281,6 +283,8 @@ def search_src_files(
             command,
             cwd=root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=20,
             check=False,
@@ -319,9 +323,10 @@ def search_src_files(
             relative = Path(absolute).resolve().relative_to(root).as_posix()
         except ValueError:
             continue
-        source_lines[(relative, line_number)] = text.rstrip("\n")
+        normalized_text = text.rstrip("\r\n")
+        source_lines[(relative, line_number)] = normalized_text
         if event_type == "match":
-            matches.append((relative, line_number, text.rstrip("\n")))
+            matches.append((relative, line_number, normalized_text))
     matches.sort()
     selected_matches = matches[:max_results]
     selected_lines = {(file, line_number) for file, line_number, _ in selected_matches}

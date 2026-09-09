@@ -102,7 +102,10 @@ def list_skill_resources(
     resources: list[str] = []
     truncated = False
     with _skill_resource_lock(root, exclusive=False):
-        for candidate in sorted(root.rglob("*")):
+        for candidate in sorted(
+            root.rglob("*"),
+            key=lambda path: path.relative_to(root).as_posix(),
+        ):
             if candidate.is_symlink() or not candidate.is_file():
                 continue
             relative = candidate.relative_to(root)

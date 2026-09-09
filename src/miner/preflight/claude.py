@@ -96,6 +96,8 @@ def _run_cli(
         argv,
         env=environment,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         timeout=max(1.0, timeout_seconds),
         check=False,

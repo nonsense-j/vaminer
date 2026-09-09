@@ -128,20 +128,18 @@ class PolicyCompiler:
         return environment
 
     def resolve_executable(self, environment: dict[str, str]) -> str:
-        configured = os.fspath(self.config.executable)
-        if os.sep in configured:
-            path = Path(configured).expanduser().resolve()
-            if not path.is_file() or not os.access(path, os.X_OK):
+        configured = os.path.expanduser(os.fspath(self.config.executable))
+        resolved = shutil.which(configured, path=environment.get("PATH"))
+        if resolved is None:
+            if os.path.dirname(configured):
+                path = Path(configured).absolute()
                 raise ClaudeCodeConfigurationError(
                     f"{self.config.display_name} executable is not executable: {path}"
                 )
-            return str(path)
-        resolved = shutil.which(configured, path=environment.get("PATH"))
-        if resolved is None:
             raise ClaudeCodeConfigurationError(
                 f"{self.config.display_name} executable was not found on PATH: {configured}"
             )
-        return resolved
+        return str(Path(resolved).absolute())
 
     def runtime_binding(self, task: AgentTask[Any]) -> str:
         if task.phase is AgentPhase.ISSUE_COLLECTION:

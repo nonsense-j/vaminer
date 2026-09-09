@@ -44,3 +44,4 @@ def test_safe_input_id_preserves_cves_and_disambiguates_urls():
     assert safe_input_id("https://example.test/issues/1").startswith(
         "https-example.test-issues-1--"
     )
+    assert safe_input_id("CON.txt").startswith("_CON.txt--")

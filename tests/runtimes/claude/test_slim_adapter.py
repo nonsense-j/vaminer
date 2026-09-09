@@ -49,6 +49,8 @@ from src.miner.runtimes.claude.runtime import ClaudeCodeRuntime, _relay_synthesi
 from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
 from src.miner.utils.log import RuntimeLog
 
+PYTHON_EXECUTABLE = str(Path(sys.executable).resolve())
+
 
 class FakeServer:
     def __init__(self, _name: str) -> None:
@@ -102,7 +104,7 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
     )
     monkeypatch.setenv("VAMINER_TEST_SENTINEL", "visible")
-    compiler = PolicyCompiler(ClaudeCodeConfig(executable="/bin/true"))
+    compiler = PolicyCompiler(ClaudeCodeConfig(executable=PYTHON_EXECUTABLE))
     environment = compiler.environment()
     policy = compiler.compile(task)
     assert environment["VAMINER_TEST_SENTINEL"] == "visible"
@@ -112,21 +114,33 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
 
     temporary = tmp_path / "invocation"
     temporary.mkdir()
-    files = compiler.materialize(temporary, task=task, policy=policy, executable="/bin/true", model_id="session")
+    files = compiler.materialize(
+        temporary,
+        task=task,
+        policy=policy,
+        executable=PYTHON_EXECUTABLE,
+        model_id="session",
+    )
     materialized = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (files.system_prompt, files.settings, files.mcp)
     )
     assert "VAMINER_TEST_SENTINEL" not in materialized
     assert "visible" not in materialized
-    argv = compiler.argv(executable="/bin/true", task=task, policy=policy, files=files, model_id="session")
+    argv = compiler.argv(
+        executable=PYTHON_EXECUTABLE,
+        task=task,
+        policy=policy,
+        files=files,
+        model_id="session",
+    )
     assert "--strict-mcp-config" in argv
     assert "--skip-safe-check" not in argv
     assert "--no-session-persistence" not in argv
     assert argv[argv.index("--session-id") + 1] == files.session_id
     assert str(uuid.UUID(files.session_id)) == files.session_id
     resumed_argv = compiler.argv(
-        executable="/bin/true",
+        executable=PYTHON_EXECUTABLE,
         task=task,
         policy=policy,
         files=files,
@@ -147,7 +161,7 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
 
     codeagent_compiler = PolicyCompiler(ClaudeCodeConfig(executable="codeagent"))
     codeagent_argv = codeagent_compiler.argv(
-        executable="/usr/local/bin/codeagent",
+        executable="codeagent",
         task=task,
         policy=policy,
         files=files,
@@ -192,7 +206,7 @@ def test_policy_inherits_environment_and_exposes_only_typed_filesystem_tools(tmp
         traced_temporary,
         task=task,
         policy=policy,
-        executable="/bin/true",
+        executable=PYTHON_EXECUTABLE,
         model_id="session",
     )
     assert json.loads(traced_files.settings.read_text(encoding="utf-8"))["enabledPlugins"] == {
@@ -222,7 +236,7 @@ def test_rule_policy_materializes_synthesizer_log_channel(tmp_path: Path):
         temporary,
         task=task,
         policy=compiler.compile(task),
-        executable="/bin/true",
+        executable=PYTHON_EXECUTABLE,
         model_id="session",
     )
 
@@ -237,7 +251,7 @@ def test_rule_policy_materializes_synthesizer_log_channel(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_synthesizer_log_relay_forwards_complete_lines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     synthesis_log = tmp_path / "synthesis.log"
-    synthesis_log.write_text("first panel line\nsecond panel line\n", encoding="utf-8")
+    synthesis_log.write_bytes(b"first panel line\r\nsecond panel line\r\n")
     received = []
     runtime_log = RuntimeLog(emit_console=False)
     monkeypatch.setattr(runtime_log, "relay", received.append)
@@ -611,10 +625,10 @@ async def test_process_runner_relays_stdout_lines_before_exit(tmp_path: Path):
     marker = tmp_path / "continue"
     program = (
         "import os, time\n"
-        "print('first', flush=True)\n"
+        "os.write(1, b'first\\r\\n')\n"
         f"marker = {str(marker)!r}\n"
         "while not os.path.exists(marker): time.sleep(0.01)\n"
-        "print('second', flush=True)\n"
+        "os.write(1, b'second\\r\\n')\n"
     )
     received: list[str] = []
     first_line = asyncio.Event()
@@ -698,7 +712,9 @@ async def test_runtime_uses_ephemeral_invocation_and_returns_typed_delta(tmp_pat
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
         root_cause=_rca(),
     )
-    runtime = ClaudeCodeRuntime(ClaudeCodeConfig(executable="/bin/true", model="test-model"))
+    runtime = ClaudeCodeRuntime(
+        ClaudeCodeConfig(executable=PYTHON_EXECUTABLE, model="test-model")
+    )
 
     class Runner:
         async def run(self, *_args, **_kwargs):
@@ -748,7 +764,7 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
     )
     runtime = ClaudeCodeRuntime(
         ClaudeCodeConfig(
-            executable="/bin/true",
+            executable=PYTHON_EXECUTABLE,
             model="test-model",
             display_name="Internal Agent",
         )
@@ -836,7 +852,7 @@ async def test_synthesizer_retries_crashed_process_with_fresh_session(tmp_path: 
     )
     runtime = ClaudeCodeRuntime(
         ClaudeCodeConfig(
-            executable="/bin/true",
+            executable=PYTHON_EXECUTABLE,
             model="test-model",
             max_synthesis_process_retries=2,
         )
@@ -906,7 +922,9 @@ async def test_runtime_does_not_retry_broken_stream_protocol(tmp_path: Path):
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
         root_cause=_rca(),
     )
-    runtime = ClaudeCodeRuntime(ClaudeCodeConfig(executable="/bin/true", model="test-model"))
+    runtime = ClaudeCodeRuntime(
+        ClaudeCodeConfig(executable=PYTHON_EXECUTABLE, model="test-model")
+    )
 
     class Runner:
         calls = 0
@@ -946,7 +964,9 @@ async def test_runtime_propagates_fatal_tool_failure_before_accepting_empty_quer
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
         root_cause=_rca(),
     )
-    runtime = ClaudeCodeRuntime(ClaudeCodeConfig(executable="/bin/true", model="test-model"))
+    runtime = ClaudeCodeRuntime(
+        ClaudeCodeConfig(executable=PYTHON_EXECUTABLE, model="test-model")
+    )
 
     class Runner:
         async def run(self, argv, **_kwargs):

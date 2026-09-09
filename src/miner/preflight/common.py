@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import sys
 import tempfile
@@ -39,8 +38,12 @@ def check_paths(*, workspace_dir: Path, output_dir: Path, rules_dir: Path) -> Ch
         ancestor = _writable_ancestor(path)
         if ancestor is None or not ancestor.is_dir():
             problems.append(f"{label}: no existing parent directory")
-        elif not os.access(ancestor, os.W_OK | os.X_OK):
-            problems.append(f"{label}: parent is not writable ({ancestor})")
+        else:
+            try:
+                with tempfile.NamedTemporaryFile(dir=ancestor):
+                    pass
+            except OSError:
+                problems.append(f"{label}: parent is not writable ({ancestor})")
     if problems:
         return CheckResult.failed("paths", "Miner output paths are not writable", detail="; ".join(problems))
     return CheckResult.passed("paths", "Workspace, output, and rules paths have writable parents")
