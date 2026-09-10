@@ -13,7 +13,7 @@ from ..models.analysis import GroundingPolicy
 from ..models.issue import IssueCollectionInfo
 from ..utils.cache import AgentCache, load_agent_cache
 from ..utils.log import logger
-from ..utils.workspace import Workspace
+from ..utils.workspace import Workspace, compute_source_sha
 from .examples import (
     ExampleSuiteInspection,
     ExampleSuiteIntake,
@@ -39,7 +39,7 @@ InputT = TypeVar("InputT")
 
 @dataclass(frozen=True, slots=True)
 class PreparedAnalysis:
-    input_id: str
+    source_sha: str
     source_root: Path
     grounding_policy: GroundingPolicy
     source: IssueCollectionInfo | ExampleSuiteIntake
@@ -58,7 +58,6 @@ class InputRun:
             task.agent_name,
             self.workspace.cache_dir,
             runtime=identity.runtime_id,
-            model=identity.model_id,
         )
 
     def load(self, task: AgentTask[Any]) -> BaseModel | None:
@@ -113,14 +112,14 @@ class IssueInputAdapter:
     @staticmethod
     def resolve(value: IssueInput, *, workspace_dir: Path) -> tuple[str, str, IssueInput]:
         vas_id = Workspace.get_vas_id(value.reference, base_dir=workspace_dir)
-        return vas_id, value.reference, value
+        return vas_id, compute_source_sha("issue", value.reference), value
 
     async def prepare(self, value: IssueInput, run: InputRun) -> PreparedAnalysis:
         task = make_issue_collection_task(value.reference, workspace_root=run.workspace.root)
         collection = await run.load_or_execute(task)
         assert isinstance(collection, IssueCollectionInfo)
         return PreparedAnalysis(
-            input_id=value.reference,
+            source_sha=run.workspace.source_sha,
             source_root=Path(collection.repo_path).resolve(),
             grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
             source=collection,
@@ -130,10 +129,6 @@ class IssueInputAdapter:
 
 class ExampleSuiteInputAdapter:
     @staticmethod
-    def _input_id(suite_name: str) -> str:
-        return f"exp-{suite_name}"
-
-    @staticmethod
     def resolve(
         value: ExampleSuiteInput,
         *,
@@ -141,22 +136,22 @@ class ExampleSuiteInputAdapter:
     ) -> tuple[str, str, ExampleSuiteInspection]:
         inspection = inspect_example_suite(value.path)
         vas_id = Workspace.prepare_example_suite_vas_id(
-            inspection.registry_key,
+            inspection.exp_id,
             content_digest=inspection.content_digest,
             base_dir=workspace_dir,
         )
-        return vas_id, ExampleSuiteInputAdapter._input_id(inspection.suite_name), inspection
+        return vas_id, compute_source_sha("example_suite", inspection.exp_id), inspection
 
     async def prepare(self, value: ExampleSuiteInspection, run: InputRun) -> PreparedAnalysis:
         intake = materialize_example_suite(value, workspace=run.workspace)
         Workspace.register_example_suite(
-            value.registry_key,
+            value.exp_id,
             vas_id=run.workspace.vas_id,
             content_digest=value.content_digest,
             base_dir=run.workspace.root.parent,
         )
         return PreparedAnalysis(
-            input_id=self._input_id(value.suite_name),
+            source_sha=run.workspace.source_sha,
             source_root=Path(intake.snapshot_path).resolve(),
             grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
             source=intake,

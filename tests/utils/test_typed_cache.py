@@ -20,3 +20,4 @@ def test_typed_cache_uses_pure_acceptance(tmp_path: Path):
 
     assert load_agent_cache(cache, Value, validate, label="RCA") == Value(name="accepted")
     assert calls == ["accepted"]
+    assert cache.path.name == "rca__runtime.json"

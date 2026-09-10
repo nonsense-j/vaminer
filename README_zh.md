@@ -72,7 +72,7 @@ uv run python -m src.miner.main CVE-2024-XXXX
 uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
-也可以传入一个 Example Suite 目录。目录名（通常类似 CVE ID）用作 registry identity；目录内部可以平铺或包含任意层级的子目录，所有示例应共同表达同一个缺陷模式：
+也可以传入一个 Example Suite 目录。目录名（通常类似 CWE 或 CVE ID）就是 Example Suite 的 registry/cache identity；目录内部可以平铺或包含任意层级的子目录，所有示例应共同表达同一个缺陷模式：
 
 ```bash
 uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
@@ -112,7 +112,7 @@ src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 
 ```text
 output/
-├── miner/VAS-XXXX/<input-id>/
+├── miner/VAS-XXXX/<source-sha>/
 │   ├── caches/                         # Issue Collection、RCA、Rule Generation 三种缓存
 │   ├── logs/                           # 每次运行的 workflow 日志
 │   │   └── <trace-id>__<runtime>.log
@@ -120,6 +120,8 @@ output/
 ```
 
 启用 Langfuse 时，`<trace-id>` 就是整个 workflow 的 Langfuse Trace ID；未启用时，VAMINER 会生成相同格式的本地 ID。可以通过 `VAMINER_OUTPUT_DIR` 或 `--output-dir` 整体调整 `output/` 的位置。
+
+`<source-sha>` 是对 `issue_<issue-reference>` 或 `example_suite_<exp-id>` 计算 SHA-256 后取前 12 位十六进制字符。阶段缓存文件名为 `<agent>__<runtime>.json`，model 名称不参与 cache 标识。
 
 ## 在其他项目中运行生成的规则
 

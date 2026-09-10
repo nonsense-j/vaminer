@@ -14,7 +14,7 @@ from src.miner.tools.src import list_src_files, read_src_file, search_src_files
 from src.miner.utils.workspace import Workspace
 
 
-def test_example_suite_intake_finds_source_files_and_materializes_snapshot(tmp_path: Path):
+def test_example_suite_intake_materializes_verified_snapshot(tmp_path: Path):
     source = tmp_path / "CWE-2099-fixture"
     source.mkdir()
     (source / "bad.c").write_text("void f(void) { danger(1); }\n", encoding="utf-8")
@@ -29,8 +29,8 @@ def test_example_suite_intake_finds_source_files_and_materializes_snapshot(tmp_p
     inspection = inspect_example_suite(source)
     intake = materialize_example_suite(inspection, workspace=workspace)
 
-    assert inspection.registry_key == "example-suite:CWE-2099-fixture"
-    assert inspection.source_files == ["bad.c"]
+    assert inspection.exp_id == "CWE-2099-fixture"
+    assert inspection.file_paths == ["bad.c", "manifest.json"]
     assert inspection.manifest_path == "manifest.json"
     assert Path(intake.snapshot_path, "bad.c").read_text(encoding="utf-8") == "void f(void) { danger(1); }\n"
     assert intake.snapshot_ref == "src/input_snapshot"
@@ -46,7 +46,7 @@ def test_example_suite_intake_finds_source_files_and_materializes_snapshot(tmp_p
         list_src_files(src_root, path="src/input_snapshot")
 
 
-def test_example_suite_accepts_nested_many_and_mixed_language_source_files(tmp_path: Path):
+def test_example_suite_accepts_nested_many_and_mixed_language_files(tmp_path: Path):
     source = tmp_path / "CVE-2099-0001"
     nested = source / "variants" / "deep"
     nested.mkdir(parents=True)
@@ -57,9 +57,8 @@ def test_example_suite_accepts_nested_many_and_mixed_language_source_files(tmp_p
 
     inspection = inspect_example_suite(source)
 
-    assert inspection.registry_key == "example-suite:CVE-2099-0001"
-    assert inspection.file_count == 207
-    assert inspection.source_files == ["bad.c", "variants/deep/bad.py"]
+    assert inspection.exp_id == "CVE-2099-0001"
+    assert len(inspection.file_paths) == 207
 
 
 def test_example_suite_requires_a_nonempty_directory_with_source_code(tmp_path: Path):

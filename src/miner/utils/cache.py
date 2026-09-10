@@ -14,6 +14,8 @@ from .log import logger
 
 
 class AgentCache:
+    """One typed phase cache scoped by agent name and runtime identity."""
+
     def __init__(
         self,
         agent_name: str,
@@ -23,13 +25,14 @@ class AgentCache:
         runtime: str | None = None,
         model: str | None = None,
     ) -> None:
+        # Keep the argument for callers using the previous API. Model identity
+        # is intentionally not part of the persisted cache key anymore.
+        del model
         identity = [self._part(agent_name)]
         if runtime is not None:
             identity.append(self._part(runtime))
-        if model is not None:
-            identity.append(self._part(model))
         cache_dir.mkdir(parents=True, exist_ok=True)
-        self.path = cache_dir / f"{'.'.join(identity)}.{suffix}"
+        self.path = cache_dir / f"{'__'.join(identity)}.{suffix}"
 
     @staticmethod
     def _part(value: str) -> str:

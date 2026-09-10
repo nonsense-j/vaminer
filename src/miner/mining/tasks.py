@@ -193,8 +193,8 @@ def _root_cause_input_policy(
 ## Example Suite snapshot
 
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
-- `intake.files` is the exhaustive, authoritative list of files in the immutable Example Suite snapshot.{manifest}
-- Use only paths present in `intake.files`; never infer, invent, or probe another filename. Read file content through `read_src_file`; `full_file=true` may be used to return a complete file within the tool's byte limit.
+- `intake.file_paths` is the exhaustive, authoritative list of files in the immutable Example Suite snapshot.{manifest}
+- Use only paths present in `intake.file_paths`; never infer, invent, or probe another filename. Read file content through `read_src_file`; `full_file=true` may be used to return a complete file within the tool's byte limit.
 - The suite is a flexible collection of demonstrations that share one defect pattern. Files may be flat or nested, and there may be many bad/unsafe cases.
 - The suite may distinguish bad/unsafe from good/safe cases through filenames, directories, comments, labels, or its manifest. Treat those markers as navigation hints and verify behavior in the source.
 - Analyze and record every concrete bad/unsafe span. Use good/safe cases only as contrastive evidence for isolating the violated invariant; do not emit them as `buggy_components` or Case Artifacts.
@@ -321,14 +321,11 @@ def make_root_cause_task(
         intake = {
             "type": "example_suite",
             "source_layout": "example_suite_snapshot",
-            "registry_key": source.registry_key,
-            "suite_name": source.suite_name,
+            "exp_id": source.exp_id,
             "content_digest": source.content_digest,
             "snapshot_ref": source.snapshot_ref,
-            "file_count": source.file_count,
-            "source_file_count": len(source.source_files),
             "manifest_path": source.manifest_path,
-            "files": [metadata.path for metadata in source.files],
+            "file_paths": source.file_paths,
         }
     authority = RootCauseAuthority(
         source_root=source_root,
@@ -338,7 +335,7 @@ def make_root_cause_task(
         fixed_diff=bool(fixed_revision),
     )
     return AgentTask(
-        task_id=task_id or ("root-cause" if is_issue else f"example-suite-root-cause:{source.suite_name}"),
+        task_id=task_id or ("root-cause" if is_issue else f"root-cause:{source.exp_id}"),
         definition=ROOT_CAUSE,
         authority=authority,
         prompt=json.dumps(

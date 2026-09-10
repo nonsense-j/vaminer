@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from src.miner.utils.workspace import Workspace, safe_input_id
+from src.miner.utils.workspace import Workspace, compute_source_sha
 
 
 def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Path):
@@ -14,7 +14,7 @@ def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Pat
     workspace = Workspace.from_id(
         "VAS-0001",
         base_dir=tmp_path / "vas_ws" / "miner",
-        input_id="CVE-2099-0001",
+        source_sha=compute_source_sha("issue", "CVE-2099-0001"),
         output_root=tmp_path / "output",
         trace_id="0123456789abcdef0123456789abcdef",
     )
@@ -25,7 +25,7 @@ def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Pat
         / "output"
         / "miner"
         / "VAS-0001"
-        / "CVE-2099-0001"
+        / compute_source_sha("issue", "CVE-2099-0001")
         / "caches"
     )
     assert workspace.log_dir == (
@@ -33,15 +33,15 @@ def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Pat
         / "output"
         / "miner"
         / "VAS-0001"
-        / "CVE-2099-0001"
+        / compute_source_sha("issue", "CVE-2099-0001")
         / "logs"
     )
     assert not hasattr(workspace, "artifact_root")
 
 
-def test_safe_input_id_preserves_cves_and_disambiguates_urls():
-    assert safe_input_id("CVE-2099-0001") == "CVE-2099-0001"
-    assert safe_input_id("https://example.test/issues/1").startswith(
-        "https-example.test-issues-1--"
-    )
-    assert safe_input_id("CON.txt").startswith("_CON.txt--")
+def test_source_sha_is_typed_and_12_hex_characters():
+    issue = compute_source_sha("issue", "CVE-2099-0001")
+    example = compute_source_sha("example_suite", "CVE-2099-0001")
+    assert len(issue) == len(example) == 12
+    assert issue != example
+    assert all(character in "0123456789abcdef" for character in issue + example)

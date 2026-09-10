@@ -73,7 +73,7 @@ uv run python -m src.miner.main CVE-2024-XXXX
 uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
-You can also pass an Example Suite directory. Its basename (typically something like a CVE ID) is used as the registry identity. Files may be flat or arbitrarily nested, and all examples should demonstrate one shared defect pattern:
+You can also pass an Example Suite directory. Its canonical registry and cache identity is its basename (typically something like a CWE or CVE ID). Files may be flat or arbitrarily nested, and all examples should demonstrate one shared defect pattern:
 
 ```bash
 uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
@@ -113,7 +113,7 @@ Caches and diagnostics are kept outside the model workspace:
 
 ```text
 output/
-├── miner/VAS-XXXX/<input-id>/
+├── miner/VAS-XXXX/<source-sha>/
 │   ├── caches/                         # Issue Collection, RCA, and Rule Generation caches
 │   ├── logs/                           # Per-trace workflow logs
 │   │   └── <trace-id>__<runtime>.log
@@ -121,6 +121,8 @@ output/
 ```
 
 `<trace-id>` is the overall Langfuse workflow trace id when tracing is enabled. Without Langfuse, VAMINER generates a local id with the same format. Set `VAMINER_OUTPUT_DIR` or pass `--output-dir` to relocate the complete `output/` tree.
+
+`<source-sha>` is the first 12 hexadecimal characters of SHA-256 over `issue_<issue-reference>` or `example_suite_<exp-id>`. Phase cache files are named `<agent>__<runtime>.json`; the model name is not part of the cache identity.
 
 ## Run a Generated Rule on Another Project
 

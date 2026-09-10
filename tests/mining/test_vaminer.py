@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -16,15 +17,17 @@ from src.miner.models import (
     Scenarios,
     VASCoreInfo,
 )
+from src.miner.utils.workspace import compute_source_sha
 
 
 class ScriptedRuntime:
-    def __init__(self) -> None:
+    def __init__(self, *, model: str = "model") -> None:
         self.phases = []
+        self.model = model
 
     @property
     def identity(self) -> RuntimeIdentity:
-        return RuntimeIdentity("scripted", "model")
+        return RuntimeIdentity("scripted", self.model)
 
     async def run(self, task):
         self.phases.append(task.phase)
@@ -103,6 +106,7 @@ async def test_issue_and_example_inputs_share_one_post_prepare_workflow(tmp_path
     )
     assert issue_runtime.phases == [AgentPhase.ISSUE_COLLECTION, AgentPhase.ROOT_CAUSE, AgentPhase.RULE_GENERATION]
     assert issue_vas.sources[0].type == "issue"
+    assert issue_vas.sources[0].source_sha == compute_source_sha("issue", "CVE-2099-0001")
 
     suite = tmp_path / "suite" / "CWE-120"
     suite.mkdir(parents=True)
@@ -114,7 +118,21 @@ async def test_issue_and_example_inputs_share_one_post_prepare_workflow(tmp_path
     )
     assert example_runtime.phases == [AgentPhase.ROOT_CAUSE, AgentPhase.RULE_GENERATION]
     assert example_vas.sources[0].type == "example_suite"
-    run_dir = example_options.output_dir / "miner" / example_vas.vas_id / "exp-CWE-120"
+    assert example_vas.sources[0].exp_id == "CWE-120"
+    assert example_vas.sources[0].source_sha == compute_source_sha("example_suite", "CWE-120")
+    assert "suite_name" not in example_vas.sources[0].model_dump()
+    assert "files" not in example_vas.sources[0].model_dump()
+    example_registry = json.loads(
+        (example_options.workspace_dir / "example_suite_registry.json").read_text(encoding="utf-8")
+    )
+    assert example_registry["CWE-120"]["vas_id"] == example_vas.vas_id
+    assert not (example_options.workspace_dir / "source_registry.json").exists()
+    run_dir = (
+        example_options.output_dir
+        / "miner"
+        / example_vas.vas_id
+        / compute_source_sha("example_suite", "CWE-120")
+    )
     assert run_dir.is_dir()
     assert (run_dir / "caches").is_dir()
     assert (run_dir / "logs").is_dir()
@@ -130,6 +148,17 @@ async def test_cache_uses_runtime_identity_and_skips_agent_runs(tmp_path: Path):
     runtime.phases.clear()
     await miner.mine(IssueInput(reference="CVE-2099-0001"))
     assert runtime.phases == []
+
+
+@pytest.mark.asyncio
+async def test_cache_is_reused_across_model_changes_within_one_runtime(tmp_path: Path):
+    options = _options(tmp_path, cache=True)
+    await VAMiner(ScriptedRuntime(model="model-a"), options=options).mine(
+        IssueInput(reference="CVE-2099-0001")
+    )
+    second_runtime = ScriptedRuntime(model="model-b")
+    await VAMiner(second_runtime, options=options).mine(IssueInput(reference="CVE-2099-0001"))
+    assert second_runtime.phases == []
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,6 @@ from typing import Any
 from ..models.vas import VASFull
 from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .log import logger
-from .paths import is_windows_reserved_name
 
 
 def _next_vas_id(registry: SourceRegistry) -> str:
@@ -47,20 +46,11 @@ def atomic_write_json(path: Path, value: Any) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def safe_input_id(source_id: str) -> str:
-    """Return a readable, collision-resistant directory name for one source id."""
+def compute_source_sha(source_type: str, source_id: str) -> str:
+    """Return the 12-hex cache/workspace identity for one typed source."""
 
-    source_id = source_id.strip()
-    if not source_id:
-        raise ValueError("source id must be non-empty")
-    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", source_id).strip("-.")
-    if safe == source_id and len(safe) <= 120 and not is_windows_reserved_name(safe):
-        return safe
-    digest = hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:12]
-    if is_windows_reserved_name(safe):
-        safe = f"_{safe}"
-    prefix = (safe or "input")[:96].rstrip("-.")
-    return f"{prefix}--{digest}"
+    identity = f"{source_type}_{source_id.strip()}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
 
 
 class SourceRegistry:
@@ -93,7 +83,7 @@ class SourceRegistry:
 
 
 class ExampleSuiteRegistry:
-    """Maps example-suite keys to VAS IDs and immutable content digests."""
+    """Maps Example Suite ids to VAS IDs and immutable content digests."""
 
     def __init__(self, base_dir: Path | None = None) -> None:
         self.path = (base_dir or VAS_WORKSPACE_DIR) / "example_suite_registry.json"
@@ -104,12 +94,12 @@ class ExampleSuiteRegistry:
     def _save(self, data: dict[str, dict[str, str]]) -> None:
         atomic_write_json(self.path, data)
 
-    def lookup(self, registry_key: str) -> dict[str, str] | None:
-        return self._load().get(registry_key)
+    def lookup(self, exp_id: str) -> dict[str, str] | None:
+        return self._load().get(exp_id)
 
-    def register(self, registry_key: str, *, vas_id: str, content_digest: str) -> None:
+    def register(self, exp_id: str, *, vas_id: str, content_digest: str) -> None:
         data = self._load()
-        data[registry_key] = {
+        data[exp_id] = {
             "vas_id": vas_id,
             "content_digest": content_digest,
         }
@@ -126,7 +116,7 @@ class Workspace:
                 cases/                       # Extracted root-cause cases and simple variants
                 src/                         # Cloned repo or example-suite snapshot
         output/
-            miner/VAS-XXXX/<input-id>/       # Caches, review output, and logs
+            miner/VAS-XXXX/<source-sha>/      # Caches, review output, and logs
                 caches/
                 logs/                        # Per-trace workflow logs
         src/.vaminer/skills/vas-scanner/rules/
@@ -138,14 +128,14 @@ class Workspace:
         root: Path,
         vas_id: str,
         *,
-        input_id: str | None = None,
+        source_sha: str | None = None,
         output_root: Path | None = None,
         trace_id: str | None = None,
         rules_dir: Path | None = None,
     ) -> None:
         self.root = root
         self.vas_id = vas_id
-        self.input_id = safe_input_id(input_id or vas_id)
+        self.source_sha = source_sha or compute_source_sha("workspace", vas_id)
         self.output_root = (output_root or MINER_OUTPUT_DIR).expanduser().resolve()
         self.trace_id = trace_id
         self.rules_dir = (rules_dir or VAS_RULES_DIR).resolve()
@@ -165,7 +155,7 @@ class Workspace:
     @classmethod
     def prepare_example_suite_vas_id(
         cls,
-        registry_key: str,
+        exp_id: str,
         *,
         content_digest: str,
         base_dir: Path | None = None,
@@ -178,51 +168,44 @@ class Workspace:
         """
 
         base_dir = base_dir or VAS_WORKSPACE_DIR
-        source_registry = SourceRegistry(base_dir)
         suite_registry = ExampleSuiteRegistry(base_dir)
-        existing = suite_registry.lookup(registry_key)
+        existing = suite_registry.lookup(exp_id)
         if existing is not None:
             existing_digest = existing.get("content_digest")
             if existing_digest != content_digest:
                 raise ValueError(
-                    f"example suite {registry_key!r} is already registered with a different digest: "
+                    f"example suite {exp_id!r} is already registered with a different digest: "
                     f"{existing_digest} != {content_digest}"
                 )
             vas_id = existing["vas_id"]
-            logger.info("Example suite '%s' already registered as %s", registry_key, vas_id)
+            logger.info("Example suite '%s' already registered as %s", exp_id, vas_id)
             return vas_id
 
-        # Recover the authoritative workspace id if one registry write from an
-        # earlier run completed and the other did not.
-        source_vas_id = source_registry.lookup(registry_key)
-        if source_vas_id is not None:
-            return source_vas_id
-        return _next_vas_id(source_registry)
+        return _next_vas_id(SourceRegistry(base_dir))
 
     @classmethod
     def register_example_suite(
         cls,
-        registry_key: str,
+        exp_id: str,
         *,
         vas_id: str,
         content_digest: str,
         base_dir: Path | None = None,
     ) -> None:
-        """Atomically replace both generated registry files after publication."""
+        """Register an already-published Example Suite snapshot."""
 
         base_dir = base_dir or VAS_WORKSPACE_DIR
         workspace = cls.from_id(vas_id, base_dir=base_dir)
         if not workspace.example_suite_snapshot_dir.is_dir():
             raise ValueError("cannot register an example suite before its snapshot is published")
         suite_registry = ExampleSuiteRegistry(base_dir)
-        existing = suite_registry.lookup(registry_key)
+        existing = suite_registry.lookup(exp_id)
         if existing is not None and existing.get("content_digest") != content_digest:
             raise ValueError(
-                f"example suite {registry_key!r} is already registered with a different digest"
+                f"example suite {exp_id!r} is already registered with a different digest"
             )
-        SourceRegistry(base_dir).register(vas_id, registry_key)
         suite_registry.register(
-            registry_key,
+            exp_id,
             vas_id=vas_id,
             content_digest=content_digest,
         )
@@ -261,7 +244,7 @@ class Workspace:
         vas_id: str,
         base_dir: Path | None = None,
         *,
-        input_id: str | None = None,
+        source_sha: str | None = None,
         output_root: Path | None = None,
         trace_id: str | None = None,
         rules_dir: Path | None = None,
@@ -272,7 +255,7 @@ class Workspace:
         return cls(
             root,
             vas_id,
-            input_id=input_id,
+            source_sha=source_sha,
             output_root=output_root,
             trace_id=trace_id,
             rules_dir=rules_dir,
@@ -284,7 +267,7 @@ class Workspace:
 
     @property
     def run_output_dir(self) -> Path:
-        return self.output_root / "miner" / self.vas_id / self.input_id
+        return self.output_root / "miner" / self.vas_id / self.source_sha
 
     @property
     def cache_dir(self) -> Path:

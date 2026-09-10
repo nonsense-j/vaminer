@@ -23,7 +23,6 @@ from .issue import (
     RepoCheckout,
 )
 from .vas import (
-    ExampleSuiteFileMetadata,
     ExampleSuiteVASSource,
     IssueCategory,
     IssueVASSource,
@@ -45,7 +44,6 @@ __all__ = [
     "AstGrepLanguage",
     "BuggyComponent",
     "CommitRawInfo",
-    "ExampleSuiteFileMetadata",
     "ExampleSuiteVASSource",
     "GroundingPolicy",
     "IssueCategory",

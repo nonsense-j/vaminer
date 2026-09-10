@@ -11,7 +11,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..models.vas import ExampleSuiteFileMetadata
 from ..utils.workspace import Workspace
 
 _SOURCE_SUFFIXES = frozenset(
@@ -46,19 +45,24 @@ _SOURCE_SUFFIXES = frozenset(
 _MANIFEST_NAMES = ("manifest.json", "manifest.yaml", "manifest.yml")
 
 
+def example_suite_exp_id(basename: str) -> str:
+    """Return the canonical Example Suite id derived from its directory name."""
+
+    return basename
+
+
 class ExampleSuiteInspection(BaseModel):
     """Observed metadata over an input directory before workspace materialization."""
 
     model_config = ConfigDict(extra="forbid")
 
-    registry_key: str = Field(..., description="Stable registry key derived from the directory name")
-    suite_name: str
+    exp_id: str = Field(
+        ...,
+        description="Canonical Example Suite id derived from the directory name",
+    )
     source_path: str
     content_digest: str
-    file_count: int
-    total_bytes: int
-    source_files: list[str]
-    files: list[ExampleSuiteFileMetadata]
+    file_paths: list[str]
     manifest_path: str | None = None
 
 
@@ -69,8 +73,8 @@ class ExampleSuiteIntake(ExampleSuiteInspection):
     snapshot_ref: str
 
 
-def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) -> ExampleSuiteInspection:
-    """Inspect a resolved directory while retaining the original suite identity."""
+def _inspect_example_suite(root: Path, *, exp_id: str, source_path: Path) -> ExampleSuiteInspection:
+    """Inspect a resolved directory while retaining its canonical Example Suite id."""
 
     paths: list[Path] = []
     for path in sorted(
@@ -90,26 +94,17 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
 
     if not paths:
         raise ValueError("example suite does not contain any regular files")
-    total_bytes = 0
-    source_files: list[str] = []
+    has_source = False
     digest = hashlib.sha256()
-    file_metadata: list[ExampleSuiteFileMetadata] = []
+    file_paths: list[str] = []
     for path in paths:
         relative = path.resolve().relative_to(root).as_posix()
         size = path.stat().st_size
-        total_bytes += size
         is_source = path.suffix.lower() in _SOURCE_SUFFIXES
         if is_source:
-            source_files.append(relative)
+            has_source = True
+        file_paths.append(relative)
         content = path.read_bytes()
-        file_metadata.append(
-            ExampleSuiteFileMetadata(
-                path=relative,
-                size=size,
-                sha256=hashlib.sha256(content).hexdigest(),
-                source=is_source,
-            )
-        )
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(str(size).encode("ascii"))
@@ -117,17 +112,13 @@ def _inspect_example_suite(root: Path, *, suite_name: str, source_path: Path) ->
         digest.update(content)
         digest.update(b"\0")
 
-    if not source_files:
+    if not has_source:
         raise ValueError("example suite does not contain a recognizable source code file")
     return ExampleSuiteInspection(
-        registry_key=f"example-suite:{suite_name}",
-        suite_name=suite_name,
+        exp_id=exp_id,
         source_path=source_path.as_posix(),
         content_digest=digest.hexdigest(),
-        file_count=len(paths),
-        total_bytes=total_bytes,
-        source_files=sorted(source_files),
-        files=file_metadata,
+        file_paths=file_paths,
         manifest_path=next((path for path in _MANIFEST_NAMES if (root / path).is_file()), None),
     )
 
@@ -143,7 +134,11 @@ def inspect_example_suite(example_suite: Path) -> ExampleSuiteInspection:
         raise ValueError(f"example suite is not an existing directory: {example_suite}")
     if not root.name:
         raise ValueError(f"example suite must have a stable basename: {example_suite}")
-    return _inspect_example_suite(root, suite_name=root.name, source_path=root)
+    return _inspect_example_suite(
+        root,
+        exp_id=example_suite_exp_id(root.name),
+        source_path=root,
+    )
 
 
 def _same_snapshot(
@@ -153,7 +148,7 @@ def _same_snapshot(
     try:
         copied = _inspect_example_suite(
             snapshot.resolve(),
-            suite_name=inspection.suite_name,
+            exp_id=inspection.exp_id,
             source_path=Path(inspection.source_path),
         )
     except (OSError, ValueError):
@@ -210,6 +205,7 @@ def materialize_example_suite(
 __all__ = [
     "ExampleSuiteInspection",
     "ExampleSuiteIntake",
+    "example_suite_exp_id",
     "inspect_example_suite",
     "materialize_example_suite",
 ]

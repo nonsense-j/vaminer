@@ -53,7 +53,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Directory of related good/bad examples. Mutually exclusive with issue inputs.",
     )
-    parser.add_argument("--use-cache", action="store_true", help="Use valid runtime/model-scoped cached outputs.")
+    parser.add_argument("--use-cache", action="store_true", help="Use valid runtime-scoped cached outputs.")
     parser.add_argument(
         "--runtime",
         choices=RUNTIME_IDS,

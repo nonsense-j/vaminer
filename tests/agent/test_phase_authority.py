@@ -94,12 +94,15 @@ def test_example_suite_root_cause_task_builds_bounded_typed_intake(tmp_path: Pat
 
     payload = json.loads(task.prompt)
     assert payload["intake"]["source_layout"] == "example_suite_snapshot"
-    assert payload["intake"]["file_count"] == 3
-    assert payload["intake"]["source_file_count"] == 2
-    assert payload["intake"]["files"] == ["bad.c", "manifest.json", "nested/good.c"]
+    assert payload["intake"]["exp_id"] == "input_snapshot"
+    assert payload["intake"]["file_paths"] == ["bad.c", "manifest.json", "nested/good.c"]
     assert "danger();" not in task.prompt
     assert "safe();" not in task.prompt
     assert "source_files" not in payload["intake"]
+    assert "file_count" not in payload["intake"]
+    assert "source_file_count" not in payload["intake"]
+    assert "registry_key" not in task.prompt
+    assert "example-suite:" not in task.prompt
     assert payload["src_tools"] == {
         "root": source_root.resolve().as_posix(),
         "path_arguments": "relative_to_root",

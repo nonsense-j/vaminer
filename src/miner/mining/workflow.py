@@ -38,6 +38,7 @@ def _assemble_vas(vas_id: str, prepared: PreparedAnalysis, core: VASCoreInfo) ->
     if isinstance(prepared.source, IssueCollectionInfo):
         source = IssueVASSource(
             issue_id=prepared.source.issue_id,
+            source_sha=prepared.source_sha,
             repo_url=prepared.source.repo_url,
             buggy_commit=prepared.source.buggy_commit,
             fixed_commit=prepared.source.fixed_commit,
@@ -45,11 +46,10 @@ def _assemble_vas(vas_id: str, prepared: PreparedAnalysis, core: VASCoreInfo) ->
         )
     else:
         source = ExampleSuiteVASSource(
-            registry_key=prepared.source.registry_key,
-            suite_name=prepared.source.suite_name,
+            exp_id=prepared.source.exp_id,
+            source_sha=prepared.source_sha,
             content_digest=prepared.source.content_digest,
             snapshot_ref=prepared.source.snapshot_ref,
-            files=prepared.source.files,
             root_cause_summary=core.root_cause_summary,
         )
     return VASFull(
@@ -147,12 +147,12 @@ class VAMiner:
             mining_input=value,
             runtime_id=self.runtime.identity.runtime_id,
         ) as pipeline:
-            vas_id, input_id, resolved = self._resolve(value)
+            vas_id, source_sha, resolved = self._resolve(value)
             with pipeline.bind(vas_id):
                 workspace = Workspace.from_id(
                     vas_id,
                     base_dir=self.options.workspace_dir.expanduser().resolve(),
-                    input_id=input_id,
+                    source_sha=source_sha,
                     output_root=output_dir,
                     trace_id=pipeline.trace_id,
                     rules_dir=self.options.rules_dir.expanduser().resolve(),
@@ -162,7 +162,11 @@ class VAMiner:
                     trace_id=pipeline.trace_id,
                     runtime=self.runtime.identity.runtime_id,
                 ) as log_path:
-                    logger.info("Starting VAMiner input=%s runtime=%s", input_id, self.runtime.identity.runtime_id)
+                    logger.info(
+                        "Starting VAMiner source_sha=%s runtime=%s",
+                        source_sha,
+                        self.runtime.identity.runtime_id,
+                    )
                     logger.info("Trace ID: %s; run log: %s", pipeline.trace_id, log_path)
                     vas = await self._mine_in_workspace(resolved, workspace=workspace)
                     pipeline.update(output=vas.model_dump(mode="json"))

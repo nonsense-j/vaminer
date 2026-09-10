@@ -22,32 +22,21 @@ class IssueVASSource(BaseModel):
 
     type: Literal["issue"] = "issue"
     issue_id: str
+    source_sha: str = Field(..., pattern=r"^[0-9a-f]{12}$")
     repo_url: str
     buggy_commit: str
     fixed_commit: str | None = None
     root_cause_summary: str
 
 
-class ExampleSuiteFileMetadata(BaseModel):
-    """Portable metadata for one file accepted into an Example suite snapshot."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    path: str
-    size: int = Field(..., ge=0)
-    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    source: bool
-
-
 class ExampleSuiteVASSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["example_suite"] = "example_suite"
-    registry_key: str
-    suite_name: str
+    exp_id: str = Field(..., min_length=1)
+    source_sha: str = Field(..., pattern=r"^[0-9a-f]{12}$")
     content_digest: str = Field(..., pattern=r"^[0-9a-f]{64}$")
     snapshot_ref: str
-    files: list[ExampleSuiteFileMetadata] = Field(..., min_length=1)
     root_cause_summary: str
 
 
