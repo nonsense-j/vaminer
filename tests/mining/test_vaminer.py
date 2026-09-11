@@ -122,11 +122,17 @@ async def test_issue_and_example_inputs_share_one_post_prepare_workflow(tmp_path
     assert example_vas.sources[0].source_sha == compute_source_sha("example_suite", "CWE-120")
     assert "suite_name" not in example_vas.sources[0].model_dump()
     assert "files" not in example_vas.sources[0].model_dump()
-    example_registry = json.loads(
-        (example_options.workspace_dir / "example_suite_registry.json").read_text(encoding="utf-8")
+    source_registry = json.loads(
+        (example_options.workspace_dir / "source_registry.json").read_text(encoding="utf-8")
     )
-    assert example_registry["CWE-120"]["vas_id"] == example_vas.vas_id
-    assert not (example_options.workspace_dir / "source_registry.json").exists()
+    assert source_registry[example_vas.vas_id] == [
+        {
+            "type": "example_suite",
+            "exp_id": "CWE-120",
+            "content_digest": example_vas.sources[0].content_digest,
+        }
+    ]
+    assert not (example_options.workspace_dir / "example_suite_registry.json").exists()
     run_dir = (
         example_options.output_dir
         / "miner"

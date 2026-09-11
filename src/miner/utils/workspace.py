@@ -9,11 +9,13 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..models.vas import VASFull
 from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .log import logger
+
+SourceType = Literal["issue", "example_suite"]
 
 
 def _next_vas_id(registry: SourceRegistry) -> str:
@@ -54,60 +56,94 @@ def compute_source_sha(source_type: str, source_id: str) -> str:
 
 
 class SourceRegistry:
-    """Maps source identifiers (CVE IDs, URLs) to VAS IDs.
+    """Maps typed source identifiers to VAS IDs.
 
     Stored as `source_registry.json` at the vas_ws root.
+
+    The registry is keyed by VAS ID so one VAS can retain multiple source
+    aliases.
     """
 
     def __init__(self, base_dir: Path | None = None) -> None:
         self.path = (base_dir or VAS_WORKSPACE_DIR) / "source_registry.json"
 
-    def _load(self) -> dict[str, list[str]]:
+    def _load(self) -> dict[str, list[dict[str, str]]]:
         return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
 
-    def _save(self, data: dict[str, list[str]]) -> None:
+    def _save(self, data: dict[str, list[dict[str, str]]]) -> None:
         atomic_write_json(self.path, data)
 
-    def lookup(self, source: str) -> str | None:
-        for vas_id, sources in self._load().items():
-            if source in sources:
-                return vas_id
+    @staticmethod
+    def _source_field(source_type: SourceType) -> str:
+        return {"issue": "issue_id", "example_suite": "exp_id"}[source_type]
+
+    def _find(
+        self,
+        data: dict[str, list[dict[str, str]]],
+        source_type: SourceType,
+        source_id: str,
+    ) -> tuple[str, dict[str, str]] | None:
+        field = self._source_field(source_type)
+        for vas_id, sources in data.items():
+            for source in sources:
+                if source.get("type") == source_type and source.get(field) == source_id:
+                    return vas_id, source
         return None
 
-    def register(self, vas_id: str, source: str) -> None:
+    def lookup(
+        self,
+        source_type: SourceType,
+        source_id: str,
+        *,
+        content_digest: str | None = None,
+    ) -> str | None:
+        found = self._find(self._load(), source_type, source_id)
+        if found is None:
+            return None
+        vas_id, source = found
+        if source_type == "example_suite" and source.get("content_digest") != content_digest:
+            raise ValueError(
+                f"example suite {source_id!r} is already registered with a different digest: "
+                f"{source.get('content_digest')} != {content_digest}"
+            )
+        return vas_id
+
+    def register(
+        self,
+        vas_id: str,
+        source_type: SourceType,
+        source_id: str,
+        *,
+        content_digest: str | None = None,
+    ) -> None:
+        field = self._source_field(source_type)
+        if source_type == "example_suite" and content_digest is None:
+            raise ValueError("Example Suite sources require a content digest")
+
         data = self._load()
-        data.setdefault(vas_id, [])
-        if source not in data[vas_id]:
-            data[vas_id].append(source)
-        self._save(data)
+        existing = self._find(data, source_type, source_id)
+        if existing is not None:
+            registered_vas_id, source = existing
+            if source_type == "example_suite" and source.get("content_digest") != content_digest:
+                raise ValueError(
+                    f"example suite {source_id!r} is already registered with a different digest"
+                )
+            if registered_vas_id != vas_id:
+                raise ValueError(
+                    f"{source_type} source {source_id!r} is already registered as {registered_vas_id}"
+                )
+            return
 
-
-class ExampleSuiteRegistry:
-    """Maps Example Suite ids to VAS IDs and immutable content digests."""
-
-    def __init__(self, base_dir: Path | None = None) -> None:
-        self.path = (base_dir or VAS_WORKSPACE_DIR) / "example_suite_registry.json"
-
-    def _load(self) -> dict[str, dict[str, str]]:
-        return json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
-
-    def _save(self, data: dict[str, dict[str, str]]) -> None:
-        atomic_write_json(self.path, data)
-
-    def lookup(self, exp_id: str) -> dict[str, str] | None:
-        return self._load().get(exp_id)
-
-    def register(self, exp_id: str, *, vas_id: str, content_digest: str) -> None:
-        data = self._load()
-        data[exp_id] = {
-            "vas_id": vas_id,
-            "content_digest": content_digest,
-        }
+        entry = {"type": source_type, field: source_id}
+        if source_type == "example_suite":
+            assert content_digest is not None
+            entry["content_digest"] = content_digest
+        data.setdefault(vas_id, []).append(entry)
         self._save(data)
 
 
 class Workspace:
-    """Isolated workspace for a single issue analysis.
+    """Isolated workspace for a single source analysis.
 
     Layout:
         vas_ws/
@@ -144,12 +180,12 @@ class Workspace:
     def get_vas_id(cls, source: str, base_dir: Path | None = None) -> str:
         base_dir = base_dir or VAS_WORKSPACE_DIR
         registry = SourceRegistry(base_dir)
-        existing_id = registry.lookup(source)
+        existing_id = registry.lookup("issue", source)
         if existing_id:
             logger.info("Source '%s' already registered as %s", source, existing_id)
             return existing_id
         ws = cls._create_new(base_dir, registry)
-        registry.register(ws.vas_id, source)
+        registry.register(ws.vas_id, "issue", source)
         return ws.vas_id
 
     @classmethod
@@ -168,20 +204,17 @@ class Workspace:
         """
 
         base_dir = base_dir or VAS_WORKSPACE_DIR
-        suite_registry = ExampleSuiteRegistry(base_dir)
-        existing = suite_registry.lookup(exp_id)
-        if existing is not None:
-            existing_digest = existing.get("content_digest")
-            if existing_digest != content_digest:
-                raise ValueError(
-                    f"example suite {exp_id!r} is already registered with a different digest: "
-                    f"{existing_digest} != {content_digest}"
-                )
-            vas_id = existing["vas_id"]
+        registry = SourceRegistry(base_dir)
+        vas_id = registry.lookup(
+            "example_suite",
+            exp_id,
+            content_digest=content_digest,
+        )
+        if vas_id is not None:
             logger.info("Example suite '%s' already registered as %s", exp_id, vas_id)
             return vas_id
 
-        return _next_vas_id(SourceRegistry(base_dir))
+        return _next_vas_id(registry)
 
     @classmethod
     def register_example_suite(
@@ -198,15 +231,10 @@ class Workspace:
         workspace = cls.from_id(vas_id, base_dir=base_dir)
         if not workspace.example_suite_snapshot_dir.is_dir():
             raise ValueError("cannot register an example suite before its snapshot is published")
-        suite_registry = ExampleSuiteRegistry(base_dir)
-        existing = suite_registry.lookup(exp_id)
-        if existing is not None and existing.get("content_digest") != content_digest:
-            raise ValueError(
-                f"example suite {exp_id!r} is already registered with a different digest"
-            )
-        suite_registry.register(
+        SourceRegistry(base_dir).register(
+            vas_id,
+            "example_suite",
             exp_id,
-            vas_id=vas_id,
             content_digest=content_digest,
         )
 

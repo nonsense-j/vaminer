@@ -1,8 +1,11 @@
 """Tests for the minimal model workspace and external output layout."""
 
+import json
 from pathlib import Path
 
-from src.miner.utils.workspace import Workspace, compute_source_sha
+import pytest
+
+from src.miner.utils.workspace import SourceRegistry, Workspace, compute_source_sha
 
 
 def test_workspace_keeps_only_src_and_cases_and_externalizes_cache(tmp_path: Path):
@@ -45,3 +48,43 @@ def test_source_sha_is_typed_and_12_hex_characters():
     assert len(issue) == len(example) == 12
     assert issue != example
     assert all(character in "0123456789abcdef" for character in issue + example)
+
+
+def test_source_registry_keeps_issue_and_example_ids_typed(tmp_path: Path):
+    registry = SourceRegistry(tmp_path)
+    digest = "a" * 64
+
+    registry.register("VAS-0001", "issue", "CVE-2099-0001")
+    registry.register(
+        "VAS-0002",
+        "example_suite",
+        "CVE-2099-0001",
+        content_digest=digest,
+    )
+
+    assert registry.lookup("issue", "CVE-2099-0001") == "VAS-0001"
+    assert (
+        registry.lookup(
+            "example_suite",
+            "CVE-2099-0001",
+            content_digest=digest,
+        )
+        == "VAS-0002"
+    )
+    assert json.loads((tmp_path / "source_registry.json").read_text(encoding="utf-8")) == {
+        "VAS-0001": [{"type": "issue", "issue_id": "CVE-2099-0001"}],
+        "VAS-0002": [
+            {
+                "type": "example_suite",
+                "exp_id": "CVE-2099-0001",
+                "content_digest": digest,
+            }
+        ],
+    }
+
+    with pytest.raises(ValueError, match="different digest"):
+        registry.lookup(
+            "example_suite",
+            "CVE-2099-0001",
+            content_digest="b" * 64,
+        )
