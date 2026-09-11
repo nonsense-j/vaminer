@@ -18,7 +18,7 @@ _VALIDATION_CASE_EXCERPT_LINE_LIMIT = 60
 _VALIDATION_CASE_EXCERPT_CHAR_LIMIT = 4_000
 _VALIDATION_RCA_COMPONENT_LIMIT = 8
 _VALIDATION_RCA_SNIPPET_CHAR_LIMIT = 2_000
-_VALIDATION_MIN_ANCHOR_WEIGHT = 2
+_VALIDATION_MIN_ANCHOR_WEIGHT = 3
 
 
 def _bounded_text(value: str, limit: int) -> str:
@@ -132,7 +132,7 @@ def disabled_anchor_ids(value: VASCoreInfo) -> tuple[str, ...]:
 
 
 def disabled_anchor_warnings(value: VASCoreInfo) -> tuple[str, ...]:
-    """Return stable warnings for a publishable degraded VAS."""
+    """Return stable warnings for anchors intentionally disabled by empty queries."""
     disabled = disabled_anchor_ids(value)
     if not disabled:
         return ()
@@ -143,9 +143,6 @@ def disabled_anchor_warnings(value: VASCoreInfo) -> tuple[str, ...]:
         )
         for anchor_id in disabled
     ]
-    warnings.append(
-        "collective case and source-file admission are advisory while disabled anchors exist"
-    )
     return tuple(warnings)
 
 
@@ -216,7 +213,7 @@ def validate_anchors(
         )
     }
     missing_cases = sorted(set(case_files) - admitted_case_files)
-    if missing_cases and not disabled_ids:
+    if missing_cases:
         errors.extend(
             (
                 "case files are not admitted by any anchor with query_weight >= "

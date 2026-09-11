@@ -141,24 +141,24 @@ async def test_issue_and_example_inputs_share_one_post_prepare_workflow(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_cache_uses_runtime_identity_and_skips_agent_runs(tmp_path: Path):
+async def test_cache_rejects_rule_generation_without_case_admission(tmp_path: Path):
     runtime = ScriptedRuntime()
     miner = VAMiner(runtime, options=_options(tmp_path, cache=True))
     await miner.mine(IssueInput(reference="CVE-2099-0001"))
     runtime.phases.clear()
     await miner.mine(IssueInput(reference="CVE-2099-0001"))
-    assert runtime.phases == []
+    assert runtime.phases == [AgentPhase.RULE_GENERATION]
 
 
 @pytest.mark.asyncio
-async def test_cache_is_reused_across_model_changes_within_one_runtime(tmp_path: Path):
+async def test_cache_rejects_uncovered_rule_generation_across_model_changes(tmp_path: Path):
     options = _options(tmp_path, cache=True)
     await VAMiner(ScriptedRuntime(model="model-a"), options=options).mine(
         IssueInput(reference="CVE-2099-0001")
     )
     second_runtime = ScriptedRuntime(model="model-b")
     await VAMiner(second_runtime, options=options).mine(IssueInput(reference="CVE-2099-0001"))
-    assert second_runtime.phases == []
+    assert second_runtime.phases == [AgentPhase.RULE_GENERATION]
 
 
 @pytest.mark.asyncio

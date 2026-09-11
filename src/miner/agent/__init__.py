@@ -3,6 +3,7 @@
 from .contracts import (
     AgentPhase,
     AgentRunResult,
+    AgentSession,
     AgentRuntime,
     AgentTask,
     AnchorSynthesisAuthority,
@@ -21,6 +22,7 @@ from .schema import descriptive_json_schema
 __all__ = [
     "AgentPhase",
     "AgentRunResult",
+    "AgentSession",
     "AgentRuntime",
     "AgentTask",
     "AnchorSynthesisAuthority",

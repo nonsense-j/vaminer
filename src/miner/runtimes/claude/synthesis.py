@@ -121,7 +121,7 @@ def load_claude_synthesis_handler(path: Path) -> ClaudeSynthesisHandler:
         grounding_policy=context.grounding_policy,
         root_cause=context.root_cause,
     )
-    session = AnchorSynthesisSession(authority, workspace_root=context.workspace_root, execute=runtime.run)
+    session = AnchorSynthesisSession(authority, workspace_root=context.workspace_root, runtime=runtime)
 
     async def synthesize(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
         try:

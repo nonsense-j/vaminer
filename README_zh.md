@@ -168,7 +168,7 @@ Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Sy
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序并验收非空 query。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 会去重其有界经验列表，并在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 都没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 会去重其有界经验列表，并在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
 
 ### Miner 模块职责
 
@@ -252,7 +252,7 @@ MINER_MAX_TURNS_RULE_GENERATION=30
 MINER_MAX_TURNS_PER_ANCHOR=30
 ```
 
-Issue Collector 和 Root Cause Analyzer 各自拥有 40 Turns 的独立预算。Rule Generator 拥有独立的 30 Turns 父级预算，每个逐锚点 Synthesizer 运行也拥有各自独立的 30 Turns 上限。在两个 Runtime 中，委派的 Synthesizer Turns 都不会消耗正在等待的 Rule Generator 预算。最多并行运行 5 个锚点，一次合成请求最多包含 8 个意图。
+Issue Collector 和 Root Cause Analyzer 各自拥有 40 Turns 的独立预算。Rule Generator 拥有独立的 30 Turns 父级预算，每个逐锚点 Synthesizer 运行也拥有各自独立的 30 Turns 上限。在两个 Runtime 中，委派的 Synthesizer Turns 都不会消耗正在等待的 Rule Generator 预算。最多并行运行 5 个锚点；运行数量由完整、独立的 Anchor Plan 决定，不再受固定 Anchor 数量限制。
 
 两个 Runtime 都将这些模型 Turn 上限作为请求次数限制，不设置美元预算。VAMiner 不计算、收集或报告金额成本估算；Provider 返回的费用字段会被忽略，只保留请求数和 Token 用量。
 
@@ -320,18 +320,19 @@ uv run pytest
 
 `behavior_weight` 表示目标检查行为在规则中的重要程度。为了保留召回率，实际查询有时只是较弱或更宽泛的近似，此时 `query_weight` 可以更低，并且排序时只使用 `query_weight`。文件优先级是不同已匹配锚点的查询权重之和；同一锚点重复匹配只会增加导航位置，不会重复增加分数。每个意图的 `required_cases` 只存在于合成请求中，不属于合成后的锚点或最终 VAS Schema。
 
-空 `query` 是禁用锚点标记。禁用锚点仍保留在 VAS 中，以便展示预期检查行为，但永远不会执行，也不会增加排序权重。非空锚点仍接受严格验证；存在禁用锚点时，整体覆盖缺口会作为警告发布，而不会阻止降级 VAS。
+空 `query` 是禁用锚点标记。禁用锚点仍保留在 VAS 中，以便展示预期检查行为，但永远不会执行，也不会增加排序权重。非空锚点仍接受严格验证。禁用锚点不会放宽“每个生成 Case Artifact 至少被一个 `query_weight >= 3` 的 Anchor 纳入”的要求；缺失 Case Artifact 召回仍然是验证错误。
 
 ## 锚点质量
 
 完整的锚点集合以召回为目标，并且各锚点行为互不重复：
 
 - 每个非空锚点至少匹配一个生成用例，并至少匹配一个 RCA component 所在的源码文件；不要求与 component 的精确区间重叠。
-- 没有禁用锚点时，每个生成用例和每个 RCA 声明的缺陷示例源码文件都必须被至少一个 `query_weight >= 2` 的锚点真正纳入候选集。
+- 每个生成用例都必须被至少一个 `query_weight >= 3` 的锚点真正纳入候选集。
+- 在 bad-span grounding 下，所有 Anchor 均启用时，每个 RCA 声明的缺陷示例源码文件也必须被至少一个 `query_weight >= 3` 的锚点纳入候选集。
 - 每个锚点代表因果链中一个不同且可观察的行为，即使不同锚点的用例覆盖发生重叠。
 - `behavior` 只描述该锚点匹配的局部操作；跨位置关系、漏洞触发条件和检查问题属于 `inspect_hint`。
 - 每个查询以目标 `behavior` 为语义核心。为了减少与兄弟锚点的重叠，可以在一次精度优化中加入所有必要用例和 RCA 位置都支持的局部缺陷相关结构，例如要求目标操作位于 `if` 语句内；仍禁止项目特有约束或完整因果链约束。
-- Synthesizer 通常返回空的 `plan_suggestion`。只有在源码语料匹配精度明显过差且能够保留必要用例召回时，才可简短建议删除、合并或调整 intent；是否进行一次有界的计划调整由 Rule Generator 决定。
+- Synthesizer 通常返回空的 `plan_suggestion`。只有在源码语料匹配精度明显过差且能够保留必要用例召回时，才可简短建议删除、合并或调整 intent；是否进行一次有界的计划调整由 Rule Generator 决定。此类建议不能以人为设定的 Anchor 数量上限为理由。
 - 除非结构约束或 API 约束使其对规则敏感，否则拒绝使用泛化的调用、赋值、定义和条件作为锚点。
 - 精度优化用于减少兄弟锚点之间的重叠。无关的源码额外匹配不能作为缩窄查询的理由；必要时应保留召回并降低 `query_weight`。
 

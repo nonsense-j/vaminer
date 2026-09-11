@@ -57,7 +57,7 @@ def _core(*, supporting_weight: int) -> VASCoreInfo:
             Anchor(
                 id="primary",
                 behavior_weight=4,
-                query_weight=2,
+                query_weight=3,
                 type="pattern",
                 query="primary()",
                 behavior="Performs the primary operation.",
@@ -123,7 +123,7 @@ def test_final_validation_uses_real_file_admission_not_match_or_span_coverage(
     monkeypatch.setattr(anchor_validation, "scan_anchors", fake_scan)
 
     errors = anchor_validation.validate_anchors(
-        _core(supporting_weight=1),
+        _core(supporting_weight=2),
         source_root=source,
         cases_dir=cases,
         root_cause=_root_cause(),
@@ -134,9 +134,58 @@ def test_final_validation_uses_real_file_admission_not_match_or_span_coverage(
     assert not any("no match in an RCA-declared source file" in error for error in errors)
 
     assert anchor_validation.validate_anchors(
-        _core(supporting_weight=2),
+        _core(supporting_weight=3),
         source_root=source,
         cases_dir=cases,
         root_cause=_root_cause(),
         grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
     ) == []
+
+
+def test_disabled_anchor_does_not_relax_collective_case_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    (source / "bug1.c").write_text("context();\nprimary();\n", encoding="utf-8")
+    (source / "bug2.c").write_text("context();\nsupporting();\n", encoding="utf-8")
+    (cases / "case1.c").write_text("primary();\n", encoding="utf-8")
+    (cases / "case2.c").write_text("supporting();\n", encoding="utf-8")
+
+    complete = _core(supporting_weight=3)
+    degraded = complete.model_copy(
+        update={"anchors": [complete.anchors[0], complete.anchors[1].model_copy(update={"query": ""})]}
+    )
+
+    def fake_scan(anchors, root, _language):
+        resolved = Path(root).resolve()
+        file = "case1.c" if resolved == cases.resolve() else "bug1.c"
+        match = AnchorMatch(
+            anchor_id="primary",
+            query_weight=3,
+            behavior="Performs the primary operation.",
+            inspect_hint="Inspect the supporting operation.",
+            file=file,
+            start_line=1,
+            end_line=1,
+        )
+        primary = next(anchor for anchor in anchors if anchor["id"] == "primary")
+        return AnchorScanResult(
+            root=resolved,
+            anchor_results=[AnchorRunResult(anchor=primary, matches=[match])],
+        )
+
+    monkeypatch.setattr(anchor_validation, "scan_anchors", fake_scan)
+
+    errors = anchor_validation.validate_anchors(
+        degraded,
+        source_root=source,
+        cases_dir=cases,
+        root_cause=_root_cause(),
+        grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
+    )
+
+    assert any("case2.c" in error and "not admitted" in error for error in errors)

@@ -12,7 +12,7 @@ from ..models.vas import VASCoreInfo
 from ..utils.log import logger
 from .scanner import AnchorRunResult, AnchorScanResult, scan_anchors
 
-_REVIEW_MIN_ANCHOR_WEIGHT = 2
+_REVIEW_MIN_ANCHOR_WEIGHT = 3
 
 
 def review_anchors(
@@ -40,45 +40,45 @@ def review_anchors(
         context_lines=context_lines,
     )
     warnings = list(disabled_anchor_warnings(core))
-    if warnings:
-        admitted_case_files = {
-            candidate["file"]
-            for candidate in case_scan.candidates(
+    admitted_case_files = {
+        candidate["file"]
+        for candidate in case_scan.candidates(
+            min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT
+        )
+    }
+    missing_cases = [
+        path
+        for path in list_files(cases_dir)
+        if path not in admitted_case_files
+    ]
+    if missing_cases:
+        warnings.append(
+            "enabled anchors do not admit case files: "
+            + ", ".join(missing_cases)
+        )
+    if (
+        root_cause is not None
+        and grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
+    ):
+        admitted_files = {
+            Path(candidate["file"]).as_posix().removeprefix("./")
+            for candidate in repo_scan.candidates(
                 min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT
             )
         }
-        missing_cases = [
-            path
-            for path in list_files(cases_dir)
-            if path not in admitted_case_files
-        ]
-        if missing_cases:
-            warnings.append(
-                "enabled anchors do not admit case files: "
-                + ", ".join(missing_cases)
-            )
-        if (
-            root_cause is not None
-            and grounding_policy is GroundingPolicy.BAD_SPAN_COVERAGE
-        ):
-            admitted_files = {
-                Path(candidate["file"]).as_posix().removeprefix("./")
-                for candidate in repo_scan.candidates(
-                    min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT
-                )
+        missing_source_files = sorted(
+            {
+                Path(component.file).as_posix().removeprefix("./")
+                for component in root_cause_source_spans(root_cause)
             }
-            missing_source_files = sorted(
-                {
-                    Path(component.file).as_posix().removeprefix("./")
-                    for component in root_cause_source_spans(root_cause)
-                }
-                - admitted_files
+            - admitted_files
+        )
+        if missing_source_files:
+            warnings.append(
+                "enabled anchors do not admit RCA-declared bad-example files: "
+                + ", ".join(missing_source_files)
             )
-            if missing_source_files:
-                warnings.append(
-                    "enabled anchors do not admit RCA-declared bad-example files: "
-                    + ", ".join(missing_source_files)
-                )
+    if warnings:
         for warning in warnings:
             logger.warning("Degraded VAS: %s", warning)
     markdown = (
@@ -138,7 +138,7 @@ def render_hotspot_annotated_view(
     context_lines: int = 1,
 ) -> str:
     """Render ranked anchor hotspots from a shared scanner result."""
-    candidates = scan.candidates()
+    candidates = scan.candidates(min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT)
     if not candidates:
         view = "No repository hotspots matched."
     else:
@@ -226,7 +226,7 @@ def render_file_priority_table(
     anchor_labels: dict[str, str],
     label_prefix: str,
 ) -> str:
-    candidates = scan.candidates()
+    candidates = scan.candidates(min_anchor_weight=_REVIEW_MIN_ANCHOR_WEIGHT)
     lines = ["| Label | File | Score | Matches |", "| --- | --- | ---: | --- |"]
     if not candidates:
         lines.append("| - | - | 0 | none |")

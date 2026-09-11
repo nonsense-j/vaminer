@@ -23,6 +23,7 @@ from pydantic_ai.usage import RunUsage, UsageLimits
 from ...agent.contracts import (
     AgentPhase,
     AgentRunResult,
+    AgentSession,
     AgentTask,
     AnchorSynthesisAuthority,
     OutputT,
@@ -94,6 +95,94 @@ class PydanticAIOutputValidationError(PydanticAIRuntimeError):
             f"Pydantic AI task {task_id!r} failed output validation after {attempts} attempts:\n- "
             + "\n- ".join(self.errors)
         )
+
+
+class _PydanticAgentSession:
+    """A single Pydantic AI Agent conversation with resumable message history."""
+
+    def __init__(self, runtime: "PydanticAIRuntime", task: AgentTask[Any]) -> None:
+        self._runtime = runtime
+        self._task = task
+        self._model = runtime._resolve_model()
+        self._validation_state: list[tuple[str, ...]] = []
+        self._final_state: list[BaseModel] = []
+        self._attempt_state: list[int] = []
+        self._agent = runtime.build_agent(
+            task,
+            model=self._model,
+            validation_state=self._validation_state,
+            final_state=self._final_state,
+            attempt_state=self._attempt_state,
+        )
+        self._usage = RunUsage()
+        self._usage_limits = (
+            UsageLimits(request_limit=task.limits.request_limit)
+            if task.limits.request_limit
+            else None
+        )
+        self._message_history: list[Any] | None = None
+        self._closed = False
+
+    async def send(self, prompt: str) -> AgentRunResult[Any]:
+        if self._closed:
+            raise PydanticAIRuntimeError("Pydantic AI session is already closed")
+        self._validation_state.clear()
+        self._final_state.clear()
+        self._attempt_state.clear()
+
+        async def execute() -> AgentRunResult[Any]:
+            try:
+                result = await self._agent.run(
+                    prompt,
+                    deps=MinerContext(self._task.workspace_root),
+                    usage=self._usage,
+                    usage_limits=self._usage_limits,
+                    message_history=self._message_history,
+                )
+            except UnexpectedModelBehavior as exc:
+                attempts = 1 + self._task.limits.output_retries
+                latest_errors = (
+                    self._validation_state[-1]
+                    if self._validation_state and self._attempt_state == [attempts]
+                    else (str(exc),)
+                )
+                raise PydanticAIOutputValidationError(
+                    self._task.task_id,
+                    latest_errors,
+                    attempts=attempts,
+                ) from exc
+            self._message_history = result.all_messages()
+            output = cast(Any, self._final_state[-1] if self._final_state else result.output)
+            return AgentRunResult(
+                output=output,
+                identity=RuntimeIdentity(
+                    runtime_id=self._runtime.runtime_id,
+                    model_id=_model_id(self._model),
+                ),
+                usage=RuntimeUsage(
+                    requests=self._usage.requests,
+                    turns=self._usage.requests,
+                    input_tokens=self._usage.input_tokens,
+                    output_tokens=self._usage.output_tokens,
+                    cache_creation_input_tokens=self._usage.cache_write_tokens,
+                    cache_read_input_tokens=self._usage.cache_read_tokens,
+                ),
+                attempts=self._attempt_state[-1] if self._attempt_state else 1,
+            )
+
+        if self._task.limits.timeout_seconds is None:
+            return await execute()
+        try:
+            async with asyncio.timeout(self._task.limits.timeout_seconds):
+                return await execute()
+        except TimeoutError as exc:
+            raise PydanticAIRuntimeError(
+                f"Pydantic AI task {self._task.task_id!r} exceeded "
+                f"{self._task.limits.timeout_seconds} seconds"
+            ) from exc
+
+    async def close(self) -> None:
+        self._closed = True
 
 
 def _model_id(model: Model | str) -> str:
@@ -288,7 +377,7 @@ class PydanticAIRuntime:
             capabilities.extend((compaction_capability(), cache_stability_capability()))
         elif task.phase is AgentPhase.RULE_GENERATION:
             authority = cast(RuleGenerationAuthority, task.authority)
-            session = AnchorSynthesisSession(authority, workspace_root=task.workspace_root, execute=self.run)
+            session = AnchorSynthesisSession(authority, workspace_root=task.workspace_root, runtime=self)
 
             async def synthesize_anchor_plan(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
                 assert session is not None
@@ -481,6 +570,12 @@ class PydanticAIRuntime:
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:
         instrument_tracing()
         return await self._run(task)
+
+    def open_session(self, task: AgentTask[OutputT]) -> AgentSession[OutputT]:
+        """Open one Agent conversation whose follow-ups reuse message history."""
+
+        instrument_tracing()
+        return cast(AgentSession[OutputT], _PydanticAgentSession(self, task))
 
 
 __all__ = [

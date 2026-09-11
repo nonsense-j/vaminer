@@ -1,4 +1,3 @@
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -7,11 +6,21 @@ import pytest
 from src.miner.agent import AgentPhase, InstructionLayers
 from src.miner.mining.tasks import (
     PHASE_DEFINITIONS,
+    make_ast_grep_synthesis_task,
     make_issue_collection_task,
     make_root_cause_task,
+    make_rule_generation_task,
 )
 from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
-from src.miner.models import GroundingPolicy, IssueCollectionInfo
+from src.miner.models import (
+    AnchorIntent,
+    AnchorPlan,
+    AstGrepLanguage,
+    BuggyComponent,
+    GroundingPolicy,
+    IssueCollectionInfo,
+    RootCauseAnalysis,
+)
 
 
 def _collection(repo: Path) -> IssueCollectionInfo:
@@ -23,6 +32,25 @@ def _collection(repo: Path) -> IssueCollectionInfo:
         buggy_commit="a" * 40,
         fixed_commit=None,
         repo_path=str(repo),
+    )
+
+
+def _root_cause() -> RootCauseAnalysis:
+    return RootCauseAnalysis(
+        language=AstGrepLanguage.C,
+        root_cause_summary="unchecked copy",
+        analysis="an unbounded length reaches copy",
+        buggy_components=[
+            BuggyComponent(
+                file="bug.c",
+                start_line=1,
+                end_line=1,
+                role="copy",
+                snippet="copy(input, length);",
+            )
+        ],
+        fixing_pattern="bound the length",
+        extracted_case_files=["case1.c"],
     )
 
 
@@ -60,12 +88,16 @@ def test_repository_root_cause_task_builds_typed_intake_and_fixed_diff_capabilit
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
     )
 
-    payload = json.loads(task.prompt)
-    assert payload["intake"]["source_layout"] == "repository_checkout"
-    assert payload["src_tools"] == {
-        "root": source_root.resolve().as_posix(),
-        "path_arguments": "relative_to_root",
-    }
+    assert task.prompt.splitlines()[0] == (
+        "Analyze the supplied issue and extract minimal defective Case Artifacts."
+    )
+    assert "Issue ID: CVE-2099-0001" in task.prompt
+    assert "Issue summary:\nsummary" in task.prompt
+    assert "Issue details:\ndetails" in task.prompt
+    assert f"Fixed commit: {fixed_commit}" in task.prompt
+    assert source_root.as_posix() not in task.prompt
+    assert "source_layout" not in task.prompt
+    assert "fixed_revision_available" not in task.prompt
     assert "read_patch_diff" in task.tools
 
 
@@ -92,23 +124,79 @@ def test_example_suite_root_cause_task_builds_bounded_typed_intake(tmp_path: Pat
         grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
     )
 
-    payload = json.loads(task.prompt)
-    assert payload["intake"]["source_layout"] == "example_suite_snapshot"
-    assert payload["intake"]["exp_id"] == "input_snapshot"
-    assert payload["intake"]["file_paths"] == ["bad.c", "manifest.json", "nested/good.c"]
+    assert task.prompt == (
+        "Analyze the supplied Example Suite directory and extract minimal defective "
+        "Case Artifacts from source code only.\n\n"
+        f"Example Suite directory: {source_root.resolve().as_posix()}\n"
+    )
     assert "danger();" not in task.prompt
     assert "safe();" not in task.prompt
-    assert "source_files" not in payload["intake"]
-    assert "file_count" not in payload["intake"]
-    assert "source_file_count" not in payload["intake"]
+    assert "bad.c" not in task.prompt
+    assert "good.c" not in task.prompt
+    assert "manifest.json" not in task.prompt
+    assert "file_paths" not in task.prompt
+    assert "content_digest" not in task.prompt
+    assert "snapshot_ref" not in task.prompt
     assert "registry_key" not in task.prompt
     assert "example-suite:" not in task.prompt
-    assert payload["src_tools"] == {
-        "root": source_root.resolve().as_posix(),
-        "path_arguments": "relative_to_root",
-    }
+    assert "Analyze source code only" in task.input_policy
     assert task.definition is PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE]
     assert set(task.tools) == set(PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE].tools)
+
+
+def test_all_production_prompts_are_minimal_plain_text(tmp_path: Path):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    root_cause = _root_cause()
+    intent = AnchorIntent(
+        id="copy-site",
+        behavior_weight=4,
+        behavior="copy a runtime length",
+        inspect_hint="inspect its bound",
+        required_cases=["case1.c"],
+    )
+    plan = AnchorPlan(summary="copy sites", intents=[intent])
+
+    issue_task = make_issue_collection_task("CVE-2099-0001", workspace_root=tmp_path)
+    rule_task = make_rule_generation_task(
+        root_cause,
+        workspace_root=tmp_path,
+        source_root=source,
+        cases_dir=cases,
+        grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
+    )
+    synthesis_task = make_ast_grep_synthesis_task(
+        plan,
+        intent,
+        workspace_root=tmp_path,
+        source_root=source,
+        cases_dir=cases,
+        grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
+        root_cause=root_cause,
+    )
+
+    assert issue_task.prompt.splitlines()[0] == (
+        "Collect verified issue evidence and prepare the checkout for root-cause analysis."
+    )
+    assert rule_task.prompt.splitlines()[0] == (
+        "Define repository-independent rule semantics and a queryless Anchor Plan from the authoritative RCA."
+    )
+    assert synthesis_task.prompt.splitlines()[0] == (
+        'Generate and validate only the ast-grep query for target anchor "copy-site"; '
+        "keep it within that anchor's behavior."
+    )
+    for prompt in (issue_task.prompt, rule_task.prompt, synthesis_task.prompt):
+        assert not prompt.lstrip().startswith("{")
+    assert "[Root Cause Analysis]" in rule_task.prompt
+    assert "Declared Case Artifacts:\n- case1.c" in rule_task.prompt
+    assert "[Target AnchorIntent]" in synthesis_task.prompt
+    assert "Required Case Artifacts:\n- case1.c" in synthesis_task.prompt
+    assert "[Root Cause Analysis]" in synthesis_task.prompt
+    assert "copy(input, length);" in synthesis_task.prompt
+    assert "copy sites" not in synthesis_task.prompt
+    assert source.as_posix() not in rule_task.prompt
 
 
 def test_issue_input_is_validated_before_task_construction(tmp_path: Path):

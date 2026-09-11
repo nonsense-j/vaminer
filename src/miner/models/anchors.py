@@ -127,7 +127,8 @@ class AnchorIntent(BaseModel):
         min_length=1,
         description=(
             "Generated case files that contain this local behavior at a structurally "
-            "matchable site; not every case must be assigned to every intent"
+            "matchable site; every declared case must be assigned to at least one "
+            "intent, but not every case must be assigned to every intent"
         ),
     )
 
@@ -138,7 +139,14 @@ class AnchorPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary: str = Field(..., min_length=1)
-    intents: list[AnchorIntent] = Field(..., min_length=1, max_length=8)
+    intents: list[AnchorIntent] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "All independent local behaviors needed for complete coverage of the "
+            "declared Case Artifacts; there is no fixed intent-count limit"
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_unique_intent_ids(self) -> "AnchorPlan":

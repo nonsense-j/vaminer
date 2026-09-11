@@ -24,6 +24,7 @@ VAMiner turns one Mining Input into a Variant Analysis Specification (VAS). The 
 - RCA is the only Agent that writes workspace data, and it writes only through typed Case Artifact operations. Synthesizers return bounded experiences rather than writing directly; the host merges them into the shared ast-grep skill with a process-safe read/write lock and atomic replacement. Cleanup is explicit; acceptance and cache loading are pure.
 - Example Suite RCA receives the complete verified snapshot file list as Src-Root-relative paths and must not infer unlisted files. It uses the same Src tools as repository RCA and may request `full_file` reads within the shared byte limit.
 - Rule Generation cannot read source or author query syntax. It produces semantics and submits at most two Anchor Plans.
+- Anchor Plans have no fixed Case Artifact or Anchor Intent count. Every declared Case Artifact must be assigned to at least one independent intent, and the accepted Anchor set must collectively recall all declared cases.
 - A Synthesizer cannot change RCA, summary, intent fields, or invoke another Agent. Invalid query semantics may degrade that one Anchor to `query: ""`; protocol, authority, and external execution failures propagate.
 - Runtime Artifacts, generic filesystem permissions, arbitrary metadata, and capability negotiation are not part of the architecture.
 

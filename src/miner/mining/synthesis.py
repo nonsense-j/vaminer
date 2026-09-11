@@ -10,7 +10,13 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..agent.contracts import AgentRunResult, AgentTask, RuleGenerationAuthority
+from ..agent.contracts import (
+    AgentRunResult,
+    AgentRuntime,
+    AgentSession,
+    AgentTask,
+    RuleGenerationAuthority,
+)
 from ..anchors.scanner import AnchorQueryError, scan_anchors
 from ..models.anchors import (
     Anchor,
@@ -57,16 +63,18 @@ class AnchorSynthesisReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan: AnchorPlan
-    results: list[AnchorSynthesisResult] = Field(..., min_length=1, max_length=8)
+    results: list[AnchorSynthesisResult] = Field(..., min_length=1)
 
 
 def validate_anchor_plan(plan: AnchorPlan, declared_cases: Sequence[str]) -> tuple[str, ...]:
-    """Validate only Case Artifact references that would make child runs invalid."""
+    """Validate Case Artifact references and collective plan coverage."""
 
     declared = set(declared_cases)
     errors: list[str] = []
+    assigned: set[str] = set()
     for intent in plan.intents:
         required = set(intent.required_cases)
+        assigned.update(required)
         invalid = sorted(name for name in required if Path(name).name != name or _CASE_NAME.fullmatch(name) is None)
         if invalid:
             errors.append(
@@ -75,6 +83,12 @@ def validate_anchor_plan(plan: AnchorPlan, declared_cases: Sequence[str]) -> tup
         unknown = sorted(required - declared)
         if unknown:
             errors.append(f"intent {intent.id!r} references unknown Case Artifacts: {', '.join(unknown)}")
+    unassigned = sorted(declared - assigned)
+    if unassigned:
+        errors.append(
+            "Anchor Plan does not assign every declared Case Artifact to an intent: "
+            + ", ".join(unassigned)
+        )
     return tuple(errors)
 
 
@@ -107,6 +121,71 @@ def _assemble_anchor(intent: AnchorIntent, delta: AnchorSynthesisDelta) -> Ancho
         behavior=intent.behavior,
         inspect_hint=intent.inspect_hint,
     )
+
+
+def _normalized_query(query: str) -> str:
+    """Normalize only line endings and outer whitespace for deduplication."""
+
+    return query.replace("\r\n", "\n").strip()
+
+
+def deduplicate_query_anchors(
+    results: Sequence[AnchorSynthesisResult],
+    *,
+    language: str,
+) -> list[Anchor]:
+    """Keep the strongest representative for each executable query.
+
+    Empty queries intentionally remain one-for-one with their disabled anchors. For
+    enabled queries, internal whitespace is left untouched and the plan order is the
+    final tie-breaker after query and behavior weights.
+    """
+
+    selected: dict[tuple[str, str, str], tuple[int, AnchorSynthesisResult]] = {}
+    disabled: list[tuple[int, AnchorSynthesisResult]] = []
+    for position, result in enumerate(results):
+        anchor = result.anchor
+        if not anchor.query.strip():
+            disabled.append((position, result))
+            continue
+        key = (language, anchor.query_type.value, _normalized_query(anchor.query))
+        previous = selected.get(key)
+        if previous is None:
+            selected[key] = (position, result)
+            continue
+        previous_position, previous_result = previous
+        previous_anchor = previous_result.anchor
+        candidate_score = (anchor.query_weight, anchor.behavior_weight, -position)
+        previous_score = (
+            previous_anchor.query_weight,
+            previous_anchor.behavior_weight,
+            -previous_position,
+        )
+        if candidate_score > previous_score:
+            selected[key] = (position, result)
+
+    kept = [*disabled, *selected.values()]
+    kept.sort(key=lambda item: item[0])
+    return [result.anchor for _, result in kept]
+
+
+class _CallableAgentSession:
+    """Compatibility bridge for tests and lightweight host executors."""
+
+    def __init__(
+        self,
+        task: AgentTask[AnchorSynthesisDelta],
+        execute: SynthesisExecutor,
+    ) -> None:
+        self._task = task
+        self._execute = execute
+
+    async def send(self, prompt: str) -> AgentRunResult[AnchorSynthesisDelta]:
+        task = self._task if prompt == self._task.prompt else replace(self._task, prompt=prompt)
+        return await self._execute(task)
+
+    async def close(self) -> None:
+        return None
 
 
 def _query_errors(
@@ -155,26 +234,40 @@ def finalize_rule_generation(
         root_cause_summary=authority.root_cause.root_cause_summary,
         summary=receipt.plan.summary,
         scenarios=draft.scenarios,
-        anchors=[item.anchor for item in receipt.results],
+        anchors=deduplicate_query_anchors(
+            receipt.results,
+            language=authority.root_cause.language.value,
+        ),
     )
 
 
 class AnchorSynthesisSession:
-    """Deep Module that owns plan limits, child execution, and canonical assembly."""
+    """Deep Module that owns plan acceptance, child execution, and canonical assembly."""
 
     def __init__(
         self,
         authority: RuleGenerationAuthority,
         *,
         workspace_root: Path,
-        execute: SynthesisExecutor,
+        execute: SynthesisExecutor | None = None,
+        runtime: AgentRuntime | None = None,
         max_parallel: int = MINER_AST_GREP_MAX_PARALLEL_RUNS,
     ) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
         self.authority = authority
         self.workspace_root = workspace_root
+        if runtime is None and execute is not None:
+            owner = getattr(execute, "__self__", None)
+            if owner is not None and callable(getattr(owner, "open_session", None)):
+                runtime = owner
+                execute = None
         self._execute = execute
+        self._runtime = runtime
+        if self._execute is None and self._runtime is None:
+            raise ValueError("AnchorSynthesisSession requires execute or runtime")
+        if self._execute is not None and self._runtime is not None:
+            raise ValueError("AnchorSynthesisSession accepts execute or runtime, not both")
         self._max_parallel = max_parallel
         self._calls = 0
         self._latest: AnchorSynthesisReceipt | None = None
@@ -200,62 +293,63 @@ class AnchorSynthesisSession:
             root_cause=self.authority.root_cause,
             iteration=iteration,
         )
+        if self._runtime is not None:
+            child_session: AgentSession[AnchorSynthesisDelta] = self._runtime.open_session(task)
+        else:
+            assert self._execute is not None
+            child_session = _CallableAgentSession(task, self._execute)
         last_delta: AnchorSynthesisDelta | None = None
         last_errors: tuple[str, ...] = ()
         experiences: list[AstGrepExperience] = []
         experience_keys: set[str] = set()
-        for repair in range(1 + task.limits.output_retries):
-            repair_task = task
-            if repair and last_errors:
-                repair_task = replace(
-                    task,
-                    task_id=f"{task.task_id}:repair:{repair}",
-                    definition=replace(
-                        task.definition,
-                        agent_name=f"{task.agent_name} (repair {repair})",
-                    ),
-                    prompt=(
-                        task.prompt
-                        + "\n\nDeterministic query validation failed. Return a corrected delta only:\n- "
+        try:
+            for repair in range(1 + task.limits.output_retries):
+                if repair and last_errors:
+                    prompt = (
+                        "The previous query failed deterministic validation:\n\n- "
                         + "\n- ".join(last_errors)
-                    ),
-                )
-            run = await self._execute(repair_task)
-            last_delta = run.output
-            anchor = _assemble_anchor(intent, last_delta)
-            for experience in last_delta.experiences:
-                if len(experiences) >= MAX_SYNTHESIS_EXPERIENCES:
+                        + "\n\nRevise only the query fields for this target anchor.\n"
+                    )
+                else:
+                    prompt = task.prompt
+                run = await child_session.send(prompt)
+                last_delta = run.output
+                anchor = _assemble_anchor(intent, last_delta)
+                for experience in last_delta.experiences:
+                    if len(experiences) >= MAX_SYNTHESIS_EXPERIENCES:
+                        break
+                    key = experience.identity
+                    if key not in experience_keys:
+                        experience_keys.add(key)
+                        experiences.append(experience)
+                last_errors = _query_errors(anchor, intent, self.authority)
+                if not last_errors:
+                    result = AnchorSynthesisResult(
+                        anchor=anchor,
+                        adjustments=last_delta.adjustments,
+                        experiences=experiences,
+                        plan_suggestion=last_delta.plan_suggestion,
+                    )
                     break
-                key = experience.identity
-                if key not in experience_keys:
-                    experience_keys.add(key)
-                    experiences.append(experience)
-            last_errors = _query_errors(anchor, intent, self.authority)
-            if not last_errors:
+            else:
+                assert last_delta is not None
+                disabled = Anchor(
+                    id=intent.id,
+                    behavior_weight=intent.behavior_weight,
+                    query_weight=min(last_delta.query_weight, intent.behavior_weight),
+                    type=last_delta.query_type if last_delta else QueryType.PATTERN,
+                    query="",
+                    behavior=intent.behavior,
+                    inspect_hint=intent.inspect_hint,
+                )
                 result = AnchorSynthesisResult(
-                    anchor=anchor,
-                    adjustments=last_delta.adjustments,
+                    anchor=disabled,
+                    adjustments=[*last_delta.adjustments, "Disabled after deterministic query validation failed."],
                     experiences=experiences,
                     plan_suggestion=last_delta.plan_suggestion,
                 )
-                break
-        else:
-            assert last_delta is not None
-            disabled = Anchor(
-                id=intent.id,
-                behavior_weight=intent.behavior_weight,
-                query_weight=min(last_delta.query_weight, intent.behavior_weight),
-                type=last_delta.query_type if last_delta else QueryType.PATTERN,
-                query="",
-                behavior=intent.behavior,
-                inspect_hint=intent.inspect_hint,
-            )
-            result = AnchorSynthesisResult(
-                anchor=disabled,
-                adjustments=[*last_delta.adjustments, "Disabled after deterministic query validation failed."],
-                experiences=experiences,
-                plan_suggestion=last_delta.plan_suggestion,
-            )
+        finally:
+            await child_session.close()
         if experiences:
             try:
                 await asyncio.to_thread(
@@ -313,6 +407,7 @@ __all__ = [
     "AnchorSynthesisReceipt",
     "AnchorSynthesisSession",
     "SynthesisExecutor",
+    "deduplicate_query_anchors",
     "finalize_rule_generation",
     "validate_anchor_plan",
 ]

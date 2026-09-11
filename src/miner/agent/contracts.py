@@ -245,6 +245,15 @@ class AgentRunResult[OutputT: BaseModel]:
 
 
 @runtime_checkable
+class AgentSession(Protocol[OutputT]):
+    """One runtime conversation that can receive follow-up prompts."""
+
+    async def send(self, prompt: str) -> AgentRunResult[OutputT]: ...
+
+    async def close(self) -> None: ...
+
+
+@runtime_checkable
 class AgentRuntime(Protocol):
     """Real Seam implemented by the Pydantic AI and Claude Code Adapters."""
 
@@ -253,10 +262,13 @@ class AgentRuntime(Protocol):
 
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]: ...
 
+    def open_session(self, task: AgentTask[OutputT]) -> AgentSession[OutputT]: ...
+
 
 __all__ = [
     "AgentPhase",
     "AgentRunResult",
+    "AgentSession",
     "AgentRuntime",
     "AgentTask",
     "AnchorSynthesisAuthority",

@@ -13,6 +13,7 @@ from src.miner.models import (
     AnchorPlan,
     AstGrepExperience,
     AnchorSynthesisDelta,
+    AnchorSynthesisResult,
     AstGrepLanguage,
     BuggyComponent,
     GroundingPolicy,
@@ -28,6 +29,7 @@ from src.miner.mining.synthesis import (
     AnchorPlanError,
     AnchorSynthesisLimitError,
     AnchorSynthesisSession,
+    deduplicate_query_anchors,
 )
 
 
@@ -199,7 +201,7 @@ def test_plan_validation_only_rejects_invalid_or_unknown_case_names():
 
 
 @pytest.mark.asyncio
-async def test_plan_normalizes_duplicates_without_requiring_collective_or_original_assignment(
+async def test_plan_normalizes_duplicate_case_references_after_collective_assignment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -232,7 +234,7 @@ async def test_plan_normalizes_duplicates_without_requiring_collective_or_origin
         )
 
     intent = _plan().intents[0].model_copy(
-        update={"required_cases": ["case1_var1.c", "case1_var1.c"]}
+        update={"required_cases": ["case1_var1.c", "case1.c", "case1_var1.c"]}
     )
     plan = _plan().model_copy(update={"intents": [intent]})
     assert synthesis_module.validate_anchor_plan(
@@ -247,9 +249,75 @@ async def test_plan_normalizes_duplicates_without_requiring_collective_or_origin
     )
     await session.synthesize(plan)
 
-    assert observed_required_cases == [["case1_var1.c"]]
+    assert observed_required_cases == [["case1_var1.c", "case1.c"]]
     assert session.receipt is not None
-    assert session.receipt.plan.intents[0].required_cases == ["case1_var1.c"]
+    assert session.receipt.plan.intents[0].required_cases == ["case1_var1.c", "case1.c"]
+
+
+def test_plan_requires_every_declared_case_to_be_assigned_to_an_intent():
+    plan = _plan().model_copy(
+        update={
+            "intents": [
+                _plan().intents[0].model_copy(update={"required_cases": ["case1.c"]})
+            ]
+        }
+    )
+
+    errors = synthesis_module.validate_anchor_plan(
+        plan,
+        _rca().extracted_case_files,
+    )
+
+    assert errors == (
+        "Anchor Plan does not assign every declared Case Artifact to an intent: case1_var1.c",
+    )
+
+
+@pytest.mark.asyncio
+async def test_plan_has_no_fixed_intent_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    (source / "bug.c").write_text("copy();\n", encoding="utf-8")
+    (cases / "case1.c").write_text("copy();\n", encoding="utf-8")
+    authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
+    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: ())
+
+    intents = [
+        AnchorIntent(
+            id=f"site-{index}",
+            behavior_weight=1,
+            behavior=f"behavior {index}",
+            inspect_hint=f"inspect {index}",
+            required_cases=["case1.c", "case1_var1.c"],
+        )
+        for index in range(1, 10)
+    ]
+    plan = AnchorPlan(summary="many independent sites", intents=intents)
+
+    async def execute(task):
+        return AgentRunResult(
+            output=AnchorSynthesisDelta(
+                target_anchor_id=task.authority.target_anchor_id,
+                type=QueryType.PATTERN,
+                query="copy($A)",
+                query_weight=1,
+                adjustments=[],
+                plan_suggestion="",
+            ),
+            identity=RuntimeIdentity(runtime_id="fake", model_id="fake-model"),
+        )
+
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    results = await session.synthesize(plan)
+
+    assert len(results) == 9
+    assert session.receipt is not None
+    assert len(session.receipt.plan.intents) == 9
 
 
 def test_delta_wire_shape_forbids_intent_fields():
@@ -360,11 +428,13 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
     authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
     calls = 0
     task_labels: list[tuple[str, str]] = []
+    prompts: list[str] = []
 
     async def execute(task):
         nonlocal calls
         calls += 1
         task_labels.append((task.task_id, task.agent_name))
+        prompts.append(task.prompt)
         return AgentRunResult(
             output=AnchorSynthesisDelta(
                 target_anchor_id=task.authority.target_anchor_id,
@@ -387,15 +457,15 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
     assert calls == 3
     assert task_labels == [
         ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
-        (
-            "ast-grep-synthesis:1:copy-site:repair:1",
-            "AST-Grep Synthesizer [1.1/1] (repair 1)",
-        ),
-        (
-            "ast-grep-synthesis:1:copy-site:repair:2",
-            "AST-Grep Synthesizer [1.1/1] (repair 2)",
-        ),
+        ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
+        ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
     ]
+    assert prompts[0].startswith("Generate and validate only the ast-grep query")
+    assert prompts[1] == prompts[2]
+    assert prompts[1].startswith("The previous query failed deterministic validation:")
+    assert "ast-grep validation failed: invalid pattern" in prompts[1]
+    assert "Revise only the query fields for this target anchor." in prompts[1]
+    assert prompts[0] not in prompts[1]
     assert result[0].anchor.query == ""
 
     calls = 0
@@ -481,6 +551,114 @@ def test_delta_limits_and_deduplicates_query_writing_experiences():
                 ],
             }
         )
+
+
+@pytest.mark.asyncio
+async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
+    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: ("query misses case1.c",))
+
+    class Conversation:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.closed = False
+
+        async def send(self, prompt: str):
+            self.prompts.append(prompt)
+            return AgentRunResult(
+                output=AnchorSynthesisDelta(
+                    target_anchor_id="copy-site",
+                    type="pattern",
+                    query="copy($A)",
+                    query_weight=1,
+                    adjustments=[],
+                    plan_suggestion="",
+                ),
+                identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
+            )
+
+        async def close(self):
+            self.closed = True
+
+    class Runtime:
+        identity = RuntimeIdentity(runtime_id="fake", model_id="fake")
+
+        def __init__(self) -> None:
+            self.sessions: list[Conversation] = []
+
+        def open_session(self, _task):
+            session = Conversation()
+            self.sessions.append(session)
+            return session
+
+    runtime = Runtime()
+    result = await AnchorSynthesisSession(
+        authority,
+        workspace_root=tmp_path,
+        runtime=runtime,
+    ).synthesize(_plan())
+
+    assert result[0].anchor.query == ""
+    assert len(runtime.sessions) == 1
+    conversation = runtime.sessions[0]
+    assert conversation.closed
+    assert len(conversation.prompts) == 3
+    assert conversation.prompts[0].startswith("Generate and validate only the ast-grep query")
+    assert all("query misses case1.c" in prompt for prompt in conversation.prompts[1:])
+    assert all("Revise only the query fields for this target anchor." in prompt for prompt in conversation.prompts[1:])
+
+
+def test_query_dedup_keeps_weighted_representatives_and_disabled_anchors():
+    def result(
+        anchor_id: str,
+        query: str,
+        *,
+        query_weight: int,
+        behavior_weight: int,
+        query_type: QueryType = QueryType.PATTERN,
+    ) -> AnchorSynthesisResult:
+        return AnchorSynthesisResult(
+            anchor=Anchor(
+                id=anchor_id,
+                behavior_weight=behavior_weight,
+                query_weight=query_weight,
+                type=query_type,
+                query=query,
+                behavior=f"behavior {anchor_id}",
+                inspect_hint=f"inspect {anchor_id}",
+            ),
+            adjustments=[],
+            experiences=[],
+            plan_suggestion="",
+        )
+
+    results = [
+        result("first", "x\r\n", query_weight=1, behavior_weight=5),
+        result("second", " x ", query_weight=2, behavior_weight=2),
+        result("third", "x", query_weight=2, behavior_weight=4),
+        result("fourth", "x", query_weight=2, behavior_weight=4),
+        result("different-type", "x", query_weight=1, behavior_weight=1, query_type=QueryType.RULE),
+        result("different-space", "x  \n y", query_weight=1, behavior_weight=1),
+        result("disabled-one", "", query_weight=1, behavior_weight=1),
+        result("disabled-two", "   ", query_weight=1, behavior_weight=1),
+    ]
+
+    anchors = deduplicate_query_anchors(results, language="c")
+
+    assert [anchor.id for anchor in anchors] == [
+        "third",
+        "different-type",
+        "different-space",
+        "disabled-one",
+        "disabled-two",
+    ]
+    assert anchors[0].behavior == "behavior third"
+    assert anchors[0].inspect_hint == "inspect third"
+    assert anchors[0].query_weight == 2
 
 
 @pytest.mark.asyncio

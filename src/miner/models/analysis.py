@@ -69,5 +69,8 @@ class RootCauseAnalysis(BaseModel):
     extracted_case_files: list[str] = Field(
         ...,
         min_length=1,
-        description="Bare caseN or caseN_varM filenames directly under the cases root",
+        description=(
+            "Complete manifest of bare caseN or caseN_varM filenames directly under "
+            "the cases root; no fixed case-count limit"
+        ),
     )
