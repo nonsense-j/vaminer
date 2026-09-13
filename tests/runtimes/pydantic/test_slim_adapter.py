@@ -6,12 +6,17 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
+from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
+from src.miner.mining.synthesis import (
+    AnchorPlanError,
+    AnchorSynthesisLimitError,
+    AnchorSynthesisSession,
+)
 from src.miner.mining.tasks import (
     make_ast_grep_synthesis_task,
     make_root_cause_task,
     make_rule_generation_task,
 )
-from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.models import (
     AnchorIntent,
     AnchorPlan,
@@ -21,14 +26,9 @@ from src.miner.models import (
     IssueCollectionInfo,
     RootCauseAnalysis,
 )
-from src.miner.runtimes.pydantic.runtime import PydanticAIRuntime
 from src.miner.runtimes.pydantic import runtime as pydantic_runtime
 from src.miner.runtimes.pydantic import telemetry as pydantic_telemetry
-from src.miner.mining.synthesis import (
-    AnchorPlanError,
-    AnchorSynthesisLimitError,
-    AnchorSynthesisSession,
-)
+from src.miner.runtimes.pydantic.runtime import PydanticAIRuntime
 from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
 
 
@@ -244,7 +244,7 @@ async def test_pydantic_attempts_include_structured_output_schema_repairs(tmp_pa
             {}
             if calls == 1
             else {
-                "target_anchor_id": "copy-site",
+                "anchor_id": "copy-site",
                 "type": "pattern",
                 "query": "",
                 "query_weight": 2,

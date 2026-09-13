@@ -11,13 +11,15 @@ class QueryType(StrEnum):
     RULE = "rule"
 
 
-class AstGrepExperienceOutcome(StrEnum):
-    SUCCESS = "success"
-    PITFALL = "pitfall"
+class AstGrepExperienceMode(StrEnum):
+    ADD = "ADD"
+    REPLACE = "REPLACE"
 
 
-MAX_SYNTHESIS_EXPERIENCES = 3
-_EXPERIENCE_SEPARATOR = re.compile(r"[^\w]+")
+_EXPERIENCE_ID = re.compile(
+    r"^(?P<scope>all|[a-z][a-z0-9]*)-(?P<number>[1-9][0-9]*)$",
+    re.IGNORECASE,
+)
 
 
 class AstGrepExperience(BaseModel):
@@ -25,8 +27,25 @@ class AstGrepExperience(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    outcome: AstGrepExperienceOutcome
+    mode: AstGrepExperienceMode
+    lesson_id: str
     lesson: str = Field(..., min_length=8, max_length=240)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
+
+    @field_validator("lesson_id", mode="before")
+    @classmethod
+    def normalize_lesson_id(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        match = _EXPERIENCE_ID.fullmatch(value.strip())
+        if match is None:
+            raise ValueError("lesson_id must use the form all-N or LANGUAGE-N")
+        scope = match.group("scope").lower()
+        return f"{scope if scope == 'all' else scope.upper()}-{int(match.group('number'))}"
 
     @field_validator("lesson", mode="before")
     @classmethod
@@ -35,15 +54,13 @@ class AstGrepExperience(BaseModel):
 
     @property
     def identity(self) -> str:
-        """Ignore casing, Markdown punctuation, and spacing when deduplicating lessons."""
+        """Return the stable ID used to update this lesson."""
 
-        return _EXPERIENCE_SEPARATOR.sub(" ", self.lesson.casefold()).strip()
+        return self.lesson_id.casefold()
 
-    @model_validator(mode="after")
-    def validate_meaningful_lesson(self) -> "AstGrepExperience":
-        if not self.identity:
-            raise ValueError("experience lesson must contain query-writing text")
-        return self
+    @property
+    def scope(self) -> str:
+        return self.lesson_id.rsplit("-", 1)[0]
 
 
 class Anchor(BaseModel):
@@ -161,17 +178,16 @@ class AnchorSynthesisDelta(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    target_anchor_id: str = Field(..., pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
+    anchor_id: str = Field(..., pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
     query_type: QueryType = Field(..., alias="type")
     query: str
     query_weight: int = Field(..., ge=1, le=5)
     adjustments: list[str]
     experiences: list[AstGrepExperience] = Field(
         default_factory=list,
-        max_length=MAX_SYNTHESIS_EXPERIENCES,
         description=(
-            "At most three materially new, concise, project-independent ast-grep "
-            "query-writing lessons; empty by default and never repeats existing guidance"
+            "Optional ADD or REPLACE operations for concise, project-independent "
+            "ast-grep query-writing lessons; empty by default"
         ),
     )
     plan_suggestion: str = Field(
@@ -182,12 +198,22 @@ class AnchorSynthesisDelta(BaseModel):
         ),
     )
 
-    @model_validator(mode="after")
-    def validate_unique_experiences(self) -> "AnchorSynthesisDelta":
-        identities = [experience.identity for experience in self.experiences]
-        if len(identities) != len(set(identities)):
-            raise ValueError("experiences must not contain duplicate query-writing lessons")
-        return self
+    @field_validator("experiences", mode="after")
+    @classmethod
+    def keep_first_unique_experiences(
+        cls,
+        experiences: list[AstGrepExperience],
+    ) -> list[AstGrepExperience]:
+        selected: list[AstGrepExperience] = []
+        positions: dict[str, int] = {}
+        for experience in experiences:
+            identity = experience.identity
+            if identity in positions:
+                selected[positions[identity]] = experience
+            else:
+                positions[identity] = len(selected)
+                selected.append(experience)
+        return selected
 
 
 class AnchorSynthesisResult(BaseModel):
@@ -199,6 +225,6 @@ class AnchorSynthesisResult(BaseModel):
     adjustments: list[str]
     experiences: list[AstGrepExperience] = Field(
         default_factory=list,
-        max_length=MAX_SYNTHESIS_EXPERIENCES,
+        description="Experience operations accepted from the Synthesizer",
     )
     plan_suggestion: str

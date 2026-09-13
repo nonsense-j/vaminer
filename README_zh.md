@@ -45,16 +45,9 @@ uv run python -m src.miner.preflight --runtime pydanic-sdk
 uv run python -m src.miner.preflight --runtime claude-cli
 ```
 
-交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用
-模型。它会验证 Python 与内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、
-已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数，在 tracing
-启用时加载并执行内置 Langfuse transcript hook，以及运行真实的 MCP handshake、工具列表和只读工具调用。
+交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用模型。它会验证 Python 与内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数，在 tracing 启用时加载并执行内置 Langfuse transcript hook，以及运行真实的 MCP handshake、工具列表和只读工具调用。
 
-增加 `--live` 后会发起一次很小的真实模型请求。Agent 必须调用探针工具并返回结构化输出；如果已启用
-Langfuse，还必须在同一条 preflight trace 下产生至少一个 runtime observation。该请求可能产生模型费用。
-使用 `--json` 可在 stdout 输出机器可读报告，进度仍通过 stderr 展示；增加 `--quiet` 可完全关闭进度。
-任何必需检查失败时命令退出码为 1。
-Langfuse trace 默认最多等待 120 秒，每 10 秒输出一次 heartbeat。
+增加 `--live` 后会发起一次很小的真实模型请求。Agent 必须调用探针工具并返回结构化输出；如果已启用 Langfuse，还必须在同一条 preflight trace 下产生至少一个 runtime observation。该请求可能产生模型费用。使用 `--json` 可在 stdout 输出机器可读报告，进度仍通过 stderr 展示；增加 `--quiet` 可完全关闭进度。任何必需检查失败时命令退出码为 1。Langfuse trace 默认最多等待 120 秒，每 10 秒输出一次 heartbeat。
 
 ```bash
 uv run python -m src.miner.preflight --runtime claude-cli --live
@@ -72,7 +65,7 @@ uv run python -m src.miner.main CVE-2024-XXXX
 uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
-也可以传入一个 Example Suite 目录。目录名（通常类似 CWE 或 CVE ID）就是 Example Suite 的 registry/cache identity；目录内部可以平铺或包含任意层级的子目录，所有示例应共同表达同一个缺陷模式：
+也可以传入一个 Example Suite 目录。若目录位于 `data/` 下，则相对于 `data/` 的归一化 POSIX 路径就是 Example Suite 的 registry/cache identity（通常类似 CWE 或 CVE ID）；否则使用目录名。目录内部可以平铺或包含任意层级的子目录，所有示例应共同表达同一个缺陷模式：
 
 ```bash
 uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
@@ -168,7 +161,7 @@ Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Sy
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 都没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 会去重其有界经验列表，并在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent、Case Artifact 和持久化的 ast-grep experience 都没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 只接受通过多轮质量门槛的、按 lesson ID 执行的 ADD/REPLACE 更新，并在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
 
 ### Miner 模块职责
 

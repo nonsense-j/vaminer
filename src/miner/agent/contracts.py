@@ -14,6 +14,8 @@ from ..models.analysis import GroundingPolicy, RootCauseAnalysis
 from ..models.anchors import AnchorPlan
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
+WireOutputT = TypeVar("WireOutputT", bound=BaseModel)
+ResultOutputT = TypeVar("ResultOutputT", bound=BaseModel)
 
 
 class AgentPhase(StrEnum):
@@ -66,7 +68,7 @@ class AnchorSynthesisAuthority:
     grounding_policy: GroundingPolicy
     root_cause: RootCauseAnalysis
     plan: AnchorPlan
-    target_anchor_id: str
+    anchor_id: str
     skill_root: Path
 
     @property
@@ -116,17 +118,20 @@ class RunLimits:
 
 
 @dataclass(frozen=True, slots=True)
-class PhaseDefinition[OutputT: BaseModel]:
-    """Canonical responsibility, instructions, tools, output, and limits for one phase."""
+class PhaseDefinition[WireOutputT: BaseModel, ResultOutputT: BaseModel]:
+    """Canonical responsibility, schemas, tools, and limits for one phase."""
 
     phase: AgentPhase
     agent_name: str
     description: str
     instructions: str
-    output_type: type[OutputT]
+    # The schema sent to the model/provider's structured-output tool.
+    output_type: type[WireOutputT]
     tools: tuple[str, ...]
     limits: RunLimits
-    validator: PhaseValidator[OutputT]
+    validator: PhaseValidator[ResultOutputT]
+    # The schema returned to the host after any runtime-specific assembly.
+    result_type: type[ResultOutputT]
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +139,7 @@ class AgentTask[OutputT: BaseModel]:
     """One complete assignment constructed from a closed Phase Authority."""
 
     task_id: str
-    definition: PhaseDefinition[OutputT]
+    definition: PhaseDefinition[Any, OutputT]
     authority: PhaseAuthority
     prompt: str
     workspace_root: Path
@@ -163,6 +168,14 @@ class AgentTask[OutputT: BaseModel]:
 
     @property
     def output_type(self) -> type[OutputT]:
+        """Return the host-facing result schema used by caching and acceptance."""
+
+        return self.definition.result_type
+
+    @property
+    def model_output_type(self) -> type[BaseModel]:
+        """Return the structured schema supplied to the model output tool."""
+
         return self.definition.output_type
 
     @property
@@ -268,8 +281,8 @@ class AgentRuntime(Protocol):
 __all__ = [
     "AgentPhase",
     "AgentRunResult",
-    "AgentSession",
     "AgentRuntime",
+    "AgentSession",
     "AgentTask",
     "AnchorSynthesisAuthority",
     "InstructionLayers",

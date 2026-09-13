@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.miner.mining.examples import (
+    example_suite_exp_id,
     inspect_example_suite,
     materialize_example_suite,
 )
@@ -61,11 +62,26 @@ def test_example_suite_accepts_nested_many_and_mixed_language_files(tmp_path: Pa
     assert len(inspection.file_paths) == 207
 
 
+def test_example_suite_exp_id_is_relative_to_data_and_distinguishes_parents(tmp_path: Path):
+    first = tmp_path / "data" / "group-a" / "CWE-2099"
+    second = tmp_path / "data" / "group-b" / "CWE-2099"
+    for source in (first, second):
+        source.mkdir(parents=True)
+        (source / "bad.c").write_text("danger();\n", encoding="utf-8")
+
+    assert inspect_example_suite(first).exp_id == "group-a/CWE-2099"
+    assert inspect_example_suite(second).exp_id == "group-b/CWE-2099"
+    assert example_suite_exp_id(Path("data") / "group-a" / ".." / "CWE-2099") == "CWE-2099"
+
+
 def test_example_suite_requires_a_nonempty_directory_with_source_code(tmp_path: Path):
     empty = tmp_path / "CVE-empty"
     empty.mkdir()
     with pytest.raises(ValueError, match="does not contain any regular files"):
         inspect_example_suite(empty)
+
+    with pytest.raises(ValueError, match="unable to resolve path"):
+        inspect_example_suite(tmp_path / "data" / "missing")
 
     without_source = tmp_path / "CVE-without-source"
     without_source.mkdir()

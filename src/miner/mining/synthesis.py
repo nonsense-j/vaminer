@@ -20,12 +20,11 @@ from ..agent.contracts import (
 from ..anchors.scanner import AnchorQueryError, scan_anchors
 from ..models.anchors import (
     Anchor,
-    AstGrepExperience,
     AnchorIntent,
     AnchorPlan,
     AnchorSynthesisDelta,
     AnchorSynthesisResult,
-    MAX_SYNTHESIS_EXPERIENCES,
+    AstGrepExperience,
     QueryType,
 )
 from ..models.vas import RuleGenerationDraft, VASCoreInfo
@@ -104,9 +103,9 @@ def _normalize_anchor_plan(plan: AnchorPlan) -> AnchorPlan:
 
 
 def _assemble_anchor(intent: AnchorIntent, delta: AnchorSynthesisDelta) -> Anchor:
-    if delta.target_anchor_id != intent.id:
+    if delta.anchor_id != intent.id:
         raise AnchorSynthesisAcceptanceError(
-            f"synthesis output targets {delta.target_anchor_id!r}; expected {intent.id!r}"
+            f"synthesis output targets {delta.anchor_id!r}; expected {intent.id!r}"
         )
     if delta.query_weight > intent.behavior_weight:
         raise AnchorSynthesisAcceptanceError(
@@ -301,7 +300,8 @@ class AnchorSynthesisSession:
         last_delta: AnchorSynthesisDelta | None = None
         last_errors: tuple[str, ...] = ()
         experiences: list[AstGrepExperience] = []
-        experience_keys: set[str] = set()
+        experience_positions: dict[str, int] = {}
+        observed_turns: int | None = None
         try:
             for repair in range(1 + task.limits.output_retries):
                 if repair and last_errors:
@@ -314,13 +314,15 @@ class AnchorSynthesisSession:
                     prompt = task.prompt
                 run = await child_session.send(prompt)
                 last_delta = run.output
+                if run.usage is not None and run.usage.turns is not None:
+                    observed_turns = run.usage.turns
                 anchor = _assemble_anchor(intent, last_delta)
                 for experience in last_delta.experiences:
-                    if len(experiences) >= MAX_SYNTHESIS_EXPERIENCES:
-                        break
                     key = experience.identity
-                    if key not in experience_keys:
-                        experience_keys.add(key)
+                    if key in experience_positions:
+                        experiences[experience_positions[key]] = experience
+                    else:
+                        experience_positions[key] = len(experiences)
                         experiences.append(experience)
                 last_errors = _query_errors(anchor, intent, self.authority)
                 if not last_errors:
@@ -350,6 +352,15 @@ class AnchorSynthesisSession:
                 )
         finally:
             await child_session.close()
+        max_turns = task.limits.request_limit
+        if (
+            experiences
+            and max_turns is not None
+            and observed_turns is not None
+            and observed_turns * 2 < max_turns
+        ):
+            experiences = []
+            result = result.model_copy(update={"experiences": []})
         if experiences:
             try:
                 await asyncio.to_thread(

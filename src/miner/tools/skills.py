@@ -12,15 +12,16 @@ from pathlib import Path
 
 import portalocker
 
-from ..models.anchors import AstGrepExperience, AstGrepExperienceOutcome
+from ..models.anchors import AstGrepExperience, AstGrepExperienceMode
 from .text import format_file_read, truncation_footer
 
 MAX_SKILL_RESOURCE_FILES = 100
 MAX_SKILL_RESOURCE_BYTES = 256 * 1024
 MAX_SKILL_RESOURCE_LINES = 200
-MAX_AST_GREP_EXPERIENCES = 24
 AST_GREP_EXPERIENCES_RESOURCE = "references/experiences.md"
-_EXPERIENCE_LINE = re.compile(r"^- \*\*(success|pitfall)\*\*: (.+)$")
+_EXPERIENCE_LINE = re.compile(
+    r"^- \[(?P<lesson_id>[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*)\] (?P<lesson>.+)$"
+)
 _EXPERIENCE_HEADER = """# AST-Grep Query-Writing Experiences
 
 Read these compact, non-redundant query-writing lessons before constructing a
@@ -168,8 +169,9 @@ def _read_ast_grep_experiences(path: Path) -> list[AstGrepExperience]:
             raise ValueError(f"malformed ast-grep experience at line {line_number}")
         experiences.append(
             AstGrepExperience(
-                outcome=AstGrepExperienceOutcome(match.group(1)),
-                lesson=match.group(2),
+                mode=AstGrepExperienceMode.ADD,
+                lesson_id=match.group("lesson_id"),
+                lesson=match.group("lesson"),
             )
         )
     return experiences
@@ -189,70 +191,87 @@ def _atomic_write_text(path: Path, content: str) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def _merge_ast_grep_experience(
-    experiences: list[AstGrepExperience],
-    candidate: AstGrepExperience,
-) -> bool:
-    """Add or extend one lesson without retaining a redundant shorter form."""
+def _next_lesson_id(scope: str, experiences: Sequence[AstGrepExperience]) -> str:
+    used = {
+        experience.lesson_id.casefold()
+        for experience in experiences
+        if experience.scope.casefold() == scope.casefold()
+    }
+    number = 1
+    while f"{scope}-{number}".casefold() in used:
+        number += 1
+    return f"{scope}-{number}"
 
-    for index, current in enumerate(experiences):
-        if candidate.identity == current.identity:
-            return False
-        padded_candidate = f" {candidate.identity} "
-        padded_current = f" {current.identity} "
-        if padded_current in padded_candidate:
-            if candidate.outcome != current.outcome:
-                return False
-            experiences[index] = candidate
-            return True
-        if padded_candidate in padded_current:
-            return False
-    experiences.append(candidate)
-    return True
+
+def _render_ast_grep_experiences(experiences: Sequence[AstGrepExperience]) -> str:
+    grouped: dict[str, list[AstGrepExperience]] = {}
+    scopes: list[str] = []
+    for experience in experiences:
+        scope = experience.scope
+        if scope not in grouped:
+            grouped[scope] = []
+            scopes.append(scope)
+        grouped[scope].append(experience)
+
+    ordered_scopes = (["all"] if "all" in grouped else []) + [
+        scope for scope in scopes if scope != "all"
+    ]
+    lines = [_EXPERIENCE_HEADER.rstrip()]
+    for scope in ordered_scopes:
+        lines.extend(("", f"## {'Language-Agnostic Lessons' if scope == 'all' else f'{scope} Query Lessons'}", ""))
+        lines.extend(f"- [{item.lesson_id}] {item.lesson}" for item in grouped[scope])
+    return "\n".join(lines) + "\n"
 
 
 def record_ast_grep_experiences(
     skill_root: str | Path,
     experiences: Sequence[AstGrepExperience],
 ) -> int:
-    """Read, consolidate, and atomically persist bounded query-writing lessons."""
+    """Read, apply, and atomically persist ID-addressed query-writing lessons."""
 
-    incoming = [AstGrepExperience.model_validate(item) for item in experiences]
+    incoming = [AstGrepExperience.model_validate(item.model_dump()) for item in experiences]
     if not incoming:
         return 0
     root = _skill_root({"ast-grep": Path(skill_root)}, "ast-grep")
     path = root / AST_GREP_EXPERIENCES_RESOURCE
     with _skill_resource_lock(root, exclusive=True):
         current = _read_ast_grep_experiences(path)
-        merged: list[AstGrepExperience] = []
-        for item in current:
-            _merge_ast_grep_experience(merged, item)
-        changed = merged != current
+        merged = list(current)
+        changed = False
         updates = 0
         for item in incoming:
-            if _merge_ast_grep_experience(merged, item):
+            index = next(
+                (index for index, current_item in enumerate(merged) if current_item.identity == item.identity),
+                None,
+            )
+            if item.mode is AstGrepExperienceMode.ADD:
+                if index is not None:
+                    if merged[index].lesson == item.lesson:
+                        continue
+                    item = item.model_copy(update={"lesson_id": _next_lesson_id(item.scope, merged)})
+                merged.append(item)
                 changed = True
                 updates += 1
-        if len(merged) > MAX_AST_GREP_EXPERIENCES:
-            merged = merged[-MAX_AST_GREP_EXPERIENCES:]
+                continue
+            if index is None:
+                raise ValueError(f"cannot replace unknown ast-grep experience {item.lesson_id}")
+            if merged[index].lesson == item.lesson:
+                continue
+            merged[index] = item
             changed = True
+            updates += 1
         if not changed:
             return 0
-        body = "\n".join(
-            f"- **{item.outcome.value}**: {item.lesson}"
-            for item in merged
-        )
-        _atomic_write_text(path, f"{_EXPERIENCE_HEADER}\n{body}\n")
+        _atomic_write_text(path, _render_ast_grep_experiences(merged))
         return updates
 
 
 __all__ = [
+    "AST_GREP_EXPERIENCES_RESOURCE",
     "MAX_SKILL_RESOURCE_BYTES",
     "MAX_SKILL_RESOURCE_FILES",
     "MAX_SKILL_RESOURCE_LINES",
-    "AST_GREP_EXPERIENCES_RESOURCE",
-    "MAX_AST_GREP_EXPERIENCES",
     "list_skill_resources",
-    "record_ast_grep_experiences",
     "read_skill_resource",
+    "record_ast_grep_experiences",
 ]

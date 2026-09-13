@@ -45,17 +45,9 @@ uv run python -m src.miner.preflight --runtime pydanic-sdk
 uv run python -m src.miner.preflight --runtime claude-cli
 ```
 
-The interactive command streams each check and long-running wait to stderr, then prints a final report. The
-default preflight does not call a model. It validates Python and bundled assets, writable paths, Git, `rg`,
-an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration.
-For Claude it also checks the CLI flags, loads and exercises the bundled Langfuse transcript hook when tracing
-is configured, and runs a real MCP handshake/list-tools/tool-call cycle.
+The interactive command streams each check and long-running wait to stderr, then prints a final report. The default preflight does not call a model. It validates Python and bundled assets, writable paths, Git, `rg`, an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration. For Claude it also checks the CLI flags, loads and exercises the bundled Langfuse transcript hook when tracing is configured, and runs a real MCP handshake/list-tools/tool-call cycle.
 
-Add `--live` to make one small model request. The Agent must call a probe tool, return structured output, and,
-when Langfuse is enabled, produce at least one runtime observation under the preflight trace. This request may
-incur provider cost. Add `--json` for a machine-readable stdout report; progress remains on stderr unless
-`--quiet` is supplied. Any failed required check produces exit code 1.
-Langfuse trace visibility is polled for up to 120 seconds by default, with a heartbeat every 10 seconds.
+Add `--live` to make one small model request. The Agent must call a probe tool, return structured output, and, when Langfuse is enabled, produce at least one runtime observation under the preflight trace. This request may incur provider cost. Add `--json` for a machine-readable stdout report; progress remains on stderr unless `--quiet` is supplied. Any failed required check produces exit code 1. Langfuse trace visibility is polled for up to 120 seconds by default, with a heartbeat every 10 seconds.
 
 ```bash
 uv run python -m src.miner.preflight --runtime claude-cli --live
@@ -73,7 +65,7 @@ uv run python -m src.miner.main CVE-2024-XXXX
 uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
-You can also pass an Example Suite directory. Its canonical registry and cache identity is its basename (typically something like a CWE or CVE ID). Files may be flat or arbitrarily nested, and all examples should demonstrate one shared defect pattern:
+You can also pass an Example Suite directory. When it is under `data/`, its canonical registry and cache identity is the normalized POSIX path relative to `data/` (typically something like a CWE or CVE ID); otherwise its basename is used. Files may be flat or arbitrarily nested, and all examples should demonstrate one shared defect pattern:
 
 ```bash
 uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
@@ -169,7 +161,7 @@ The Rule Generator never loads the ast-grep skill or authors query text. The AST
 
 One mining run selects exactly one Runtime Adapter and one configured model. All phases, including child Synthesizers, retain that identity; there is no per-phase routing or runtime fallback. `VAMiner` accepts either an Issue or Example Suite through an Input Adapter, then uses one shared RCA → Rule Generation → persistence workflow.
 
-`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts at most two plans, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; the query tool returns ast-grep stderr verbatim and accepts `debug_query` for raw patterns. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host deduplicates its bounded experience list and updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
+`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts at most two plans, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents, declared Case Artifacts, or persisted ast-grep experiences. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; the query tool returns ast-grep stderr verbatim and accepts `debug_query` for raw patterns. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host keeps only ID-based ADD/REPLACE experience updates that pass the multi-round quality gate and updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
 
 ### Miner module responsibilities
 

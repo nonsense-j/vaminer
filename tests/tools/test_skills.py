@@ -12,7 +12,6 @@ from src.miner.models import AstGrepExperience
 from src.miner.tools import skills as skills_module
 from src.miner.tools.skills import (
     AST_GREP_EXPERIENCES_RESOURCE,
-    MAX_AST_GREP_EXPERIENCES,
     list_skill_resources,
     read_skill_resource,
     record_ast_grep_experiences,
@@ -25,7 +24,8 @@ def _record_concurrent_experience(arguments: tuple[str, int]) -> int:
         skill_root,
         [
             AstGrepExperience(
-                outcome="success",
+                mode="ADD",
+                lesson_id=f"all-{index + 1}",
                 lesson=f"Reusable concurrent lesson number {index}.",
             )
         ],
@@ -61,35 +61,92 @@ def test_ast_grep_experiences_are_read_merged_and_deduplicated(tmp_path: Path):
     skill.mkdir()
     (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
     pitfall = AstGrepExperience(
-        outcome="pitfall",
+        mode="ADD",
+        lesson_id="all-1",
         lesson="A regex rule also needs an AST kind.",
     )
 
     assert record_ast_grep_experiences(skill, [pitfall]) == 1
     punctuation_only_duplicate = pitfall.model_copy(
-        update={"lesson": "a regex rule also needs an AST kind!"}
+        update={"lesson": " A regex rule also needs an AST kind. "},
     )
-    extension = pitfall.model_copy(
-        update={"lesson": "A regex rule also needs an AST kind for candidate-node selection."}
+    extension = AstGrepExperience(
+        mode="REPLACE",
+        lesson_id="all-1",
+        lesson="A regex rule also needs an AST kind for candidate-node selection.",
     )
     assert record_ast_grep_experiences(skill, [pitfall, punctuation_only_duplicate]) == 0
     assert record_ast_grep_experiences(skill, [extension]) == 1
-    conflicting_extension = AstGrepExperience(
-        outcome="success",
+    replacement = AstGrepExperience(
+        mode="REPLACE",
+        lesson_id="all-1",
         lesson=(
             "A regex rule also needs an AST kind for candidate-node selection "
             "in every query."
         ),
     )
-    assert record_ast_grep_experiences(skill, [conflicting_extension]) == 0
+    assert record_ast_grep_experiences(skill, [replacement]) == 1
+    assert record_ast_grep_experiences(
+        skill,
+        [AstGrepExperience(mode="ADD", lesson_id="C-1", lesson="C-specific lesson.")],
+    ) == 1
     rendered = read_skill_resource(
         {"ast-grep": skill},
         "ast-grep",
         AST_GREP_EXPERIENCES_RESOURCE,
     )
 
-    assert "A regex rule also needs an AST kind for candidate-node selection." in rendered
-    assert rendered.count("**pitfall**") == 1
+    assert "## Language-Agnostic Lessons" in rendered
+    assert "## C Query Lessons" in rendered
+    assert "- [all-1] A regex rule also needs an AST kind for candidate-node selection in every query." in rendered
+    assert "- [C-1] C-specific lesson." in rendered
+
+
+def test_experience_update_modes_are_id_addressed(tmp_path: Path):
+    skill = tmp_path / "ast-grep"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    record_ast_grep_experiences(
+        skill,
+        [AstGrepExperience(mode="ADD", lesson_id="C-1", lesson="Original C lesson.")],
+    )
+
+    assert record_ast_grep_experiences(
+        skill,
+        [AstGrepExperience(mode="ADD", lesson_id="C-1", lesson="Another C lesson.")],
+    ) == 1
+    with pytest.raises(ValueError, match="unknown ast-grep experience all-1"):
+        record_ast_grep_experiences(
+            skill,
+            [AstGrepExperience(mode="REPLACE", lesson_id="all-1", lesson="Missing lesson.")],
+        )
+
+    content = (skill / AST_GREP_EXPERIENCES_RESOURCE).read_text(encoding="utf-8")
+    assert "- [C-1] Original C lesson." in content
+    assert "- [C-2] Another C lesson." in content
+
+
+def test_unknown_replace_does_not_partially_apply_same_batch(tmp_path: Path):
+    skill = tmp_path / "ast-grep"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    record_ast_grep_experiences(
+        skill,
+        [AstGrepExperience(mode="ADD", lesson_id="all-1", lesson="Existing lesson.")],
+    )
+
+    with pytest.raises(ValueError, match="unknown ast-grep experience all-99"):
+        record_ast_grep_experiences(
+            skill,
+            [
+                AstGrepExperience(mode="ADD", lesson_id="all-2", lesson="Batch addition."),
+                AstGrepExperience(mode="REPLACE", lesson_id="all-99", lesson="Missing lesson."),
+            ],
+        )
+
+    content = (skill / AST_GREP_EXPERIENCES_RESOURCE).read_text(encoding="utf-8")
+    assert "- [all-1] Existing lesson." in content
+    assert "Batch addition." not in content
 
 
 def test_concurrent_ast_grep_experience_writes_do_not_lose_updates(tmp_path: Path):
@@ -112,15 +169,16 @@ def test_concurrent_ast_grep_experience_writes_do_not_lose_updates(tmp_path: Pat
 
     overflow = [
         AstGrepExperience(
-            outcome="pitfall",
-            lesson=f"Later bounded query lesson number {index}.",
+            mode="ADD",
+            lesson_id=f"all-{index + 25}",
+            lesson=f"Later query lesson number {index}.",
         )
         for index in range(5)
     ]
     assert record_ast_grep_experiences(skill, overflow) == len(overflow)
-    bounded = (skill / AST_GREP_EXPERIENCES_RESOURCE).read_text(encoding="utf-8")
-    assert bounded.count("- **") == MAX_AST_GREP_EXPERIENCES
-    assert all(item.lesson in bounded for item in overflow)
+    expanded = (skill / AST_GREP_EXPERIENCES_RESOURCE).read_text(encoding="utf-8")
+    assert expanded.count("- [") == 29
+    assert all(item.lesson in expanded for item in overflow)
 
 
 def test_skill_resource_readers_can_share_the_lock(tmp_path: Path):
@@ -161,7 +219,7 @@ def test_skill_resource_reader_waits_for_experience_writer(
     (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
     record_ast_grep_experiences(
         skill,
-        [AstGrepExperience(outcome="success", lesson="Initial reusable query lesson.")],
+        [AstGrepExperience(mode="ADD", lesson_id="all-1", lesson="Initial reusable query lesson.")],
     )
     writer_entered = Event()
     allow_write = Event()
@@ -177,7 +235,7 @@ def test_skill_resource_reader_waits_for_experience_writer(
         writer = executor.submit(
             record_ast_grep_experiences,
             skill,
-            [AstGrepExperience(outcome="pitfall", lesson="Later reusable query lesson.")],
+            [AstGrepExperience(mode="ADD", lesson_id="all-2", lesson="Later reusable query lesson.")],
         )
         assert writer_entered.wait(timeout=2)
         reader = executor.submit(

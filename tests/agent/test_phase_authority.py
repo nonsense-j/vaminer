@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.miner.agent import AgentPhase, InstructionLayers
+from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.mining.tasks import (
     PHASE_DEFINITIONS,
     make_ast_grep_synthesis_task,
@@ -11,15 +12,17 @@ from src.miner.mining.tasks import (
     make_root_cause_task,
     make_rule_generation_task,
 )
-from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.models import (
     AnchorIntent,
     AnchorPlan,
+    AnchorSynthesisDelta,
     AstGrepLanguage,
     BuggyComponent,
     GroundingPolicy,
     IssueCollectionInfo,
     RootCauseAnalysis,
+    RuleGenerationDraft,
+    VASCoreInfo,
 )
 
 
@@ -63,6 +66,33 @@ def test_phase_definitions_are_closed_and_least_privilege(tmp_path: Path):
     assert not {"write_file", "Write", "Bash"} & root_tools
     assert rule_tools == {"list_case_artifacts", "read_case_artifact", "synthesize_anchor_plan"}
     assert "write_case_artifact" not in synthesis_tools
+
+
+def test_phase_output_schemas_separate_wire_outputs_from_host_results(tmp_path: Path):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+
+    assert PHASE_DEFINITIONS[AgentPhase.ISSUE_COLLECTION].output_type is IssueCollectionInfo
+    assert PHASE_DEFINITIONS[AgentPhase.ISSUE_COLLECTION].result_type is IssueCollectionInfo
+    assert PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE].output_type is RootCauseAnalysis
+    assert PHASE_DEFINITIONS[AgentPhase.ROOT_CAUSE].result_type is RootCauseAnalysis
+    assert PHASE_DEFINITIONS[AgentPhase.RULE_GENERATION].output_type is RuleGenerationDraft
+    assert PHASE_DEFINITIONS[AgentPhase.RULE_GENERATION].result_type is VASCoreInfo
+
+    rule_task = make_rule_generation_task(
+        _root_cause(),
+        workspace_root=tmp_path,
+        source_root=source,
+        cases_dir=cases,
+        grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
+    )
+    assert rule_task.model_output_type is RuleGenerationDraft
+    assert rule_task.output_type is VASCoreInfo
+
+    assert PHASE_DEFINITIONS[AgentPhase.AST_GREP_SYNTHESIS].output_type is AnchorSynthesisDelta
+    assert PHASE_DEFINITIONS[AgentPhase.AST_GREP_SYNTHESIS].result_type is AnchorSynthesisDelta
 
 
 def test_instruction_layers_preserve_shared_input_runtime_order():

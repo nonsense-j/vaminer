@@ -23,7 +23,7 @@ from ..models.anchors import (
     AnchorSynthesisDelta,
 )
 from ..models.issue import IssueCollectionInfo
-from ..models.vas import VASCoreInfo
+from ..models.vas import RuleGenerationDraft, VASCoreInfo
 from ..utils.config import (
     MINER_MAX_TURNS_ISSUE_COLLECTION,
     MINER_MAX_TURNS_PER_ANCHOR,
@@ -91,12 +91,12 @@ def _validate_anchor_synthesis(
     if not isinstance(authority, AnchorSynthesisAuthority):  # pragma: no cover - AgentTask enforces this.
         return ("Anchor Synthesis output received the wrong Phase Authority",)
     intent = next(
-        (item for item in authority.plan.intents if item.id == authority.target_anchor_id),
+        (item for item in authority.plan.intents if item.id == authority.anchor_id),
         None,
     )
     if intent is None:  # pragma: no cover - task factory constructs both together.
-        return (f"unknown target intent {authority.target_anchor_id!r}",)
-    if value.target_anchor_id != intent.id or value.query_weight > intent.behavior_weight:
+        return (f"unknown target intent {authority.anchor_id!r}",)
+    if value.anchor_id != intent.id or value.query_weight > intent.behavior_weight:
         return (f"synthesis output drifted from target intent {intent.id!r}",)
     return ()
 
@@ -119,6 +119,7 @@ ISSUE_COLLECTION = PhaseDefinition(
     ),
     limits=RunLimits(request_limit=MINER_MAX_TURNS_ISSUE_COLLECTION, output_retries=2),
     validator=_validate_issue_collection,
+    result_type=IssueCollectionInfo,
 )
 
 ROOT_CAUSE = PhaseDefinition(
@@ -137,6 +138,7 @@ ROOT_CAUSE = PhaseDefinition(
     ),
     limits=RunLimits(request_limit=MINER_MAX_TURNS_ROOT_CAUSE, output_retries=2),
     validator=_validate_root_cause,
+    result_type=RootCauseAnalysis,
 )
 
 RULE_GENERATION = PhaseDefinition(
@@ -144,10 +146,11 @@ RULE_GENERATION = PhaseDefinition(
     agent_name="Rule Generator",
     description="Own rule semantics and a complete queryless Anchor Plan.",
     instructions=_instructions("rule_generator.md"),
-    output_type=VASCoreInfo,
+    output_type=RuleGenerationDraft,
     tools=("list_case_artifacts", "read_case_artifact", "synthesize_anchor_plan"),
     limits=RunLimits(request_limit=MINER_MAX_TURNS_RULE_GENERATION, output_retries=2),
     validator=_validate_rule_generation,
+    result_type=VASCoreInfo,
 )
 
 AST_GREP_SYNTHESIS = PhaseDefinition(
@@ -168,6 +171,7 @@ AST_GREP_SYNTHESIS = PhaseDefinition(
     ),
     limits=RunLimits(request_limit=MINER_MAX_TURNS_PER_ANCHOR, output_retries=2),
     validator=_validate_anchor_synthesis,
+    result_type=AnchorSynthesisDelta,
 )
 
 PHASE_DEFINITIONS = MappingProxyType(
@@ -445,12 +449,8 @@ def make_ast_grep_synthesis_task(
         grounding_policy=grounding_policy,
         root_cause=root_cause,
         plan=plan,
-        target_anchor_id=intent.id,
+        anchor_id=intent.id,
         skill_root=AST_GREP_SKILL_ROOT,
-    )
-    requirement = (
-        "Match the target behavior in at least one source file named by an "
-        "RCA component; exact component-span overlap is not required."
     )
     return AgentTask(
         task_id=task_id or f"ast-grep-synthesis:{iteration}:{intent.id}",

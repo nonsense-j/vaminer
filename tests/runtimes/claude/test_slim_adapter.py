@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.mining.tasks import (
     make_ast_grep_synthesis_task,
     make_root_cause_task,
     make_rule_generation_task,
 )
-from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.models import (
     AnchorIntent,
     AnchorPlan,
@@ -25,6 +25,8 @@ from src.miner.models import (
     IssueCollectionInfo,
     RootCauseAnalysis,
 )
+from src.miner.runtimes.claude import mcp as mcp_module
+from src.miner.runtimes.claude import policy as policy_module
 from src.miner.runtimes.claude.config import LANGFUSE_CLAUDE_PLUGIN_ID, ClaudeCodeConfig
 from src.miner.runtimes.claude.errors import (
     ClaudeCodeChildSynthesisError,
@@ -32,7 +34,6 @@ from src.miner.runtimes.claude.errors import (
     ClaudeCodeProtocolError,
     ClaudeCodeToolExecutionError,
 )
-from src.miner.runtimes.claude import mcp as mcp_module
 from src.miner.runtimes.claude.mcp import (
     SYNTHESIS_CONTEXT_ENV,
     SYNTHESIS_LOG_ENV,
@@ -41,7 +42,6 @@ from src.miner.runtimes.claude.mcp import (
     MCPServerSettings,
     build_server,
 )
-from src.miner.runtimes.claude import policy as policy_module
 from src.miner.runtimes.claude.policy import PolicyCompiler, cleanup_session_transcript
 from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
 from src.miner.runtimes.claude.protocol import ClaudeStreamDecoder, decode_claude_stream
@@ -402,7 +402,7 @@ def test_protocol_normalizes_type_and_content():
                     "type": "result",
                     "subtype": "success",
                     "structured_output": {
-                        "target_anchor_id": "copy-site",
+                        "anchor_id": "copy-site",
                         "type": "pattern",
                         "query": "copy($A)",
                         "query_weight": 2,
@@ -430,7 +430,7 @@ def test_protocol_keeps_malformed_terminal_json_for_model_repair():
                 {
                     "type": "result",
                     "subtype": "success",
-                    "result": '{"target_anchor_id": "copy-site"',
+                    "result": '{"anchor_id": "copy-site"',
                     "num_turns": 1,
                 }
             ),
@@ -496,7 +496,7 @@ def test_protocol_does_not_promote_nonterminal_output_tool_arguments():
                         "name": "return_anchor_synthesis_delta",
                         "id": "tool-1",
                         "input": {
-                            "target_anchor_id": "copy-site",
+                            "anchor_id": "copy-site",
                             "type": "pattern",
                             "query": "",
                             "query_weight": 1,
@@ -719,7 +719,7 @@ async def test_runtime_uses_ephemeral_invocation_and_returns_typed_delta(tmp_pat
     class Runner:
         async def run(self, *_args, **_kwargs):
             payload = {
-                "target_anchor_id": "copy-site",
+                "anchor_id": "copy-site",
                 "type": "pattern",
                 "query": "",
                 "query_weight": 2,
@@ -735,7 +735,7 @@ async def test_runtime_uses_ephemeral_invocation_and_returns_typed_delta(tmp_pat
 
     runtime._runner = Runner()
     result = await runtime.run(task)
-    assert result.output.target_anchor_id == "copy-site"
+    assert result.output.anchor_id == "copy-site"
     assert result.identity.runtime_id == "claude-cli"
     assert not (tmp_path / "artifacts").exists()
 
@@ -788,7 +788,7 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
             self.session_ids.append(argv[argv.index(session_flag) + 1])
             self.mcp_paths.append(argv[argv.index("--mcp-config") + 1])
             payload = {
-                "target_anchor_id": "wrong-site" if self.calls == 1 else "copy-site",
+                "anchor_id": "wrong-site" if self.calls == 1 else "copy-site",
                 "type": "pattern",
                 "query": "",
                 "query_weight": 2,
@@ -877,7 +877,7 @@ async def test_synthesizer_retries_crashed_process_with_fresh_session(tmp_path: 
                     duration_ms=1,
                 )
             payload = {
-                "target_anchor_id": "copy-site",
+                "anchor_id": "copy-site",
                 "type": "pattern",
                 "query": "",
                 "query_weight": 1,
@@ -897,7 +897,7 @@ async def test_synthesizer_retries_crashed_process_with_fresh_session(tmp_path: 
     runtime._runner = runner
     result = await runtime.run(task)
 
-    assert result.output.target_anchor_id == "copy-site"
+    assert result.output.anchor_id == "copy-site"
     assert result.attempts == 2
     assert runner.session_flags == ["--session-id", "--session-id"]
     assert len(set(runner.session_ids)) == 2
@@ -978,7 +978,7 @@ async def test_runtime_propagates_fatal_tool_failure_before_accepting_empty_quer
                 encoding="utf-8",
             )
             payload = {
-                "target_anchor_id": "copy-site",
+                "anchor_id": "copy-site",
                 "type": "pattern",
                 "query": "",
                 "query_weight": 1,

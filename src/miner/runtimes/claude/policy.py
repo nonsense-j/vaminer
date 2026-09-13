@@ -21,7 +21,6 @@ from ...agent.contracts import (
     RuleGenerationAuthority,
 )
 from ...agent.schema import descriptive_json_schema
-from ...models.vas import RuleGenerationDraft
 from ...utils.config import GITHUB_MIRROR_ENABLED
 from ...utils.telemetry import claude_trace_environment, propagated_trace_environment
 from .config import LANGFUSE_CLAUDE_PLUGIN_ID, ClaudeCodeConfig
@@ -79,8 +78,10 @@ _PROFILES = {
     AgentPhase.RULE_GENERATION: (MCPProfile.RULE_GENERATION, ()),
     AgentPhase.AST_GREP_SYNTHESIS: (MCPProfile.AST_GREP_SYNTHESIS, ()),
 }
+
+
 def model_output_type(task: AgentTask[Any]) -> type[BaseModel]:
-    return RuleGenerationDraft if task.phase is AgentPhase.RULE_GENERATION else task.output_type
+    return task.model_output_type
 
 
 def _write_private(path: Path, content: str) -> None:

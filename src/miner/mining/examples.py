@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..utils.paths import absolute_path, resolve_path
 from ..utils.workspace import Workspace
 
 _SOURCE_SUFFIXES = frozenset(
@@ -45,10 +46,17 @@ _SOURCE_SUFFIXES = frozenset(
 _MANIFEST_NAMES = ("manifest.json", "manifest.yaml", "manifest.yml")
 
 
-def example_suite_exp_id(basename: str) -> str:
-    """Return the canonical Example Suite id derived from its directory name."""
+def example_suite_exp_id(path: str | Path) -> str:
+    """Return a normalized Example Suite id relative to its ``data`` directory."""
 
-    return basename
+    candidate = absolute_path(Path(path))
+    data_root = next(
+        (parent for parent in candidate.parents if parent.name.casefold() == "data"),
+        None,
+    )
+    if data_root is not None:
+        return candidate.relative_to(data_root).as_posix()
+    return candidate.name
 
 
 class ExampleSuiteInspection(BaseModel):
@@ -58,7 +66,7 @@ class ExampleSuiteInspection(BaseModel):
 
     exp_id: str = Field(
         ...,
-        description="Canonical Example Suite id derived from the directory name",
+        description="Canonical Example Suite id normalized relative to its data directory",
     )
     source_path: str
     content_digest: str
@@ -87,7 +95,7 @@ def _inspect_example_suite(root: Path, *, exp_id: str, source_path: Path) -> Exa
             continue
         if not path.is_file():
             raise ValueError(f"example suite contains an unsupported filesystem entry: {path}")
-        relative = path.resolve().relative_to(root)
+        relative = path.relative_to(root)
         if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
             raise ValueError(f"example suite path is not a safe relative file path: {path}")
         paths.append(path)
@@ -98,7 +106,7 @@ def _inspect_example_suite(root: Path, *, exp_id: str, source_path: Path) -> Exa
     digest = hashlib.sha256()
     file_paths: list[str] = []
     for path in paths:
-        relative = path.resolve().relative_to(root).as_posix()
+        relative = path.relative_to(root).as_posix()
         size = path.stat().st_size
         is_source = path.suffix.lower() in _SOURCE_SUFFIXES
         if is_source:
@@ -126,17 +134,17 @@ def _inspect_example_suite(root: Path, *, exp_id: str, source_path: Path) -> Exa
 def inspect_example_suite(example_suite: Path) -> ExampleSuiteInspection:
     """Inspect an example suite and compute a stable path-and-content digest."""
 
-    raw_root = example_suite.expanduser()
+    raw_root = absolute_path(example_suite)
     if raw_root.is_symlink():
         raise ValueError(f"example suite must not be a symbolic link: {example_suite}")
-    root = raw_root.resolve()
+    root = resolve_path(raw_root, strict=True)
     if not root.is_dir():
         raise ValueError(f"example suite is not an existing directory: {example_suite}")
     if not root.name:
         raise ValueError(f"example suite must have a stable basename: {example_suite}")
     return _inspect_example_suite(
         root,
-        exp_id=example_suite_exp_id(root.name),
+        exp_id=example_suite_exp_id(root),
         source_path=root,
     )
 
@@ -147,7 +155,7 @@ def _same_snapshot(
 ) -> bool:
     try:
         copied = _inspect_example_suite(
-            snapshot.resolve(),
+            resolve_path(snapshot),
             exp_id=inspection.exp_id,
             source_path=Path(inspection.source_path),
         )
@@ -196,7 +204,7 @@ def materialize_example_suite(
 
     intake = ExampleSuiteIntake(
         **inspection.model_dump(mode="json"),
-        snapshot_path=snapshot.resolve().as_posix(),
+        snapshot_path=resolve_path(snapshot, strict=True).as_posix(),
         snapshot_ref=snapshot.relative_to(workspace.root).as_posix(),
     )
     return intake

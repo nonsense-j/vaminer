@@ -32,15 +32,15 @@ from ...agent.contracts import (
     RuntimeIdentity,
     RuntimeUsage,
 )
-from ...mining.validation.analysis import finalize_root_cause_cases
-from ...models.anchors import AnchorPlan, AnchorSynthesisResult
-from ...models.vas import RuleGenerationDraft
 from ...mining.synthesis import (
     AnchorPlanError,
     AnchorSynthesisAcceptanceError,
     AnchorSynthesisLimitError,
     AnchorSynthesisSession,
 )
+from ...mining.validation.analysis import finalize_root_cause_cases
+from ...models.anchors import AnchorPlan, AnchorSynthesisResult
+from ...models.vas import RuleGenerationDraft
 from ...tools.ast_grep import AstGrepQueryError, run_ast_grep
 from ...tools.cases import list_case_artifacts as list_cases_impl
 from ...tools.cases import read_case_artifact as read_case_impl
@@ -48,11 +48,11 @@ from ...tools.cases import write_case_artifact as write_case_impl
 from ...tools.cve import fetch_cve
 from ...tools.github import fetch_github_issue, parse_commit
 from ...tools.repo import read_patch_diff_from_repo
+from ...tools.skills import list_skill_resources as list_skills_impl
+from ...tools.skills import read_skill_resource as read_skill_impl
 from ...tools.src import list_src_files as list_src_impl
 from ...tools.src import read_src_file as read_src_impl
 from ...tools.src import search_src_files as search_src_impl
-from ...tools.skills import list_skill_resources as list_skills_impl
-from ...tools.skills import read_skill_resource as read_skill_impl
 from ...utils.config import (
     MINER_AST_GREP_MAX_SAMPLE_SIZE,
     MINER_AST_GREP_SAMPLE_SIZE,
@@ -100,7 +100,7 @@ class PydanticAIOutputValidationError(PydanticAIRuntimeError):
 class _PydanticAgentSession:
     """A single Pydantic AI Agent conversation with resumable message history."""
 
-    def __init__(self, runtime: "PydanticAIRuntime", task: AgentTask[Any]) -> None:
+    def __init__(self, runtime: PydanticAIRuntime, task: AgentTask[Any]) -> None:
         self._runtime = runtime
         self._task = task
         self._model = runtime._resolve_model()
@@ -469,7 +469,7 @@ class PydanticAIRuntime:
         else:  # pragma: no cover
             raise PydanticAIRuntimeConfigurationError(f"unsupported phase: {task.phase.value}")
 
-        model_output_type: type[BaseModel] = RuleGenerationDraft if session is not None else task.output_type
+        model_output_type = task.model_output_type
         agent = Agent(
             name=task.agent_name,
             description=task.description,

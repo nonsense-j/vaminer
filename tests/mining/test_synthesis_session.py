@@ -4,16 +4,29 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.miner.agent import AgentRunResult, RuleGenerationAuthority, RuntimeIdentity
+from src.miner.agent import (
+    AgentRunResult,
+    RuleGenerationAuthority,
+    RuntimeIdentity,
+    RuntimeUsage,
+)
 from src.miner.anchors.scanner import AnchorExecutionError, AnchorQueryError
+from src.miner.mining import synthesis as synthesis_module
+from src.miner.mining.synthesis import (
+    AnchorPlanError,
+    AnchorSynthesisLimitError,
+    AnchorSynthesisSession,
+    deduplicate_query_anchors,
+)
+from src.miner.mining.tasks import make_ast_grep_synthesis_task
 from src.miner.mining.validation.vas import validate_vas_core
 from src.miner.models import (
     Anchor,
     AnchorIntent,
     AnchorPlan,
-    AstGrepExperience,
     AnchorSynthesisDelta,
     AnchorSynthesisResult,
+    AstGrepExperience,
     AstGrepLanguage,
     BuggyComponent,
     GroundingPolicy,
@@ -22,14 +35,6 @@ from src.miner.models import (
     RootCauseAnalysis,
     RuleGenerationDraft,
     Scenarios,
-)
-from src.miner.mining import synthesis as synthesis_module
-from src.miner.mining.tasks import make_ast_grep_synthesis_task
-from src.miner.mining.synthesis import (
-    AnchorPlanError,
-    AnchorSynthesisLimitError,
-    AnchorSynthesisSession,
-    deduplicate_query_anchors,
 )
 
 
@@ -77,7 +82,7 @@ async def test_session_owns_immutable_fields_latest_batch_and_limit(tmp_path: Pa
         task_labels.append((task.task_id, task.agent_name))
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type=QueryType.PATTERN,
                 query="copy($A)",
                 query_weight=3,
@@ -132,7 +137,7 @@ async def test_rejected_second_plan_keeps_first_receipt(tmp_path: Path, monkeypa
     async def execute(task):
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type="pattern",
                 query="x",
                 query_weight=1,
@@ -161,7 +166,7 @@ async def test_session_waits_for_sibling_cleanup_before_propagating_failure(tmp_
     sibling_stopped = asyncio.Event()
 
     async def execute(task):
-        if task.authority.target_anchor_id == "copy-site":
+        if task.authority.anchor_id == "copy-site":
             await sibling_started.wait()
             raise RuntimeError("synthesis failed")
         sibling_started.set()
@@ -223,7 +228,7 @@ async def test_plan_normalizes_duplicate_case_references_after_collective_assign
         observed_required_cases.append(intent.required_cases)
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type="pattern",
                 query="copy($A)",
                 query_weight=1,
@@ -302,7 +307,7 @@ async def test_plan_has_no_fixed_intent_count(
     async def execute(task):
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type=QueryType.PATTERN,
                 query="copy($A)",
                 query_weight=1,
@@ -324,7 +329,7 @@ def test_delta_wire_shape_forbids_intent_fields():
     with pytest.raises(ValidationError):
         AnchorSynthesisDelta.model_validate(
             {
-                "target_anchor_id": "copy-site",
+                "anchor_id": "copy-site",
                 "type": "pattern",
                 "query": "x",
                 "query_weight": 1,
@@ -437,7 +442,7 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
         prompts.append(task.prompt)
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type="pattern",
                 query="broken(",
                 query_weight=1,
@@ -500,14 +505,15 @@ async def test_session_returns_and_persists_deduplicated_synthesis_experiences(
 
     monkeypatch.setattr(synthesis_module, "record_ast_grep_experiences", record)
     lesson = AstGrepExperience(
-        outcome="pitfall",
+        mode="ADD",
+        lesson_id="C-1",
         lesson="A C call fragment may require statement context.",
     )
 
     async def execute(task):
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type="pattern",
                 query="copy($A)",
                 query_weight=1,
@@ -525,9 +531,9 @@ async def test_session_returns_and_persists_deduplicated_synthesis_experiences(
     assert recorded == [lesson]
 
 
-def test_delta_limits_and_deduplicates_query_writing_experiences():
+def test_delta_normalizes_and_deduplicates_query_writing_experience_updates():
     common = {
-        "target_anchor_id": "copy-site",
+        "anchor_id": "copy-site",
         "type": "pattern",
         "query": "copy($A)",
         "query_weight": 1,
@@ -535,22 +541,127 @@ def test_delta_limits_and_deduplicates_query_writing_experiences():
         "plan_suggestion": "",
     }
     lessons = [
-        {"outcome": "success", "lesson": f"Reusable query lesson number {index}."}
-        for index in range(4)
+        {"mode": "ADD", "lesson_id": "all-1", "lesson": " initial lesson "},
+        {"mode": "ADD", "lesson_id": "all-2", "lesson": "first\n lesson"},
+        {"mode": "REPLACE", "lesson_id": "all-1", "lesson": "updated guidance"},
+        {"mode": "ADD", "lesson_id": "all-3", "lesson": "third lesson"},
+        {"mode": "ADD", "lesson_id": "all-4", "lesson": "fourth lesson"},
     ]
 
-    with pytest.raises(ValidationError, match="at most 3 items"):
-        AnchorSynthesisDelta.model_validate({**common, "experiences": lessons})
-    with pytest.raises(ValidationError, match="duplicate query-writing lessons"):
-        AnchorSynthesisDelta.model_validate(
-            {
-                **common,
-                "experiences": [
-                    {"outcome": "pitfall", "lesson": "Regex query needs a node kind."},
-                    {"outcome": "pitfall", "lesson": "regex query needs a node kind!"},
+    delta = AnchorSynthesisDelta.model_validate({**common, "experiences": lessons})
+
+    assert [(experience.lesson_id, experience.lesson) for experience in delta.experiences] == [
+        ("all-1", "updated guidance"),
+        ("all-2", "first lesson"),
+        ("all-3", "third lesson"),
+        ("all-4", "fourth lesson"),
+    ]
+
+    long_lesson = AnchorSynthesisDelta.model_validate(
+        {
+            **common,
+            "experiences": [
+                {"mode": "ADD", "lesson_id": "all-99", "lesson": "x" * 100}
+            ],
+        }
+    )
+    assert long_lesson.experiences[0].lesson == "x" * 100
+
+
+@pytest.mark.asyncio
+async def test_session_skips_experiences_when_turns_are_below_half_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
+    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: ())
+    recorded: list[AstGrepExperience] = []
+    monkeypatch.setattr(
+        synthesis_module,
+        "record_ast_grep_experiences",
+        lambda _root, experiences: recorded.extend(experiences) or len(experiences),
+    )
+
+    async def execute(task):
+        return AgentRunResult(
+            output=AnchorSynthesisDelta(
+                anchor_id=task.authority.anchor_id,
+                type="pattern",
+                query="copy($A)",
+                query_weight=1,
+                adjustments=[],
+                experiences=[
+                    AstGrepExperience(
+                        mode="ADD",
+                        lesson_id="all-1",
+                        lesson="A reusable lesson discovered after debugging.",
+                    )
                 ],
-            }
+                plan_suggestion="",
+            ),
+            identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
+            usage=RuntimeUsage(turns=19),
         )
+
+    result = await AnchorSynthesisSession(
+        authority,
+        workspace_root=tmp_path,
+        execute=execute,
+    ).synthesize(_plan())
+
+    assert result[0].experiences == []
+    assert recorded == []
+
+
+def test_delta_keeps_all_distinct_experience_updates():
+    common = {
+        "anchor_id": "copy-site",
+        "type": "pattern",
+        "query": "copy($A)",
+        "query_weight": 1,
+        "adjustments": [],
+        "plan_suggestion": "",
+    }
+    delta = AnchorSynthesisDelta.model_validate(
+        {
+            **common,
+            "experiences": [
+                {
+                    "mode": "ADD",
+                    "lesson_id": f"all-{index}",
+                    "lesson": f"lesson {index}",
+                }
+                for index in range(1, 31)
+            ],
+        }
+    )
+
+    assert len(delta.experiences) == 30
+
+
+def test_delta_normalizes_lesson_whitespace():
+    common = {
+        "anchor_id": "copy-site",
+        "type": "pattern",
+        "query": "copy($A)",
+        "query_weight": 1,
+        "adjustments": [],
+        "plan_suggestion": "",
+    }
+    delta = AnchorSynthesisDelta.model_validate(
+        {
+            **common,
+            "experiences": [
+                {"mode": "ADD", "lesson_id": "all-1", "lesson": " a lesson "},
+            ],
+        }
+    )
+
+    assert delta.experiences[0].lesson == "a lesson"
 
 
 @pytest.mark.asyncio
@@ -571,7 +682,7 @@ async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, 
             self.prompts.append(prompt)
             return AgentRunResult(
                 output=AnchorSynthesisDelta(
-                    target_anchor_id="copy-site",
+                    anchor_id="copy-site",
                     type="pattern",
                     query="copy($A)",
                     query_weight=1,
@@ -662,7 +773,7 @@ def test_query_dedup_keeps_weighted_representatives_and_disabled_anchors():
 
 
 @pytest.mark.asyncio
-async def test_repair_attempts_share_one_three_experience_write_budget(
+async def test_repair_attempts_keep_distinct_experience_updates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -687,14 +798,15 @@ async def test_repair_attempts_share_one_three_experience_write_budget(
         calls += 1
         return AgentRunResult(
             output=AnchorSynthesisDelta(
-                target_anchor_id=task.authority.target_anchor_id,
+                anchor_id=task.authority.anchor_id,
                 type="pattern",
                 query="copy($A)",
                 query_weight=1,
                 adjustments=[],
                 experiences=[
                     AstGrepExperience(
-                        outcome="pitfall",
+                        mode="ADD",
+                        lesson_id=f"all-{calls}",
                         lesson=f"Attempt {calls} produced a reusable query-writing lesson.",
                     )
                 ],
