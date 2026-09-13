@@ -24,7 +24,6 @@ from ..models.anchors import (
     AnchorPlan,
     AnchorSynthesisDelta,
     AnchorSynthesisResult,
-    AstGrepExperience,
     QueryType,
 )
 from ..models.vas import RuleGenerationDraft, VASCoreInfo
@@ -299,9 +298,7 @@ class AnchorSynthesisSession:
             child_session = _CallableAgentSession(task, self._execute)
         last_delta: AnchorSynthesisDelta | None = None
         last_errors: tuple[str, ...] = ()
-        experiences: list[AstGrepExperience] = []
-        experience_positions: dict[str, int] = {}
-        observed_turns: int | None = None
+        synthesizer_turns: int | None = None
         try:
             for repair in range(1 + task.limits.output_retries):
                 if repair and last_errors:
@@ -314,22 +311,16 @@ class AnchorSynthesisSession:
                     prompt = task.prompt
                 run = await child_session.send(prompt)
                 last_delta = run.output
+                # Runtime sessions report cumulative usage across resumed sends.
                 if run.usage is not None and run.usage.turns is not None:
-                    observed_turns = run.usage.turns
+                    synthesizer_turns = run.usage.turns
                 anchor = _assemble_anchor(intent, last_delta)
-                for experience in last_delta.experiences:
-                    key = experience.identity
-                    if key in experience_positions:
-                        experiences[experience_positions[key]] = experience
-                    else:
-                        experience_positions[key] = len(experiences)
-                        experiences.append(experience)
                 last_errors = _query_errors(anchor, intent, self.authority)
                 if not last_errors:
                     result = AnchorSynthesisResult(
                         anchor=anchor,
                         adjustments=last_delta.adjustments,
-                        experiences=experiences,
+                        experiences=last_delta.experiences,
                         plan_suggestion=last_delta.plan_suggestion,
                     )
                     break
@@ -347,26 +338,25 @@ class AnchorSynthesisSession:
                 result = AnchorSynthesisResult(
                     anchor=disabled,
                     adjustments=[*last_delta.adjustments, "Disabled after deterministic query validation failed."],
-                    experiences=experiences,
+                    experiences=last_delta.experiences,
                     plan_suggestion=last_delta.plan_suggestion,
                 )
         finally:
             await child_session.close()
         max_turns = task.limits.request_limit
         if (
-            experiences
+            result.experiences
             and max_turns is not None
-            and observed_turns is not None
-            and observed_turns * 2 < max_turns
+            and synthesizer_turns is not None
+            and synthesizer_turns * 2 < max_turns
         ):
-            experiences = []
             result = result.model_copy(update={"experiences": []})
-        if experiences:
+        if result.experiences:
             try:
                 await asyncio.to_thread(
                     record_ast_grep_experiences,
                     task.authority.skill_root,
-                    experiences,
+                    result.experiences,
                 )
             except (OSError, RuntimeError, ValueError) as exc:
                 logger.warning("Could not persist ast-grep synthesis experiences: %s", exc)

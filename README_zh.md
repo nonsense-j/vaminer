@@ -161,7 +161,7 @@ Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Sy
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent、Case Artifact 和持久化的 ast-grep experience 都没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 只接受通过多轮质量门槛的、按 lesson ID 执行的 ADD/REPLACE 更新，并在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它最多接受两次 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。每个 Synthesizer 只贡献其最终完整输出中的 experience：通过多轮质量门槛后按 lesson ID 去重，并且每个 Synthesizer 最多保留 3 条；共享持久化 skill 的 experience 总数没有固定上限。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
 
 ### Miner 模块职责
 

@@ -47,6 +47,7 @@ Translate one supplied structural intent into the smallest faithful ast-grep que
 - Return an empty experience list by default. Report an experience only when this target required multiple query/debug rounds and the evidence revealed concise, reusable guidance. A query that succeeds immediately, or within fewer than half of the configured turns, should not produce an experience.
 - Compare against `references/experiences.md` first. Do not restate an existing lesson. If a lesson needs a new caveat, use `REPLACE` with its exact `lesson_id` and preserve the existing wording while appending the caveat.
 - Each experience contains exactly `mode` (`ADD` or `REPLACE`), `lesson_id` (`all-N` or `<LANGUAGE>-N`), and a short, self-contained `lesson`. Use `all` for language-agnostic guidance and the uppercase ast-grep language name for language-specific guidance.
+- Return no more than three distinct experience updates for one Synthesizer output; the host uses only the final complete output after any repair/resume.
 - `ADD` uses the next unused ID in its section. `REPLACE` updates the existing lesson with that ID. Lessons are stored as `- [lesson_id] lesson` under the matching language section.
 - Keep lessons project-independent, concise, and supported by stderr, debug trees, or match results. Exclude repository paths, issue or intent semantics, match counts, routine validation outcomes, tool narration, and query transcripts. State the language or query form when it materially affects the lesson.
 

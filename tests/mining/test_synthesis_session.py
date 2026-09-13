@@ -554,7 +554,6 @@ def test_delta_normalizes_and_deduplicates_query_writing_experience_updates():
         ("all-1", "updated guidance"),
         ("all-2", "first lesson"),
         ("all-3", "third lesson"),
-        ("all-4", "fourth lesson"),
     ]
 
     long_lesson = AnchorSynthesisDelta.model_validate(
@@ -617,7 +616,7 @@ async def test_session_skips_experiences_when_turns_are_below_half_the_budget(
     assert recorded == []
 
 
-def test_delta_keeps_all_distinct_experience_updates():
+def test_delta_caps_distinct_experience_updates_at_three():
     common = {
         "anchor_id": "copy-site",
         "type": "pattern",
@@ -640,7 +639,11 @@ def test_delta_keeps_all_distinct_experience_updates():
         }
     )
 
-    assert len(delta.experiences) == 30
+    assert [experience.lesson_id for experience in delta.experiences] == [
+        "all-1",
+        "all-2",
+        "all-3",
+    ]
 
 
 def test_delta_normalizes_lesson_whitespace():
@@ -773,7 +776,7 @@ def test_query_dedup_keeps_weighted_representatives_and_disabled_anchors():
 
 
 @pytest.mark.asyncio
-async def test_repair_attempts_keep_distinct_experience_updates(
+async def test_repair_attempts_keep_only_final_experience_updates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -796,6 +799,34 @@ async def test_repair_attempts_keep_distinct_experience_updates(
     async def execute(task):
         nonlocal calls
         calls += 1
+        lessons = {
+            1: [
+                AstGrepExperience(
+                    mode="ADD",
+                    lesson_id="all-1",
+                    lesson="First attempt produced an obsolete lesson.",
+                ),
+                AstGrepExperience(
+                    mode="ADD",
+                    lesson_id="all-2",
+                    lesson="First attempt produced another obsolete lesson.",
+                ),
+            ],
+            2: [
+                AstGrepExperience(
+                    mode="ADD",
+                    lesson_id="all-3",
+                    lesson="Second attempt produced an obsolete lesson.",
+                ),
+            ],
+            3: [
+                AstGrepExperience(
+                    mode="ADD",
+                    lesson_id="all-4",
+                    lesson="Final attempt produced the reusable lesson.",
+                ),
+            ],
+        }[calls]
         return AgentRunResult(
             output=AnchorSynthesisDelta(
                 anchor_id=task.authority.anchor_id,
@@ -803,13 +834,7 @@ async def test_repair_attempts_keep_distinct_experience_updates(
                 query="copy($A)",
                 query_weight=1,
                 adjustments=[],
-                experiences=[
-                    AstGrepExperience(
-                        mode="ADD",
-                        lesson_id=f"all-{calls}",
-                        lesson=f"Attempt {calls} produced a reusable query-writing lesson.",
-                    )
-                ],
+                experiences=lessons,
                 plan_suggestion="",
             ),
             identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
@@ -822,5 +847,5 @@ async def test_repair_attempts_keep_distinct_experience_updates(
     ).synthesize(_plan())
 
     assert calls == 3
-    assert len(result[0].experiences) == 3
+    assert [experience.lesson_id for experience in result[0].experiences] == ["all-4"]
     assert recorded_batches == [result[0].experiences]

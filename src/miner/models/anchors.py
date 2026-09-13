@@ -16,6 +16,9 @@ class AstGrepExperienceMode(StrEnum):
     REPLACE = "REPLACE"
 
 
+MAX_SYNTHESIS_EXPERIENCES = 3
+
+
 _EXPERIENCE_ID = re.compile(
     r"^(?P<scope>all|[a-z][a-z0-9]*)-(?P<number>[1-9][0-9]*)$",
     re.IGNORECASE,
@@ -61,6 +64,23 @@ class AstGrepExperience(BaseModel):
     @property
     def scope(self) -> str:
         return self.lesson_id.rsplit("-", 1)[0]
+
+
+def _normalize_synthesis_experiences(
+    experiences: list[AstGrepExperience],
+) -> list[AstGrepExperience]:
+    """Keep the first three ID-addressed lessons from one final Synthesizer output."""
+
+    selected: list[AstGrepExperience] = []
+    positions: dict[str, int] = {}
+    for experience in experiences:
+        identity = experience.identity
+        if identity in positions:
+            selected[positions[identity]] = experience
+        else:
+            positions[identity] = len(selected)
+            selected.append(experience)
+    return selected[:MAX_SYNTHESIS_EXPERIENCES]
 
 
 class Anchor(BaseModel):
@@ -187,7 +207,8 @@ class AnchorSynthesisDelta(BaseModel):
         default_factory=list,
         description=(
             "Optional ADD or REPLACE operations for concise, project-independent "
-            "ast-grep query-writing lessons; empty by default"
+            "ast-grep query-writing lessons; empty by default and capped at three "
+            "lessons per Synthesizer output"
         ),
     )
     plan_suggestion: str = Field(
@@ -200,20 +221,11 @@ class AnchorSynthesisDelta(BaseModel):
 
     @field_validator("experiences", mode="after")
     @classmethod
-    def keep_first_unique_experiences(
+    def normalize_experiences(
         cls,
         experiences: list[AstGrepExperience],
     ) -> list[AstGrepExperience]:
-        selected: list[AstGrepExperience] = []
-        positions: dict[str, int] = {}
-        for experience in experiences:
-            identity = experience.identity
-            if identity in positions:
-                selected[positions[identity]] = experience
-            else:
-                positions[identity] = len(selected)
-                selected.append(experience)
-        return selected
+        return _normalize_synthesis_experiences(experiences)
 
 
 class AnchorSynthesisResult(BaseModel):
@@ -225,6 +237,14 @@ class AnchorSynthesisResult(BaseModel):
     adjustments: list[str]
     experiences: list[AstGrepExperience] = Field(
         default_factory=list,
-        description="Experience operations accepted from the Synthesizer",
+        description="Up to three deduplicated experience operations from the Synthesizer",
     )
     plan_suggestion: str
+
+    @field_validator("experiences", mode="after")
+    @classmethod
+    def normalize_experiences(
+        cls,
+        experiences: list[AstGrepExperience],
+    ) -> list[AstGrepExperience]:
+        return _normalize_synthesis_experiences(experiences)

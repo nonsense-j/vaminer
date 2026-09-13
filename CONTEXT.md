@@ -14,14 +14,14 @@ VAMiner turns one Mining Input into a Variant Analysis Specification (VAS). The 
 - **Phase Authority**: the closed assignment of responsibility and logical tools for Issue Collection, RCA, Rule Generation, or AST-Grep Synthesis. A field or tool is available only when that phase owns it.
 - **Anchor Intent**: host-owned behavior, inspection guidance, weight, and required Case Artifacts for one causal-chain hotspot.
 - **Anchor Plan**: an ordered, complete set of Anchor Intents plus the normative VAS summary.
-- **Synthesis Delta**: child-owned query type, query text, query weight, advisory notes, and bounded reusable ast-grep experiences for exactly one target intent.
+- **Synthesis Delta**: child-owned query type, query text, query weight, advisory notes, and up to three deduplicated reusable ast-grep experiences from exactly one target intent's final output.
 - **VAS**: the stable persisted JSON assembled by the host from authoritative input state, RCA, accepted Anchor Plan, Rule Generation draft, and accepted Synthesis Deltas.
 
 ## Invariants
 
 - Instructions compile exactly as canonical shared instructions → input policy → Runtime Adapter binding. The Adapter binding names concrete tools and structured output; it cannot redefine responsibility or constraints.
 - One mining run uses one Runtime Adapter and one model identity for every parent and child Agent.
-- RCA is the only Agent that writes workspace data, and it writes only through typed Case Artifact operations. Synthesizers return bounded experiences rather than writing directly; the host merges them into the shared ast-grep skill with a process-safe read/write lock and atomic replacement. Cleanup is explicit; acceptance and cache loading are pure.
+- RCA is the only Agent that writes workspace data, and it writes only through typed Case Artifact operations. Synthesizers return bounded experiences rather than writing directly; the host accepts only the final output from each Synthesizer, applies the turns-quality gate, and merges up to three deduplicated lessons into the shared ast-grep skill with a process-safe read/write lock and atomic replacement. Cleanup is explicit; acceptance and cache loading are pure.
 - Example Suite RCA receives the complete verified snapshot file list as Src-Root-relative paths and must not infer unlisted files. It uses the same Src tools as repository RCA and may request `full_file` reads within the shared byte limit.
 - Rule Generation cannot read source or author query syntax. It produces semantics and submits at most two Anchor Plans.
 - Anchor Plans have no fixed Case Artifact or Anchor Intent count. Every declared Case Artifact must be assigned to at least one independent intent, and the accepted Anchor set must collectively recall all declared cases.

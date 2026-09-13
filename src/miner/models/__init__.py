@@ -14,6 +14,7 @@ from .anchors import (
     AnchorSynthesisResult,
     AstGrepExperience,
     AstGrepExperienceMode,
+    MAX_SYNTHESIS_EXPERIENCES,
     QueryType,
 )
 from .issue import (
@@ -50,6 +51,7 @@ __all__ = [
     "IssueCollectionInfo",
     "IssueRawInfo",
     "IssueVASSource",
+    "MAX_SYNTHESIS_EXPERIENCES",
     "QueryType",
     "RepoCheckout",
     "RootCauseAnalysis",
