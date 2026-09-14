@@ -18,22 +18,13 @@ _WINDOWS_RESERVED_NAMES = {
 
 
 def absolute_path(path: Path) -> Path:
-    """Return an absolute path that remains usable for long Windows paths."""
+    """Return a normalized absolute path."""
 
-    absolute = Path(os.path.normpath(os.fspath(Path(path).expanduser().absolute())))
-    if os.name != "nt":
-        return absolute
-
-    value = os.fspath(absolute)
-    if value.startswith("\\\\?\\"):
-        return absolute
-    if value.startswith("\\\\"):
-        return Path("\\\\?\\UNC\\" + value[2:])
-    return Path("\\\\?\\" + value)
+    return Path(os.path.normpath(os.fspath(Path(path).expanduser().absolute())))
 
 
 def resolve_path(path: Path, *, strict: bool = False) -> Path:
-    """Resolve a path without silently losing Windows extended-length support."""
+    """Resolve a normalized path and report platform errors consistently."""
 
     candidate = absolute_path(path)
     try:

@@ -58,6 +58,33 @@ def test_rg_preflight_requires_ripgrep_on_path(monkeypatch: pytest.MonkeyPatch):
     assert fake_rg in available.summary
 
 
+def test_windows_long_paths_check_is_platform_specific(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(common.sys, "platform", "linux")
+    assert common.check_windows_long_paths().status is CheckStatus.SKIP
+
+    monkeypatch.setattr(common.sys, "platform", "win32")
+    monkeypatch.setattr(common, "_read_windows_long_paths_enabled", lambda: True)
+    enabled = common.check_windows_long_paths()
+    assert enabled.status is CheckStatus.PASS
+
+    monkeypatch.setattr(common, "_read_windows_long_paths_enabled", lambda: False)
+    disabled = common.check_windows_long_paths()
+    assert disabled.status is CheckStatus.WARN
+    assert "LongPathsEnabled" in (disabled.detail or "")
+
+
+def test_windows_long_paths_check_warns_when_registry_cannot_be_read(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(common.sys, "platform", "win32")
+
+    def fail_registry_read() -> bool:
+        raise OSError("registry unavailable")
+
+    monkeypatch.setattr(common, "_read_windows_long_paths_enabled", fail_registry_read)
+    result = common.check_windows_long_paths()
+    assert result.status is CheckStatus.WARN
+    assert "registry unavailable" in (result.detail or "")
+
+
 def test_langfuse_check_distinguishes_disabled_incomplete_and_authenticated(monkeypatch: pytest.MonkeyPatch):
     disabled, disabled_client = tracing.check_langfuse({"LANGFUSE_TRACING_ENABLED": "false"})
     incomplete, incomplete_client = tracing.check_langfuse({"LANGFUSE_PUBLIC_KEY": "pk"})

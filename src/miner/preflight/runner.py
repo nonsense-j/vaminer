@@ -14,7 +14,15 @@ from .claude import (
     check_claude_live,
     check_mcp_server,
 )
-from .common import check_ast_grep, check_git, check_paths, check_project_assets, check_python, check_rg
+from .common import (
+    check_ast_grep,
+    check_git,
+    check_paths,
+    check_project_assets,
+    check_python,
+    check_rg,
+    check_windows_long_paths,
+)
 from .models import CheckResult, CheckStatus, PreflightReport
 from .pydantic import check_pydantic_config, check_pydantic_live
 from .progress import ProgressCallback, notify
@@ -59,6 +67,7 @@ async def run_preflight(
         notify(progress, result_message(check))
 
     run_check("Python", check_python)
+    run_check("Windows long-path support", check_windows_long_paths)
     run_check("project assets", check_project_assets)
     run_check(
         "writable paths",

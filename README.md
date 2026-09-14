@@ -26,6 +26,7 @@ This repository generates VAS rules. It does **not** provide a standalone end-us
 - The `ast-grep` or `sg` executable available on `PATH`
 - For Pydantic AI, an API key for a supported LLM provider
 - For Claude CLI, an installed `claude` command with an authenticated user session
+- On Windows, Win32 long-path support enabled (`LongPathsEnabled=1`)
 
 ### Install and configure
 
@@ -38,6 +39,28 @@ cp .env.example .env
 
 The example selects DeepSeek. Set `DEEPSEEK_API_KEY` in the repository-root `.env`, or choose one of the other configurations in [LLM configuration](#llm-configuration).
 
+#### Windows long paths
+
+On Windows, enable Win32 long-path support from an administrator PowerShell session:
+
+```powershell
+New-ItemProperty `
+  -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+  -Name LongPathsEnabled `
+  -PropertyType DWord `
+  -Value 1 `
+  -Force
+```
+
+The equivalent Group Policy is **Computer Configuration > Administrative Templates > System > Filesystem > Enable Win32 long paths**. Restart the terminal and VAMINER after changing the setting; restart Windows if the preflight warning remains.
+
+Preflight reports `windows.long-paths` as `WARN` when the setting is disabled or cannot be read. A warning does not make preflight fail, but deeply nested Example Suites may not be readable. Keeping generated paths short also reduces compatibility problems with external tools; these values can be placed in `.env`:
+
+```dotenv
+VAMINER_WORKSPACE_DIR=C:/vm/ws
+VAMINER_OUTPUT_DIR=C:/vm/out
+```
+
 Run the local preflight before mining:
 
 ```bash
@@ -45,7 +68,7 @@ uv run python -m src.miner.preflight --runtime pydanic-sdk
 uv run python -m src.miner.preflight --runtime claude-cli
 ```
 
-The interactive command streams each check and long-running wait to stderr, then prints a final report. The default preflight does not call a model. It validates Python and bundled assets, writable paths, Git, `rg`, an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration. For Claude it also checks the CLI flags, loads and exercises the bundled Langfuse transcript hook when tracing is configured, and runs a real MCP handshake/list-tools/tool-call cycle.
+The interactive command streams each check and long-running wait to stderr, then prints a final report. The default preflight does not call a model. It validates Python, Windows long-path status when applicable, bundled assets, writable paths, Git, `rg`, an actual ast-grep query, Langfuse authentication when configured, and the selected runtime's configuration. For Claude it also checks the CLI flags, loads and exercises the bundled Langfuse transcript hook when tracing is configured, and runs a real MCP handshake/list-tools/tool-call cycle.
 
 Add `--live` to make one small model request. The Agent must call a probe tool, return structured output, and, when Langfuse is enabled, produce at least one runtime observation under the preflight trace. This request may incur provider cost. Add `--json` for a machine-readable stdout report; progress remains on stderr unless `--quiet` is supplied. Any failed required check produces exit code 1. Langfuse trace visibility is polled for up to 120 seconds by default, with a heartbeat every 10 seconds.
 

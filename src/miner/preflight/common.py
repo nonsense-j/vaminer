@@ -13,12 +13,47 @@ from ..tools.ast_grep import run_ast_grep
 from ..utils.config import PROJECT_ROOT
 from .models import CheckResult
 
+_WINDOWS_FILESYSTEM_REGISTRY_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
+
 
 def check_python() -> CheckResult:
     version = sys.version_info
     if version < (3, 12):
         return CheckResult.failed("python", "Python 3.12 or newer is required", detail=sys.version.split()[0])
     return CheckResult.passed("python", f"Python {version.major}.{version.minor}.{version.micro}")
+
+
+def _read_windows_long_paths_enabled() -> bool:
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _WINDOWS_FILESYSTEM_REGISTRY_KEY) as key:
+        value, _value_type = winreg.QueryValueEx(key, "LongPathsEnabled")
+    return value == 1
+
+
+def check_windows_long_paths() -> CheckResult:
+    if sys.platform != "win32":
+        return CheckResult.skipped("windows.long-paths", "Windows long-path support is not applicable")
+
+    try:
+        enabled = _read_windows_long_paths_enabled()
+    except (ImportError, OSError) as exc:
+        return CheckResult.warning(
+            "windows.long-paths",
+            "Unable to verify whether Windows long paths are enabled",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+
+    if not enabled:
+        return CheckResult.warning(
+            "windows.long-paths",
+            "Windows long paths are disabled",
+            detail=(
+                r"Set HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled "
+                "to 1, then restart VAMiner."
+            ),
+        )
+    return CheckResult.passed("windows.long-paths", "Windows long paths are enabled")
 
 
 def _writable_ancestor(path: Path) -> Path | None:
@@ -107,4 +142,12 @@ def check_ast_grep(*, timeout_seconds: float) -> CheckResult:
     )
 
 
-__all__ = ["check_ast_grep", "check_git", "check_paths", "check_project_assets", "check_python", "check_rg"]
+__all__ = [
+    "check_ast_grep",
+    "check_git",
+    "check_paths",
+    "check_project_assets",
+    "check_python",
+    "check_rg",
+    "check_windows_long_paths",
+]

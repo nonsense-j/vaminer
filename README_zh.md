@@ -26,6 +26,7 @@ VAMINER 将一个已报告的软件问题转换为变体分析规范（Variant A
 - `PATH` 中可用的 `ast-grep` 或 `sg` 命令
 - 使用 Pydantic AI 时，需要支持的 LLM 服务及对应 API Key
 - 使用 Claude CLI 时，需要已安装 `claude` 命令并完成用户登录
+- Windows 环境需要启用 Win32 长路径支持（`LongPathsEnabled=1`）
 
 ### 安装与配置
 
@@ -38,6 +39,28 @@ cp .env.example .env
 
 示例配置默认使用 DeepSeek。请在仓库根目录的 `.env` 中填写 `DEEPSEEK_API_KEY`；如需使用其他服务，请参考 [LLM 配置](#llm-配置)。
 
+#### Windows 长路径
+
+在 Windows 上，请通过管理员 PowerShell 启用 Win32 长路径支持：
+
+```powershell
+New-ItemProperty `
+  -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+  -Name LongPathsEnabled `
+  -PropertyType DWord `
+  -Value 1 `
+  -Force
+```
+
+对应的组策略位于 **计算机配置 > 管理模板 > 系统 > 文件系统 > 启用 Win32 长路径**。修改后请重启终端和 VAMINER；如果 preflight 仍然提示 warning，请重启 Windows。
+
+当该设置未启用或注册表不可读时，preflight 会把 `windows.long-paths` 报告为 `WARN`。warning 不会导致 preflight 失败，但目录层级很深的 Example Suite 可能无法读取。缩短生成目录也能降低外部工具的路径兼容风险，可以在 `.env` 中配置：
+
+```dotenv
+VAMINER_WORKSPACE_DIR=C:/vm/ws
+VAMINER_OUTPUT_DIR=C:/vm/out
+```
+
 开始生成规则前，先运行环境预检：
 
 ```bash
@@ -45,7 +68,7 @@ uv run python -m src.miner.preflight --runtime pydanic-sdk
 uv run python -m src.miner.preflight --runtime claude-cli
 ```
 
-交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用模型。它会验证 Python 与内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数，在 tracing 启用时加载并执行内置 Langfuse transcript hook，以及运行真实的 MCP handshake、工具列表和只读工具调用。
+交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用模型。它会验证 Python、适用时的 Windows 长路径状态、内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数，在 tracing 启用时加载并执行内置 Langfuse transcript hook，以及运行真实的 MCP handshake、工具列表和只读工具调用。
 
 增加 `--live` 后会发起一次很小的真实模型请求。Agent 必须调用探针工具并返回结构化输出；如果已启用 Langfuse，还必须在同一条 preflight trace 下产生至少一个 runtime observation。该请求可能产生模型费用。使用 `--json` 可在 stdout 输出机器可读报告，进度仍通过 stderr 展示；增加 `--quiet` 可完全关闭进度。任何必需检查失败时命令退出码为 1。Langfuse trace 默认最多等待 120 秒，每 10 秒输出一次 heartbeat。
 
