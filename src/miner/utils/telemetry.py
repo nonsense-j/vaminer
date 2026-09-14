@@ -93,6 +93,7 @@ class PipelineTrace:
         metadata = {"vas_id": vas_id, "runtime": self.runtime_id}
         self.observation.update(name=trace_name, metadata=metadata)
         with propagate_attributes(
+            session_id=self.trace_id,
             trace_name=trace_name,
             metadata=metadata,
             tags=["vaminer", self.runtime_id],

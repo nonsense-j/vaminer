@@ -223,8 +223,18 @@ def test_all_production_prompts_are_minimal_plain_text(tmp_path: Path):
     assert "Declared Case Artifacts:\n- case1.c" in rule_task.prompt
     assert "[Target AnchorIntent]" in synthesis_task.prompt
     assert "Required Case Artifacts:\n- case1.c" in synthesis_task.prompt
-    assert "[Root Cause Analysis]" in synthesis_task.prompt
-    assert "copy(input, length);" in synthesis_task.prompt
+    assert "[Synthesis Scope]" in synthesis_task.prompt
+    assert "Language: c" in synthesis_task.prompt
+    assert "Fully cover the target behavior represented by the required Case Artifacts" in synthesis_task.prompt
+    assert "semantically equivalent APIs and equivalent code structures" in synthesis_task.prompt
+    assert "whenever they preserve the same target behavior" in synthesis_task.prompt
+    assert "[Root Cause Analysis]" not in synthesis_task.prompt
+    assert "unchecked copy" not in synthesis_task.prompt
+    assert "length reaches copy" not in synthesis_task.prompt
+    assert "copy(input, length);" not in synthesis_task.prompt
+    assert "bound length" not in synthesis_task.prompt
+    assert "bug.c" not in synthesis_task.prompt
+    assert "case1_var1.c" not in synthesis_task.prompt
     assert "copy sites" not in synthesis_task.prompt
     assert source.as_posix() not in rule_task.prompt
 

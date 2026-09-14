@@ -4,6 +4,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .base import InlineJsonSchemaModel
+
 
 class AstGrepLanguage(StrEnum):
     C = "c"
@@ -52,7 +54,7 @@ class BuggyComponent(BaseModel):
         return self
 
 
-class RootCauseAnalysis(BaseModel):
+class RootCauseAnalysis(InlineJsonSchemaModel):
     """Evidence-backed root-cause analysis with a persistent case manifest."""
 
     model_config = ConfigDict(extra="forbid")

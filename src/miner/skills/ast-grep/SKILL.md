@@ -49,7 +49,7 @@ Translate one supplied structural intent into the smallest faithful ast-grep que
 - Each experience contains exactly `mode` (`ADD` or `REPLACE`), `lesson_id` (`all-N` or `<LANGUAGE>-N`), and a short, self-contained `lesson`. Use `all` for language-agnostic guidance and the uppercase ast-grep language name for language-specific guidance.
 - Return no more than three distinct experience updates for one Synthesizer output; the host uses only the final complete output after any repair/resume.
 - `ADD` uses the next unused ID in its section. `REPLACE` updates the existing lesson with that ID. Lessons are stored as `- [lesson_id] lesson` under the matching language section.
-- Keep lessons project-independent, concise, and supported by stderr, debug trees, or match results. Exclude repository paths, issue or intent semantics, match counts, routine validation outcomes, tool narration, and query transcripts. State the language or query form when it materially affects the lesson.
+- Keep lessons generic, project-independent, concise, and expressed in 1-2 sentences. Support them with stderr, debug trees, or match results. Exclude repository paths, issue or intent semantics, match counts, routine validation outcomes, tool narration, and query transcripts. State the language or query form when it materially affects the lesson.
 
 # Constraints
 

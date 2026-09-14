@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .base import InlineJsonSchemaModel
+
 
 class CommitRawInfo(BaseModel):
     """Commit information for locating buggy and fixed revisions."""
@@ -32,7 +34,7 @@ class RepoCheckout(BaseModel):
     fixed_branch: str | None = "fixed"
 
 
-class IssueCollectionInfo(BaseModel):
+class IssueCollectionInfo(InlineJsonSchemaModel):
     """Resolved issue evidence and verified checkout metadata."""
 
     model_config = ConfigDict(extra="forbid")

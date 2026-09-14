@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .analysis import AstGrepLanguage
 from .anchors import Anchor
+from .base import InlineJsonSchemaModel
 
 
 class IssueCategory(StrEnum):
@@ -77,7 +78,7 @@ class VASCoreInfo(BaseModel):
     anchors: list[Anchor] = Field(..., min_length=1)
 
 
-class RuleGenerationDraft(BaseModel):
+class RuleGenerationDraft(InlineJsonSchemaModel):
     """Only the Rule Generator-owned fields of a final VAS core."""
 
     model_config = ConfigDict(extra="forbid")

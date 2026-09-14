@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .base import InlineJsonSchemaModel
+
 
 class QueryType(StrEnum):
     PATTERN = "pattern"
@@ -32,7 +34,14 @@ class AstGrepExperience(BaseModel):
 
     mode: AstGrepExperienceMode
     lesson_id: str
-    lesson: str = Field(..., min_length=8, max_length=240)
+    lesson: str = Field(
+        ...,
+        min_length=8,
+        description=(
+            "A concise, generic, project-independent ast-grep query-writing "
+            "lesson expressed in 1-2 sentences"
+        ),
+    )
 
     @field_validator("mode", mode="before")
     @classmethod
@@ -193,7 +202,7 @@ class AnchorPlan(BaseModel):
         return self
 
 
-class AnchorSynthesisDelta(BaseModel):
+class AnchorSynthesisDelta(InlineJsonSchemaModel):
     """Query fields and reusable ast-grep lessons returned by one Synthesizer."""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
@@ -206,9 +215,10 @@ class AnchorSynthesisDelta(BaseModel):
     experiences: list[AstGrepExperience] = Field(
         default_factory=list,
         description=(
-            "Optional ADD or REPLACE operations for concise, project-independent "
-            "ast-grep query-writing lessons; empty by default and capped at three "
-            "lessons per Synthesizer output"
+            "Optional ADD or REPLACE operations for concise, generic, "
+            "project-independent ast-grep query-writing lessons; each lesson is "
+            "1-2 sentences, empty by default, and capped at three lessons per "
+            "Synthesizer output"
         ),
     )
     plan_suggestion: str = Field(

@@ -560,11 +560,11 @@ def test_delta_normalizes_and_deduplicates_query_writing_experience_updates():
         {
             **common,
             "experiences": [
-                {"mode": "ADD", "lesson_id": "all-99", "lesson": "x" * 100}
+                {"mode": "ADD", "lesson_id": "all-99", "lesson": "x" * 300}
             ],
         }
     )
-    assert long_lesson.experiences[0].lesson == "x" * 100
+    assert long_lesson.experiences[0].lesson == "x" * 300
 
 
 @pytest.mark.asyncio

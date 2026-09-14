@@ -251,7 +251,7 @@ def _synthesis_input_policy(
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
 - `src` is the complete immutable Example Suite snapshot analyzed by RCA. Files may be flat or nested and may contain multiple bad/unsafe and good/safe demonstrations.
 - Analyze source code only; ignore manifests, configuration, build metadata, and other non-source files.
-- Ground the target behavior in at least one bad-example source file named by an RCA component. The faithful query match may be outside the exact component span.
+- Produce useful matches in `src`; the host separately checks grounding against RCA-declared source files. The faithful query match may be outside the exact component span.
 - Good/safe source is contrastive evidence only and is not a required positive match.
 - Interpret additional `src` matches as other suite examples; accept them only when they remain plausible instances of the target behavior.
 """
@@ -261,7 +261,7 @@ def _synthesis_input_policy(
 
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
 - `src` is the affected repository source corpus analyzed by RCA.
-- Ground the target behavior in at least one source file named by an RCA component. The faithful query match may be outside the exact component span.
+- Produce useful matches in `src`; the host separately checks grounding against RCA-declared source files. The faithful query match may be outside the exact component span.
 - Treat other repository matches as precision evidence, not automatically as required positives or confirmed defects.
 """
 
@@ -322,6 +322,19 @@ def _render_target_intent(intent: AnchorIntent) -> str:
             _render_block("Inspect hint", intent.inspect_hint),
             "Required Case Artifacts:\n"
             + "\n".join(f"- {name}" for name in intent.required_cases),
+        )
+    )
+
+
+def _render_synthesis_scope(root_cause: RootCauseAnalysis) -> str:
+    """Render only the RCA facts a child needs to execute its local query task."""
+
+    return "\n\n".join(
+        (
+            f"Language: {root_cause.language.value}",
+            "This Synthesizer owns only the target intent and its required Case Artifacts. "
+            "Read only those required artifacts; do not inspect unassigned cases or sibling "
+            "intents, and do not reconstruct or broaden the overall root-cause analysis.",
         )
     )
 
@@ -462,10 +475,14 @@ def make_ast_grep_synthesis_task(
         prompt=(
             f'Generate and validate only the ast-grep query for target anchor "{intent.id}"; '
             "keep it within that anchor's behavior.\n\n"
+            "Fully cover the target behavior represented by the required Case Artifacts. Prefer "
+            "a reusable structural query that also matches semantically equivalent APIs and "
+            "equivalent code structures whenever they preserve the same target behavior.\n\n"
+            "[Synthesis Scope]\n"
+            + _render_synthesis_scope(root_cause)
+            + "\n\n"
             "[Target AnchorIntent]\n"
             + _render_target_intent(intent)
-            + "\n\n[Root Cause Analysis]\n"
-            + _render_root_cause(root_cause)
             + "\n"
         ),
         workspace_root=workspace_root,

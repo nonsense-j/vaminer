@@ -88,6 +88,7 @@ def test_pipeline_uses_original_input_and_binds_exact_trace_name(monkeypatch):
     assert client.observation.updates[1] == {"output": {"vas_id": "VAS-0001"}}
     assert propagated == [
         {
+            "session_id": "0123456789abcdef0123456789abcdef",
             "trace_name": "VAS-0001 Miner @pydanic-sdk",
             "metadata": {"vas_id": "VAS-0001", "runtime": "pydanic-sdk"},
             "tags": ["vaminer", "pydanic-sdk"],
