@@ -211,7 +211,7 @@ def test_all_production_prompts_are_minimal_plain_text(tmp_path: Path):
         "Collect verified issue evidence and prepare the checkout for root-cause analysis."
     )
     assert rule_task.prompt.splitlines()[0] == (
-        "Define repository-independent rule semantics and a queryless Anchor Plan from the authoritative RCA."
+        "Define repository-independent rule semantics and a complete Anchor Plan from the authoritative RCA."
     )
     assert synthesis_task.prompt.splitlines()[0] == (
         'Generate and validate only the ast-grep query for target anchor "copy-site"; '

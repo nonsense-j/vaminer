@@ -175,12 +175,12 @@ Miner 按照以下确定性顺序执行：
 
 1. **问题收集（Issue Collection）**：收集问题描述、仓库来源以及有缺陷和已修复的 Commit。
 2. **根因分析（Root Cause Analysis）**：确定具体缺陷行为和修复模式，并提取最小原始用例及其变体。
-3. **规则生成（Rule Generation）**：生成规则摘要、相互独立的不安全/安全场景，并为因果链中每个不同、局部且规则敏感的位置生成不含查询语法的锚点意图。
+3. **规则生成（Rule Generation）**：生成规则摘要、相互独立的不安全/安全场景，并为因果链中每个不同、局部且规则敏感的位置生成锚点意图。修订计划时，可以根据上一轮合成结果为意图附带可选查询草稿，包括合并后的意图。
 4. **AST-Grep 合成（AST-Grep Synthesis）**：在隔离且有界的 Synthesizer 上下文中逐个处理 intent。child 返回一个目标 id 的 query 字段与简洁、可复用的 ast-grep 经验，host 与 canonical intent 组装 Anchor，并安全地把新经验合并回 Skill。
 5. **组装与验证（Assembly and Validation）**：使用权威 RCA、最新验收的 Anchor Plan、Rule Generation draft 和已验收 query delta 构建完整 VAS。
 6. **生成后锚点报告（Post-generation Anchor Report）**：独立生成用例覆盖和仓库热点报告。
 
-Rule Generator 不加载 ast-grep Skill，也不编写查询文本。AST-Grep Synthesizer 独占查询语法以及查询与行为的一致性。如果无法生成可信查询，`query: ""` 会把该锚点标记为禁用；扫描和排序会跳过它，并在锚点审查文档和运行日志中突出显示。
+Rule Generator 不加载 ast-grep Skill，也不验证查询。可选的 `draft_query` 是原始 pattern 或 YAML rule 字符串，可在重新规划时复制、调整或组合上一轮查询形成。AST-Grep Synthesizer 从提供的草稿开始，负责完善查询、最终语法、验证以及查询与行为的一致性。如果无法生成可信查询，`query: ""` 会把该锚点标记为禁用；扫描和排序会跳过它，并在锚点审查文档和运行日志中突出显示。
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 

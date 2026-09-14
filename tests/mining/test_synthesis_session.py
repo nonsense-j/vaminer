@@ -126,6 +126,92 @@ async def test_session_owns_immutable_fields_latest_batch_and_limit(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "draft_query",
+    [
+        "copy($A)",
+        "any:\n  - pattern: copy_one($A)\n  - pattern: copy_two($A)\n",
+        "any:\n  - pattern: [unfinished YAML",
+    ],
+)
+async def test_replan_passes_merged_query_draft_to_only_its_synthesizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    draft_query: str,
+):
+    authority = RuleGenerationAuthority(
+        tmp_path / "src", tmp_path / "cases", GroundingPolicy.REPOSITORY_EVIDENCE, _rca()
+    )
+    tasks = {}
+    validated_queries = []
+
+    async def execute(task):
+        anchor_id = task.authority.anchor_id
+        tasks[anchor_id] = task
+        return AgentRunResult(
+            output=AnchorSynthesisDelta(
+                anchor_id=anchor_id,
+                type="pattern",
+                query=f"{anchor_id.replace('-', '_')}($A)",
+                query_weight=2,
+                adjustments=[],
+                plan_suggestion="",
+            ),
+            identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
+        )
+
+    def validate_output(anchor, _intent, _authority):
+        validated_queries.append(anchor.query)
+        return ()
+
+    monkeypatch.setattr(synthesis_module, "_query_errors", validate_output)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    original = AnchorPlan(
+        summary="copy sites",
+        intents=[
+            _plan().intents[0].model_copy(update={"id": "copy-one", "required_cases": ["case1.c"]}),
+            _plan().intents[0].model_copy(update={"id": "copy-two", "required_cases": ["case1_var1.c"]}),
+        ],
+    )
+    await session.synthesize(original)
+    assert all("[Draft Query]" not in task.prompt for task in tasks.values())
+    tasks.clear()
+    validated_queries.clear()
+
+    # Exercise the tool's plan input shape, including a merged anchor with a new ID.
+    intent_fields = _plan().intents[0].model_dump(exclude={"id", "draft_query"})
+    revised = AnchorPlan.model_validate(
+        {
+            "summary": "revised copy sites",
+            "intents": [
+                {**intent_fields, "id": "merged-copy", "draft_query": draft_query},
+                {**intent_fields, "id": "new-site", "draft_query": None},
+            ],
+        }
+    )
+    results = await session.synthesize(revised)
+
+    assert draft_query in tasks["merged-copy"].prompt
+    assert "[Draft Query]" in tasks["merged-copy"].prompt
+    assert "Start from this unvalidated draft" in tasks["merged-copy"].prompt
+    assert "[Draft Query]" not in tasks["new-site"].prompt
+    assert draft_query not in tasks["new-site"].prompt
+    assert [result.anchor.id for result in results] == ["merged-copy", "new-site"]
+    assert sorted(validated_queries) == ["merged_copy($A)", "new_site($A)"]
+    assert session.receipt is not None
+    assert session.receipt.plan.intents[0].draft_query == draft_query
+
+    core = session.finalize(
+        RuleGenerationDraft(
+            category=IssueCategory.SECURITY,
+            scenarios=Scenarios(unsafe=["unbounded copy"], safe=["bounded copy"]),
+        )
+    )
+    assert core.anchors[0].query == "merged_copy($A)"
+    assert all("draft_query" not in anchor.model_dump() for anchor in core.anchors)
+
+
+@pytest.mark.asyncio
 async def test_rejected_second_plan_keeps_first_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     source = tmp_path / "src"
     cases = tmp_path / "cases"

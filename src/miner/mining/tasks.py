@@ -144,7 +144,7 @@ ROOT_CAUSE = PhaseDefinition(
 RULE_GENERATION = PhaseDefinition(
     phase=AgentPhase.RULE_GENERATION,
     agent_name="Rule Generator",
-    description="Own rule semantics and a complete queryless Anchor Plan.",
+    description="Own rule semantics and a complete Anchor Plan with optional query drafts.",
     instructions=_instructions("rule_generator.md"),
     output_type=RuleGenerationDraft,
     tools=("list_case_artifacts", "read_case_artifact", "synthesize_anchor_plan"),
@@ -314,16 +314,21 @@ def _render_issue_evidence(source: IssueCollectionInfo) -> str:
 
 
 def _render_target_intent(intent: AnchorIntent) -> str:
-    return "\n\n".join(
-        (
-            f"ID: {intent.id}",
-            f"Behavior weight: {intent.behavior_weight}",
-            _render_block("Behavior", intent.behavior),
-            _render_block("Inspect hint", intent.inspect_hint),
-            "Required Case Artifacts:\n"
-            + "\n".join(f"- {name}" for name in intent.required_cases),
+    sections = [
+        f"ID: {intent.id}",
+        f"Behavior weight: {intent.behavior_weight}",
+        _render_block("Behavior", intent.behavior),
+        _render_block("Inspect hint", intent.inspect_hint),
+        "Required Case Artifacts:\n" + "\n".join(f"- {name}" for name in intent.required_cases),
+    ]
+    if intent.draft_query is not None:
+        sections.append(
+            "[Draft Query]\n"
+            "Start from this unvalidated draft. Refine or replace it as the target behavior and evidence require; "
+            "validate the resulting query normally.\n\n"
+            + intent.draft_query
         )
-    )
+    return "\n\n".join(sections)
 
 
 def _render_synthesis_scope(root_cause: RootCauseAnalysis) -> str:
@@ -425,7 +430,7 @@ def make_rule_generation_task(
         definition=RULE_GENERATION,
         authority=authority,
         prompt=(
-            "Define repository-independent rule semantics and a queryless Anchor Plan from the authoritative RCA.\n\n"
+            "Define repository-independent rule semantics and a complete Anchor Plan from the authoritative RCA.\n\n"
             "[Root Cause Analysis]\n"
             + _render_root_cause(root_cause)
             + "\n"

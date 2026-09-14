@@ -147,7 +147,7 @@ class Anchor(BaseModel):
 
 
 class AnchorIntent(BaseModel):
-    """Queryless inspection behavior and its synthesis targets."""
+    """Inspection behavior and its synthesis targets, with an optional query draft."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -177,10 +177,18 @@ class AnchorIntent(BaseModel):
             "intent, but not every case must be assigned to every intent"
         ),
     )
+    draft_query: str | None = Field(
+        default=None,
+        description=(
+            "Optional unvalidated raw ast-grep pattern or YAML rule draft for this intent. "
+            "When replanning, copy, adapt, or combine prior queries as a starting point; "
+            "the Synthesizer refines and validates the final query"
+        ),
+    )
 
 
 class AnchorPlan(BaseModel):
-    """Complete queryless plan submitted by the Rule Generator."""
+    """Complete plan submitted by the Rule Generator, with optional query drafts."""
 
     model_config = ConfigDict(extra="forbid")
 
