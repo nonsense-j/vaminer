@@ -67,7 +67,7 @@ def make_admission_rule() -> dict:
             {
                 "id": f"{name}-call",
                 "behavior_weight": 2,
-                "query_weight": 2,
+                "query_weight": 1,
                 "type": "pattern",
                 "query": f"{name}();",
                 "behavior": f"Invokes {name}.",
@@ -78,7 +78,7 @@ def make_admission_rule() -> dict:
         {
             "id": "gate-call",
             "behavior_weight": 4,
-            "query_weight": 3,
+            "query_weight": 2,
             "type": "pattern",
             "query": "gate();",
             "behavior": "Invokes the admission gate.",
@@ -351,7 +351,7 @@ def test_packaged_scanner_reports_missing_captured_output_as_execution_error(
         )
 
 
-def test_q2_sum_cannot_admit_but_low_weight_still_scores_an_admitted_file(
+def test_q1_sum_cannot_admit_but_low_weight_still_scores_an_admitted_file(
     tmp_path: Path,
 ):
     require_ast_grep()
@@ -374,12 +374,12 @@ def test_q2_sum_cannot_admit_but_low_weight_still_scores_an_admitted_file(
     anchor_map = json.loads((scan_dir / "anchor_map.json").read_text(encoding="utf-8"))
     files = {item["file"]: item for item in anchor_map["files"]}
 
-    assert files["low.c"]["priority_score"] == 6
+    assert files["low.c"]["priority_score"] == 3
     assert files["low.c"]["admitted"] is False
     assert "below the admission threshold" in files["low.c"]["exclusion_reason"]
     assert files["high.c"]["admitted"] is True
-    assert files["high.c"]["priority_score"] == 5
-    assert {hint["query_weight"] for hint in files["high.c"]["anchor_hints"]} == {2, 3}
+    assert files["high.c"]["priority_score"] == 3
+    assert {hint["query_weight"] for hint in files["high.c"]["anchor_hints"]} == {1, 2}
     assert [item["file"] for item in scan["candidates"]] == ["high.c"]
 
 

@@ -158,6 +158,7 @@ class PolicyCompiler:
 - {detail}
 - Canonical MCP tool names in the shared instructions map to `mcp__{SERVER_NAME}__<tool_name>` in this runtime.
 - Shell, generic filesystem writes, native delegation, and undeclared tools are unavailable.
+- Tool input errors are feedback: correct the arguments within the remaining turn budget.
 - Return exactly one complete object satisfying the supplied JSON Schema.
 """
 
@@ -215,11 +216,7 @@ class PolicyCompiler:
             else None
         )
         synthesis_log = temporary_root / "synthesis.log" if receipt is not None else None
-        tool_failure = (
-            temporary_root / "tool-failure.json"
-            if task.phase is AgentPhase.AST_GREP_SYNTHESIS
-            else None
-        )
+        tool_failure = temporary_root / "tool-failure.json"
         trace_state = temporary_root / "langfuse-state"
         synthesis_context = None
         if receipt is not None:

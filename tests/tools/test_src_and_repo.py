@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from src.miner.tools.errors import ToolInputError
 from src.miner.tools import repo as repo_module
 from src.miner.tools import src as src_module
 from src.miner.tools.repo import read_patch_diff_from_repo
@@ -151,7 +152,7 @@ def test_rg_tools_reject_invalid_scope_and_pattern(tmp_path: Path):
     outside.mkdir(exist_ok=True)
     with pytest.raises(ValueError, match="stay inside"):
         search_src_files(tmp_path, "x", path="../outside-search")
-    with pytest.raises(RuntimeError, match="regex parse error"):
+    with pytest.raises(ToolInputError, match="regex parse error"):
         search_src_files(tmp_path, "[", mode="regex")
     with pytest.raises(ValueError, match="search pattern must be a string"):
         search_src_files(tmp_path, None)

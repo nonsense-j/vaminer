@@ -22,7 +22,7 @@ MAX_SYNTHESIS_EXPERIENCES = 3
 
 
 _EXPERIENCE_ID = re.compile(
-    r"^(?P<scope>all|[a-z][a-z0-9]*)-(?P<number>[1-9][0-9]*)$",
+    r"^(?P<scope>ALL|[a-z][a-z0-9]*)-(?P<number>[1-9][0-9]*)$",
     re.IGNORECASE,
 )
 
@@ -55,9 +55,8 @@ class AstGrepExperience(BaseModel):
             return value
         match = _EXPERIENCE_ID.fullmatch(value.strip())
         if match is None:
-            raise ValueError("lesson_id must use the form all-N or LANGUAGE-N")
-        scope = match.group("scope").lower()
-        return f"{scope if scope == 'all' else scope.upper()}-{int(match.group('number'))}"
+            raise ValueError("lesson_id must use the form ALL-N or LANGUAGE-N")
+        return f"{match.group('scope').upper()}-{int(match.group('number'))}"
 
     @field_validator("lesson", mode="before")
     @classmethod
@@ -187,8 +186,44 @@ class AnchorIntent(BaseModel):
     )
 
 
+class AnchorReuse(BaseModel):
+    """Keep one Anchor from the latest successful synthesis batch unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reuse_anchor_id: str = Field(
+        ...,
+        pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$",
+        description="ID from the latest successful batch whose intent and query should be reused unchanged",
+    )
+
+
+class AnchorPlanRequest(InlineJsonSchemaModel):
+    """Complete desired Anchor set, with explicit generation or reuse for each entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary: str = Field(..., min_length=1)
+    intents: list[AnchorIntent | AnchorReuse] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "The complete ordered Anchor set to keep. A full AnchorIntent always runs synthesis, "
+            "optionally starting from draft_query; a reuse_anchor_id entry preserves an existing "
+            "Anchor unchanged. Omitted Anchors are removed. Together the entries must cover every declared case."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_anchor_ids(self) -> "AnchorPlanRequest":
+        ids = [item.reuse_anchor_id if isinstance(item, AnchorReuse) else item.id for item in self.intents]
+        if len(ids) != len(set(ids)):
+            raise ValueError("anchor ids must be unique across generated and reused entries")
+        return self
+
+
 class AnchorPlan(BaseModel):
-    """Complete plan submitted by the Rule Generator, with optional query drafts."""
+    """Complete canonical plan after the host has resolved any reuse references."""
 
     model_config = ConfigDict(extra="forbid")
 

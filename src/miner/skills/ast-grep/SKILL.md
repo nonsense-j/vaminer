@@ -30,7 +30,7 @@ Translate one supplied structural intent into the smallest faithful ast-grep que
 - Never use `regex` as the only positive atomic matcher. Pair it with `kind` so ast-grep has a bounded set of AST node kinds to test.
 - Use `$NAME` for one named node, `$$TOKEN` for one unnamed node, and `$$$NODES` for zero or more nodes. Every metavariable must occupy a complete AST node; embedded text such as `obj.on$EVENT` is not a metavariable match.
 - Add `stopBy: end` to `inside` and `has` unless the intent requires a nearer boundary.
-- Use an object-form pattern with `context` and `selector` when a fragment is ambiguous without surrounding syntax.
+- When a fragment needs surrounding syntax to parse correctly, use the object form of the atomic `pattern` rule inside a YAML rule. Its `context` is the parseable snippet and its `selector` is the node to match. Keep relational rules such as `inside` and `has` as separate Rule Object fields.
 - Prefer structural constraints over exact identifiers, while preserving any discriminative operation explicitly required by the intent.
 
 ## Step 4: Validate and refine
@@ -39,14 +39,14 @@ Translate one supplied structural intent into the smallest faithful ast-grep que
 - Start with counts or bounded representative matches. Request complete matches and metavariable captures only when smaller results cannot validate the intent.
 - Validate every supplied positive example before inspecting a broader target corpus. Treat zero matches as query evidence and correct explicit syntax or execution errors before revising the query.
 - Before accepting a raw pattern, run it with `debug_query=pattern` and confirm that the matcher root and metavariables represent the intended construct. Use `ast` or `sexp` for named Tree-sitter structure and `cst` when unnamed nodes matter; inspect the complete verbatim stderr. In C, function-like fragments without statement context can parse as declarations or macro type specifiers instead of call expressions.
-- `debug_query` applies to raw pattern queries. To debug a pattern nested in a YAML rule, test that pattern separately with the same language and context.
+- `debug_query` applies only to raw pattern queries. For a string-form pattern nested in a YAML rule, debug the pattern separately. For an object-form pattern, debug its full `context` snippet to inspect the intended `selector` node, then run the complete rule normally to validate the selector and other constraints.
 - Refine only to satisfy the structural intent or preserve a required distinction. Do not iteratively remove unrelated matches by adding incidental project context. Read only the relevant section of `references/rule_reference.md` when syntax details are uncertain, and stop once required matches and grounding are established.
 
 ## Step 5: Report query-writing experience
 
-- Return an empty experience list by default. Report an experience only when this target required multiple query/debug rounds and the evidence revealed concise, reusable guidance. A query that succeeds immediately, or within fewer than half of the configured turns, should not produce an experience.
+- Return an empty experience list by default. Report an experience only when substantive query or debugging work reveals concise, reusable guidance. A straightforward successful query should not produce an experience.
 - Compare against `references/experiences.md` first. Do not restate an existing lesson. If a lesson needs a new caveat, use `REPLACE` with its exact `lesson_id` and preserve the existing wording while appending the caveat.
-- Each experience contains exactly `mode` (`ADD` or `REPLACE`), `lesson_id` (`all-N` or `<LANGUAGE>-N`), and a short, self-contained `lesson`. Use `all` for language-agnostic guidance and the uppercase ast-grep language name for language-specific guidance.
+- Each experience contains exactly `mode` (`ADD` or `REPLACE`), `lesson_id` (`ALL-N` or `<LANGUAGE>-N`), and a short, self-contained `lesson`. Use `ALL` for language-agnostic guidance and the uppercase ast-grep language name for language-specific guidance.
 - Return no more than three distinct experience updates for one Synthesizer output; the host uses only the final complete output after any repair/resume.
 - `ADD` uses the next unused ID in its section. `REPLACE` updates the existing lesson with that ID. Lessons are stored as `- [lesson_id] lesson` under the matching language section.
 - Keep lessons generic, project-independent, concise, and expressed in 1-2 sentences. Support them with stderr, debug trees, or match results. Exclude repository paths, issue or intent semantics, match counts, routine validation outcomes, tool narration, and query transcripts. State the language or query form when it materially affects the lesson.

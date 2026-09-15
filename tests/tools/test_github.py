@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.miner.tools import github
+from src.miner.tools.errors import ToolInputError
 
 
 class FakeResponse:
@@ -89,11 +90,8 @@ def test_commit_search_follows_prefix_and_time_contracts(
         newer_url,
         older_url,
     ]
-    assert "must be non-empty" in github.search_commit_by_tag(
-        "curl",
-        "curl",
-        " ",
-    )
+    with pytest.raises(ToolInputError, match="must be non-empty"):
+        github.search_commit_by_tag("curl", "curl", " ")
 
     commits_url = "https://api.github.com/repos/curl/curl/commits"
     time_clients = iter(

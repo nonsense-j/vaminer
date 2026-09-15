@@ -23,7 +23,7 @@ Trace one coherent chain from the trigger through the defective state or operati
 
 Record the defective source spans required by the input and causal chain. Each `buggy_components` item must contain a source-relative path, exact line range, concise role, and exact source snippet.
 
-Create one minimal, syntactically useful `caseN.<ext>` artifact for each materially distinct defect shape. Add `caseN_varM.<ext>` variants only when they preserve the same defect while varying non-causal details. Use as many artifacts as the distinct evidence requires; there is no fixed case-count limit. Declare the exact written filenames in the complete `extracted_case_files` manifest.
+Create one minimal, syntactically useful `caseN.<ext>` artifact for each materially distinct defect shape. Add 0-2 practical `caseN_varM.<ext>` variants for each artifact when they preserve the same defect with different non-causal details. Every filename passed to `write_case_artifact` must be a bare top-level `caseN.<ext>` or `caseN_varM.<ext>` name; the tool rejects other names before writing. If it reports a filename error, correct the name and retry. The cases are responsible for reproducing the defect and covering the general detecting goals. Keep cases sufficient and syntactically valid. Declare the exact written filenames in the complete `extracted_case_files` manifest.
 
 ## Step 4: Return the analysis
 

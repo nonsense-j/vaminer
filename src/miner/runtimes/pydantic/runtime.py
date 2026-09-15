@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, NoReturn, cast
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel
 from pydantic_ai import (
     Agent,
     ModelRetry,
     RunContext,
-    ToolFailed,
     ToolOutput,
     UnexpectedModelBehavior,
 )
@@ -33,15 +31,14 @@ from ...agent.contracts import (
     RuntimeUsage,
 )
 from ...mining.synthesis import (
-    AnchorPlanError,
     AnchorSynthesisAcceptanceError,
-    AnchorSynthesisLimitError,
     AnchorSynthesisSession,
 )
 from ...mining.validation.analysis import finalize_root_cause_cases
-from ...models.anchors import AnchorPlan, AnchorSynthesisResult
+from ...models.anchors import AnchorPlanRequest, AnchorSynthesisResult
 from ...models.vas import RuleGenerationDraft
-from ...tools.ast_grep import AstGrepQueryError, run_ast_grep
+from ...tools.ast_grep import run_ast_grep
+from ...tools.errors import ToolInputError
 from ...tools.cases import list_case_artifacts as list_cases_impl
 from ...tools.cases import read_case_artifact as read_case_impl
 from ...tools.cases import write_case_artifact as write_case_impl
@@ -62,6 +59,7 @@ from .capabilities import (
     cache_stability_capability,
     commit_history_capability,
     compaction_capability,
+    tool_feedback_capability,
     web_fetch_capability,
     web_search_capability,
 )
@@ -86,17 +84,6 @@ class PydanticAIRuntimeConfigurationError(PydanticAIRuntimeError):
     pass
 
 
-class PydanticAIOutputValidationError(PydanticAIRuntimeError):
-    def __init__(self, task_id: str, errors: Sequence[str], *, attempts: int) -> None:
-        self.task_id = task_id
-        self.errors = tuple(errors)
-        self.attempts = attempts
-        super().__init__(
-            f"Pydantic AI task {task_id!r} failed output validation after {attempts} attempts:\n- "
-            + "\n- ".join(self.errors)
-        )
-
-
 class _PydanticAgentSession:
     """A single Pydantic AI Agent conversation with resumable message history."""
 
@@ -104,13 +91,11 @@ class _PydanticAgentSession:
         self._runtime = runtime
         self._task = task
         self._model = runtime._resolve_model()
-        self._validation_state: list[tuple[str, ...]] = []
         self._final_state: list[BaseModel] = []
         self._attempt_state: list[int] = []
         self._agent = runtime.build_agent(
             task,
             model=self._model,
-            validation_state=self._validation_state,
             final_state=self._final_state,
             attempt_state=self._attempt_state,
         )
@@ -126,7 +111,6 @@ class _PydanticAgentSession:
     async def send(self, prompt: str) -> AgentRunResult[Any]:
         if self._closed:
             raise PydanticAIRuntimeError("Pydantic AI session is already closed")
-        self._validation_state.clear()
         self._final_state.clear()
         self._attempt_state.clear()
 
@@ -140,17 +124,7 @@ class _PydanticAgentSession:
                     message_history=self._message_history,
                 )
             except UnexpectedModelBehavior as exc:
-                attempts = 1 + self._task.limits.output_retries
-                latest_errors = (
-                    self._validation_state[-1]
-                    if self._validation_state and self._attempt_state == [attempts]
-                    else (str(exc),)
-                )
-                raise PydanticAIOutputValidationError(
-                    self._task.task_id,
-                    latest_errors,
-                    attempts=attempts,
-                ) from exc
+                raise PydanticAIRuntimeError(f"Pydantic AI task {self._task.task_id!r} failed: {exc}") from exc
             self._message_history = result.all_messages()
             output = cast(Any, self._final_state[-1] if self._final_state else result.output)
             return AgentRunResult(
@@ -191,14 +165,6 @@ def _model_id(model: Model | str) -> str:
     return str(getattr(model, "model_id", None) or getattr(model, "model_name", None) or type(model).__name__)
 
 
-def _raise_tool_feedback(error: ValueError | RuntimeError | OSError) -> NoReturn:
-    """Keep expected local-tool failures visible to the model without aborting the run."""
-
-    if isinstance(error, (ValueError, AstGrepQueryError)):
-        raise ModelRetry(str(error)) from error
-    raise ToolFailed(str(error)) from error
-
-
 def _runtime_binding(task: AgentTask[Any]) -> str:
     if task.phase is AgentPhase.ISSUE_COLLECTION:
         detail = "Use the issue evidence, web fallback, and checkout tools named in the active tool catalog."
@@ -216,6 +182,7 @@ def _runtime_binding(task: AgentTask[Any]) -> str:
 
 - {detail}
 - Generic filesystem, shell, and undeclared delegation tools are unavailable.
+- Tool input errors are feedback: correct the arguments within the remaining turn budget.
 - Submit the final typed object through the active structured-output tool.
 """
 
@@ -248,16 +215,13 @@ class PydanticAIRuntime:
             glob: str | None = None,
             max_results: int = 500,
         ) -> str:
-            try:
-                return await asyncio.to_thread(
-                    list_src_impl,
-                    root,
-                    path=path,
-                    glob=glob,
-                    max_results=max_results,
-                )
-            except (ValueError, RuntimeError, OSError) as exc:
-                _raise_tool_feedback(exc)
+            return await asyncio.to_thread(
+                list_src_impl,
+                root,
+                path=path,
+                glob=glob,
+                max_results=max_results,
+            )
 
         list_src_files.__doc__ = f"{list_src_impl.__doc__}{root_note}"
 
@@ -268,18 +232,15 @@ class PydanticAIRuntime:
             glob: str | None = None,
             max_results: int = 100,
         ) -> str:
-            try:
-                return await asyncio.to_thread(
-                    search_src_impl,
-                    root,
-                    pattern,
-                    path=path,
-                    mode=mode,
-                    glob=glob,
-                    max_results=max_results,
-                )
-            except (ValueError, RuntimeError, OSError) as exc:
-                _raise_tool_feedback(exc)
+            return await asyncio.to_thread(
+                search_src_impl,
+                root,
+                pattern,
+                path=path,
+                mode=mode,
+                glob=glob,
+                max_results=max_results,
+            )
 
         search_src_files.__doc__ = f"{search_src_impl.__doc__}{root_note}"
 
@@ -289,16 +250,13 @@ class PydanticAIRuntime:
             end_line: int | None = None,
             full_file: bool = False,
         ) -> str:
-            try:
-                return read_src_impl(
-                    root,
-                    path,
-                    start_line=start_line,
-                    end_line=end_line,
-                    full_file=full_file,
-                )
-            except (ValueError, RuntimeError, OSError) as exc:
-                _raise_tool_feedback(exc)
+            return read_src_impl(
+                root,
+                path,
+                start_line=start_line,
+                end_line=end_line,
+                full_file=full_file,
+            )
 
         read_src_file.__doc__ = f"{read_src_impl.__doc__}{root_note}"
 
@@ -307,28 +265,25 @@ class PydanticAIRuntime:
     @staticmethod
     def _case_tools(cases_dir: Path, *, writable: bool) -> list[Any]:
         def list_case_artifacts() -> str:
-            try:
-                return list_cases_impl(cases_dir)
-            except (ValueError, RuntimeError, OSError) as exc:
-                _raise_tool_feedback(exc)
+            return list_cases_impl(cases_dir)
 
         def read_case_artifact(
             path: str,
             start_line: int = 1,
             end_line: int | None = None,
         ) -> str:
-            try:
-                return read_case_impl(cases_dir, path, start_line=start_line, end_line=end_line)
-            except (ValueError, RuntimeError, OSError) as exc:
-                _raise_tool_feedback(exc)
+            return read_case_impl(cases_dir, path, start_line=start_line, end_line=end_line)
 
         tools: list[Any] = [list_case_artifacts, read_case_artifact]
         if writable:
             def write_case_artifact(path: str, content: str) -> str:
-                try:
-                    return write_case_impl(cases_dir, path, content)
-                except (ValueError, RuntimeError, OSError) as exc:
-                    _raise_tool_feedback(exc)
+                """Write a Case Artifact named ``caseN.<ext>`` or ``caseN_varM.<ext>``.
+
+                Invalid filenames are rejected before writing. Correct the
+                filename and retry when the tool reports a naming error.
+                """
+
+                return write_case_impl(cases_dir, path, content)
 
             tools.append(write_case_artifact)
         return tools
@@ -338,12 +293,11 @@ class PydanticAIRuntime:
         task: AgentTask[Any],
         *,
         model: Model | str,
-        validation_state: list[tuple[str, ...]],
         final_state: list[BaseModel],
         attempt_state: list[int] | None = None,
     ) -> Agent[MinerContext, Any]:
         tools: list[Any] = []
-        capabilities: list[AbstractCapability[MinerContext]] = []
+        capabilities: list[AbstractCapability[MinerContext]] = [tool_feedback_capability()]
         if self._hooks is not None:
             capabilities.append(self._hooks)
         model_settings: dict[str, Any] | None = None
@@ -362,10 +316,7 @@ class PydanticAIRuntime:
 
                 def read_patch_diff(path: str | None = None) -> str:
                     assert authority.repo_path is not None
-                    try:
-                        return read_patch_diff_from_repo(authority.repo_path, path)
-                    except (ValueError, RuntimeError, OSError) as exc:
-                        _raise_tool_feedback(exc)
+                    return read_patch_diff_from_repo(authority.repo_path, path)
 
                 root_note = (
                     f"\n\nBound repository root: `{authority.repo_path.as_posix()}`. "
@@ -379,14 +330,10 @@ class PydanticAIRuntime:
             authority = cast(RuleGenerationAuthority, task.authority)
             session = AnchorSynthesisSession(authority, workspace_root=task.workspace_root, runtime=self)
 
-            async def synthesize_anchor_plan(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
+            async def synthesize_anchor_plan(plan: AnchorPlanRequest) -> list[AnchorSynthesisResult]:
+                """Submit the complete Anchor set: full intents synthesize, reuse_anchor_id entries preserve results."""
                 assert session is not None
-                try:
-                    return await session.synthesize(plan)
-                except AnchorPlanError as exc:
-                    raise ModelRetry(str(exc)) from exc
-                except AnchorSynthesisLimitError as exc:
-                    raise ToolFailed(str(exc)) from exc
+                return await session.synthesize(plan)
 
             tools.extend(self._case_tools(authority.cases_dir, writable=False))
             tools.append(synthesize_anchor_plan)
@@ -397,30 +344,24 @@ class PydanticAIRuntime:
             tools.extend(self._case_tools(authority.cases_dir, writable=False))
 
             def list_skill_resources(max_files: int = 100) -> str:
-                try:
-                    return list_skills_impl(
-                        {"ast-grep": authority.skill_root},
-                        "ast-grep",
-                        max_files=max_files,
-                    )
-                except (ValueError, RuntimeError, OSError) as exc:
-                    _raise_tool_feedback(exc)
+                return list_skills_impl(
+                    {"ast-grep": authority.skill_root},
+                    "ast-grep",
+                    max_files=max_files,
+                )
 
             def read_skill_resource(
                 resource: str,
                 start_line: int = 1,
                 end_line: int | None = None,
             ) -> str:
-                try:
-                    return read_skill_impl(
-                        {"ast-grep": authority.skill_root},
-                        "ast-grep",
-                        resource,
-                        start_line=start_line,
-                        end_line=end_line,
-                    )
-                except (ValueError, RuntimeError, OSError) as exc:
-                    _raise_tool_feedback(exc)
+                return read_skill_impl(
+                    {"ast-grep": authority.skill_root},
+                    "ast-grep",
+                    resource,
+                    start_line=start_line,
+                    end_line=end_line,
+                )
 
             async def run_ast_grep_query(
                 target: Literal["src", "cases"],
@@ -439,29 +380,26 @@ class PydanticAIRuntime:
                 """
 
                 if target not in {"src", "cases"}:
-                    raise ModelRetry("target must be 'src' or 'cases'")
+                    raise ToolInputError("target must be 'src' or 'cases'")
                 if (
                     not isinstance(sample_size, int)
                     or isinstance(sample_size, bool)
                     or sample_size < 1
                     or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE
                 ):
-                    raise ModelRetry(f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}")
+                    raise ToolInputError(f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}")
                 root = authority.source_root if target == "src" else authority.cases_dir
-                try:
-                    return await asyncio.to_thread(
-                        run_ast_grep,
-                        root,
-                        language=language,
-                        query_type=query_type,
-                        query=query,
-                        output=output,
-                        sample_size=sample_size,
-                        debug_query=debug_query,
-                        timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
-                    )
-                except AstGrepQueryError as exc:
-                    raise ModelRetry(str(exc)) from exc
+                return await asyncio.to_thread(
+                    run_ast_grep,
+                    root,
+                    language=language,
+                    query_type=query_type,
+                    query=query,
+                    output=output,
+                    sample_size=sample_size,
+                    debug_query=debug_query,
+                    timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+                )
 
             tools.extend((list_skill_resources, read_skill_resource, run_ast_grep_query))
             capabilities.extend((compaction_capability(), cache_stability_capability()))
@@ -480,7 +418,9 @@ class PydanticAIRuntime:
             capabilities=capabilities,
             model_settings=model_settings,
             output_type=ToolOutput(model_output_type, name=_OUTPUT_TOOL_NAMES[task.phase], strict=False),
-            retries={"output": task.limits.output_retries},
+            # The SDK requires a retry ceiling; share the request ceiling so
+            # tools and output repair are stopped by max-turns, not earlier.
+            retries=task.limits.request_limit or UsageLimits().request_limit or 50,
         )
 
         @agent.output_validator
@@ -500,76 +440,18 @@ class PydanticAIRuntime:
                 errors = [str(exc)]
                 final = output
             if errors:
-                validation_state.append(tuple(errors))
                 raise ModelRetry("Deterministic output validation failed:\n- " + "\n- ".join(errors))
             final_state[:] = [final]
             return output
 
         return agent
 
-    async def _run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:
-        model = self._resolve_model()
-        validation_state: list[tuple[str, ...]] = []
-        final_state: list[BaseModel] = []
-        attempt_state: list[int] = []
-        agent = self.build_agent(
-            task,
-            model=model,
-            validation_state=validation_state,
-            final_state=final_state,
-            attempt_state=attempt_state,
-        )
-        usage = RunUsage()
-        limits = UsageLimits(request_limit=task.limits.request_limit) if task.limits.request_limit else None
-
-        async def execute() -> AgentRunResult[OutputT]:
-            try:
-                result = await agent.run(
-                    task.prompt,
-                    deps=MinerContext(task.workspace_root),
-                    usage=usage,
-                    usage_limits=limits,
-                )
-            except UnexpectedModelBehavior as exc:
-                attempts = 1 + task.limits.output_retries
-                latest_errors = (
-                    validation_state[-1]
-                    if validation_state and attempt_state == [attempts]
-                    else (str(exc),)
-                )
-                raise PydanticAIOutputValidationError(
-                    task.task_id,
-                    latest_errors,
-                    attempts=attempts,
-                ) from exc
-            output = cast(OutputT, final_state[-1] if final_state else result.output)
-            return AgentRunResult(
-                output=output,
-                identity=RuntimeIdentity(runtime_id=self.runtime_id, model_id=_model_id(model)),
-                usage=RuntimeUsage(
-                    requests=usage.requests,
-                    turns=usage.requests,
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    cache_creation_input_tokens=usage.cache_write_tokens,
-                    cache_read_input_tokens=usage.cache_read_tokens,
-                ),
-                attempts=attempt_state[-1] if attempt_state else 1,
-            )
-
-        if task.limits.timeout_seconds is None:
-            return await execute()
-        try:
-            async with asyncio.timeout(task.limits.timeout_seconds):
-                return await execute()
-        except TimeoutError as exc:
-            raise PydanticAIRuntimeError(
-                f"Pydantic AI task {task.task_id!r} exceeded {task.limits.timeout_seconds} seconds"
-            ) from exc
-
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:
-        instrument_tracing()
-        return await self._run(task)
+        session = self.open_session(task)
+        try:
+            return await session.send(task.prompt)
+        finally:
+            await session.close()
 
     def open_session(self, task: AgentTask[OutputT]) -> AgentSession[OutputT]:
         """Open one Agent conversation whose follow-ups reuse message history."""
@@ -579,7 +461,6 @@ class PydanticAIRuntime:
 
 
 __all__ = [
-    "PydanticAIOutputValidationError",
     "PydanticAIRuntime",
     "PydanticAIRuntimeConfigurationError",
     "PydanticAIRuntimeError",

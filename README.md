@@ -184,7 +184,7 @@ The Rule Generator does not load the ast-grep skill or validate queries. Its opt
 
 One mining run selects exactly one Runtime Adapter and one configured model. All phases, including child Synthesizers, retain that identity; there is no per-phase routing or runtime fallback. `VAMiner` accepts either an Issue or Example Suite through an Input Adapter, then uses one shared RCA → Rule Generation → persistence workflow.
 
-`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts at most two plans, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Each Synthesizer contributes only the experiences from its final complete output: they are ID-deduplicated and capped at three after the multi-round quality gate; the shared persisted skill has no fixed total experience count. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; the query tool returns ast-grep stderr verbatim and accepts `debug_query` for raw patterns. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
+`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts replans within the parent Agent turn budget, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Each Synthesizer contributes only the experiences from its final complete output: they are ID-deduplicated and capped at three after the multi-round quality gate; the shared persisted skill has no fixed total experience count. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; the query tool returns ast-grep stderr verbatim and accepts `debug_query` for raw patterns. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
 
 ### Miner module responsibilities
 
@@ -262,15 +262,21 @@ The Issue Collector's deferred `web-search` and `web-fetch` capabilities use loc
 Each phase has its own model-turn budget. Override the limits in the repository-root `.env` when needed:
 
 ```dotenv
-MINER_MAX_TURNS_ISSUE_COLLECTION=40
-MINER_MAX_TURNS_ROOT_CAUSE=40
-MINER_MAX_TURNS_RULE_GENERATION=30
-MINER_MAX_TURNS_PER_ANCHOR=30
+MINER_MAX_TURNS_ISSUE_COLLECTION=50
+MINER_MAX_TURNS_ROOT_CAUSE=50
+MINER_MAX_TURNS_RULE_GENERATION=40
+MINER_MAX_TURNS_PER_ANCHOR=40
 ```
 
-The Issue Collector and Root Cause Analyzer each have an independent budget of 40 turns. The Rule Generator has an independent 30-turn parent budget, and every per-anchor Synthesizer run has its own independent 30-turn limit. Delegated Synthesizer turns do not consume the waiting Rule Generator's budget in either runtime. At most five anchor runs execute concurrently; the number of runs follows the complete independent Anchor Plan rather than a fixed Anchor count.
+The Issue Collector and Root Cause Analyzer each have an independent default budget of 50 turns. The Rule Generator has an independent 40-turn parent budget, and every per-anchor Synthesizer run has its own independent 40-turn limit. Delegated Synthesizer turns do not consume the waiting Rule Generator's budget in either runtime. At most five anchor runs execute concurrently; the number of runs follows the complete independent Anchor Plan rather than a fixed Anchor count.
 
 Both runtimes treat these model-turn ceilings as request limits rather than a dollar budget. VAMINER does not calculate, collect, or report monetary cost estimates. Provider-reported cost fields are ignored; only request and token usage are retained.
+
+#### Tool calls and output validation
+
+Correctable tool failures return diagnostics to the Agent, which can revise the arguments within its remaining turns. There is no separate per-tool repair budget. This covers schema errors, missing or out-of-scope paths, invalid regex/globs, rejected case filenames, invalid Anchor Plans, and ast-grep query errors. Unavailable web evidence permits retry or another source. Tool implementation bugs, missing required CLIs, hard execution timeouts, and malformed process results remain fatal. ast-grep query errors preserve stderr; invalid JSON without a query-rejection diagnostic is a runner failure.
+
+Both runtimes use the same Pydantic models and deterministic phase validators. Tool correction, final structured-output repair, and child query acceptance all use the remaining Agent turn budget; there are no separate repair-count limits. Failed query acceptance returns feedback until the Agent supplies a valid query or explicitly disables it, or the turn budget is exhausted. Claude applies the generated JSON Schema in the CLI, then validates the result on the host. Its MCP tools use the shared error policy; fatal failures are recorded and the host terminates the CLI. Claude's native WebSearch/WebFetch remain CLI-owned. See [the tool error review](docs/tool-error-review.md) for the tool inventory, remaining limits, and validation coverage.
 
 #### Proxy access
 
@@ -336,19 +342,21 @@ uv run pytest
 
 `behavior_weight` records the rule importance of the intended inspection behavior. `query_weight` may be lower when the recall-preserving query is a weaker or broader proxy, and it is the only weight used for ranking. File priority sums the query weights of distinct matched anchors; repeated matches from the same anchor add navigation locations but do not multiply the score. Per-intent `required_cases` exists only in the synthesis request and is not part of synthesized anchors or the final VAS schema.
 
-An empty `query` is the disabled-anchor sentinel. Disabled anchors remain in the VAS so their intended inspection behavior is visible, but they are never executed and add no ranking weight. Enabled anchors remain strictly validated. Disabled anchors do not relax the requirement that every generated Case Artifact be admitted by at least one Anchor with `query_weight >= 3`; a missing Case Artifact admission remains a validation error.
+An empty `query` is the disabled-anchor sentinel. Disabled anchors remain in the VAS so their intended inspection behavior is visible, but they are never executed and add no ranking weight. Enabled anchors remain strictly validated. Disabled anchors do not relax the requirement that every generated Case Artifact be admitted by at least one Anchor meeting `ADMISSION_QUERY_WEIGHT`; a missing Case Artifact admission remains a validation error.
+
+`ADMISSION_QUERY_WEIGHT` defaults to 2 in `src/miner/utils/config.py` for final validation and Anchor review, and in the deployable scanner's `scripts/config.py`. Plan schema and validation errors return to the Rule Generator as correctable tool feedback. Final Anchor acceptance failures ask it to replan and rerun synthesis in the existing conversation, listing unadmitted case names without source excerpts or line numbers.
 
 ## Anchor Quality
 
 A complete anchor set is recall-oriented and behavior-distinct:
 
 - Every enabled anchor matches at least one generated case and at least one source file named by an RCA component; exact component-span overlap is not required.
-- Every generated case is admitted by at least one anchor with `query_weight >= 3`.
-- Under bad-span grounding, every RCA-declared bad-example source file is also admitted by at least one anchor with `query_weight >= 3` when all anchors are enabled.
+- Every generated case is admitted by at least one anchor meeting `ADMISSION_QUERY_WEIGHT`.
+- Under bad-span grounding, every RCA-declared bad-example source file is also admitted by at least one anchor meeting `ADMISSION_QUERY_WEIGHT` when all anchors are enabled.
 - Each anchor represents one distinct observable behavior in the causal chain, even when case coverage overlaps.
 - `behavior` describes only the local operation matched by that anchor; cross-site relationships, exploit conditions, and review questions belong in `inspect_hint`.
 - Each per-anchor query is centered on its target `behavior`. To reduce overlap with sibling anchors, one precision pass may add local defect-relevant structure supported by every required case and the RCA site, such as requiring the target operation to appear inside an `if` statement. Project-specific or full-chain constraints remain out of bounds.
-- A Synthesizer normally returns an empty `plan_suggestion`. It may briefly suggest deleting, merging, or revising intents only when observed source-corpus precision is materially poor and required-case recall can be preserved; the Rule Generator decides whether one bounded plan refinement is worthwhile. Such a suggestion must never be motivated by an artificial Anchor-count limit.
+- A Synthesizer normally returns an empty `plan_suggestion`. It may briefly suggest deleting, merging, or revising intents only when observed source-corpus precision is materially poor and required-case recall can be preserved; the Rule Generator decides whether further plan refinement is worthwhile within its remaining turns. Such a suggestion must never be motivated by an artificial Anchor-count limit.
 - Generic calls, assignments, definitions, and conditions are rejected unless structural or API constraints make them rule-sensitive.
 - Precision refinement is for reducing overlap between sibling anchors. Unrelated source matches do not justify narrowing the query; keep recall and lower `query_weight` when needed.
 

@@ -98,10 +98,13 @@ def _scan_result(
     return AnchorScanResult(root=root.resolve(), anchor_results=results)
 
 
+@pytest.mark.parametrize("threshold", [2, 3])
 def test_final_validation_uses_real_file_admission_not_match_or_span_coverage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    threshold: int,
 ):
+    monkeypatch.setattr(anchor_validation, "ADMISSION_QUERY_WEIGHT", threshold)
     source = tmp_path / "src"
     cases = tmp_path / "cases"
     source.mkdir()
@@ -123,18 +126,19 @@ def test_final_validation_uses_real_file_admission_not_match_or_span_coverage(
     monkeypatch.setattr(anchor_validation, "scan_anchors", fake_scan)
 
     errors = anchor_validation.validate_anchors(
-        _core(supporting_weight=2),
+        _core(supporting_weight=threshold - 1),
         source_root=source,
         cases_dir=cases,
         root_cause=_root_cause(),
         grounding_policy=GroundingPolicy.BAD_SPAN_COVERAGE,
     )
-    assert any("case2.c" in error and "not admitted" in error for error in errors)
-    assert any("bug2.c" in error and "not admitted" in error for error in errors)
-    assert not any("no match in an RCA-declared source file" in error for error in errors)
+    assert errors == [
+        "case files are not admitted: case2.c",
+        "RCA-declared bad-example files are not admitted: bug2.c",
+    ]
 
     assert anchor_validation.validate_anchors(
-        _core(supporting_weight=3),
+        _core(supporting_weight=threshold),
         source_root=source,
         cases_dir=cases,
         root_cause=_root_cause(),

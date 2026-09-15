@@ -26,7 +26,12 @@ class FetchedPage(TypedDict):
 
 
 def _validate_public_url(url: str) -> None:
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        httpx.URL(url)
+        parsed.port
+    except (ValueError, httpx.InvalidURL) as exc:
+        raise FetchError(f"invalid URL: {exc}") from exc
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise FetchError("only absolute HTTP and HTTPS URLs are supported")
 
@@ -51,7 +56,7 @@ def _extract_html(html: str, url: str) -> tuple[str, str]:
         include_comments=False,
         include_links=True,
     )
-    return metadata.title or "", content or html2txt(html)
+    return (metadata.title or "") if metadata is not None else "", content or html2txt(html)
 
 
 async def fetch_page(
@@ -79,6 +84,8 @@ async def fetch_page(
                 headers={"Accept": "text/html, text/plain;q=0.9, application/json;q=0.8"},
             )
             response.raise_for_status()
+    except httpx.LocalProtocolError:
+        raise
     except httpx.HTTPError as exc:
         raise FetchError(f"request failed: {exc}") from exc
 

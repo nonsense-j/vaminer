@@ -1,4 +1,6 @@
 import asyncio
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -7,6 +9,7 @@ from pydantic import ValidationError
 from src.miner.agent import (
     AgentRunResult,
     RuleGenerationAuthority,
+    RunLimits,
     RuntimeIdentity,
     RuntimeUsage,
 )
@@ -14,7 +17,7 @@ from src.miner.anchors.scanner import AnchorExecutionError, AnchorQueryError
 from src.miner.mining import synthesis as synthesis_module
 from src.miner.mining.synthesis import (
     AnchorPlanError,
-    AnchorSynthesisLimitError,
+    AnchorSynthesisError,
     AnchorSynthesisSession,
     deduplicate_query_anchors,
 )
@@ -36,6 +39,31 @@ from src.miner.models import (
     RuleGenerationDraft,
     Scenarios,
 )
+
+
+class ScriptedRuntime:
+    """Run each test script in a session with cumulative turn usage."""
+
+    def __init__(self, respond):
+        self.respond = respond
+
+    def open_session(self, task):
+        respond = self.respond
+
+        class Session:
+            turns = 0
+
+            async def send(self, prompt):
+                result = await respond(replace(task, prompt=prompt))
+                if result.usage is not None and result.usage.turns is not None:
+                    self.turns += result.usage.turns
+                    result = replace(result, usage=replace(result.usage, turns=self.turns))
+                return result
+
+            async def close(self):
+                pass
+
+        return Session()
 
 
 def _rca() -> RootCauseAnalysis:
@@ -65,7 +93,7 @@ def _plan(summary: str = "detect unchecked copies") -> AnchorPlan:
 
 
 @pytest.mark.asyncio
-async def test_session_owns_immutable_fields_latest_batch_and_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_session_owns_immutable_fields_and_accepts_repeated_replans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     source = tmp_path / "src"
     cases = tmp_path / "cases"
     source.mkdir()
@@ -92,7 +120,7 @@ async def test_session_owns_immutable_fields_latest_batch_and_limit(tmp_path: Pa
             identity=RuntimeIdentity(runtime_id="fake", model_id="fake-model"),
         )
 
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
     first = await session.synthesize(_plan("first summary"))
     second = await session.synthesize(_plan("second summary"))
     assert first[0].anchor.behavior == "copy a runtime length"
@@ -121,8 +149,18 @@ async def test_session_owns_immutable_fields_latest_batch_and_limit(tmp_path: Pa
     assert [error for error in language_errors if "language" in error] == [
         "rule language cpp does not match RCA language c"
     ]
-    with pytest.raises(AnchorSynthesisLimitError):
-        await session.synthesize(_plan("third"))
+    for summary in ("third", "fourth", "fifth"):
+        invalid = _plan().model_copy(update={"intents": [
+            _plan().intents[0].model_copy(update={"required_cases": ["unknown.c"]}),
+        ]})
+        before = session.receipt
+        with pytest.raises(AnchorPlanError):
+            await session.synthesize(invalid)
+        assert session.receipt is before
+        await session.synthesize(_plan(summary))
+        assert session.receipt.plan.summary == summary
+    assert len(task_labels) == 5
+    assert task_labels[-1][0] == "ast-grep-synthesis:5:copy-site"
 
 
 @pytest.mark.asyncio
@@ -165,7 +203,7 @@ async def test_replan_passes_merged_query_draft_to_only_its_synthesizer(
         return ()
 
     monkeypatch.setattr(synthesis_module, "_query_errors", validate_output)
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
     original = AnchorPlan(
         summary="copy sites",
         intents=[
@@ -233,7 +271,7 @@ async def test_rejected_second_plan_keeps_first_receipt(tmp_path: Path, monkeypa
             identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
         )
 
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
     await session.synthesize(_plan("accepted"))
     bad = _plan("bad").model_copy(update={"intents": [_plan().intents[0].model_copy(update={"required_cases": ["unknown.c"]})]})
     with pytest.raises(AnchorPlanError):
@@ -266,7 +304,7 @@ async def test_session_waits_for_sibling_cleanup_before_propagating_failure(tmp_
     session = AnchorSynthesisSession(
         authority,
         workspace_root=tmp_path,
-        execute=execute,
+        runtime=ScriptedRuntime(execute),
         max_parallel=2,
     )
 
@@ -336,7 +374,7 @@ async def test_plan_normalizes_duplicate_case_references_after_collective_assign
     session = AnchorSynthesisSession(
         authority,
         workspace_root=tmp_path,
-        execute=execute,
+        runtime=ScriptedRuntime(execute),
     )
     await session.synthesize(plan)
 
@@ -403,7 +441,7 @@ async def test_plan_has_no_fixed_intent_count(
             identity=RuntimeIdentity(runtime_id="fake", model_id="fake-model"),
         )
 
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
     results = await session.synthesize(plan)
 
     assert len(results) == 9
@@ -508,7 +546,7 @@ def test_query_grounding_accepts_a_match_elsewhere_in_an_rca_component_file(
 
 
 @pytest.mark.asyncio
-async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
+async def test_query_repairs_use_turn_budget_but_execution_failures_propagate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -520,6 +558,9 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
     calls = 0
     task_labels: list[tuple[str, str]] = []
     prompts: list[str] = []
+    monkeypatch.setattr(synthesis_module, "make_ast_grep_synthesis_task", partial(
+        make_ast_grep_synthesis_task, limits=RunLimits(request_limit=5),
+    ))
 
     async def execute(task):
         nonlocal calls
@@ -543,21 +584,20 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
         "scan_anchors",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AnchorQueryError("invalid pattern")),
     )
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
-    result = await session.synthesize(_plan())
-    assert calls == 3
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
+    with pytest.raises(AnchorSynthesisError, match="model request limit of 5"):
+        await session.synthesize(_plan())
+    assert calls == 5
     assert task_labels == [
         ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
-        ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
-        ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
-    ]
+    ] * 5
     assert prompts[0].startswith("Generate and validate only the ast-grep query")
     assert prompts[1] == prompts[2]
     assert prompts[1].startswith("The previous query failed deterministic validation:")
     assert "ast-grep validation failed: invalid pattern" in prompts[1]
     assert "Revise only the query fields for this target anchor." in prompts[1]
     assert prompts[0] not in prompts[1]
-    assert result[0].anchor.query == ""
+    assert session.receipt is None
 
     calls = 0
     task_labels.clear()
@@ -566,7 +606,7 @@ async def test_query_failures_degrade_but_scanner_execution_failures_propagate(
         "scan_anchors",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AnchorExecutionError("binary missing")),
     )
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
     with pytest.raises(AnchorExecutionError, match="binary missing"):
         await session.synthesize(_plan())
     assert calls == 1
@@ -610,7 +650,7 @@ async def test_session_returns_and_persists_deduplicated_synthesis_experiences(
             identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
         )
 
-    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, execute=execute)
+    session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
     result = await session.synthesize(_plan())
 
     assert result[0].experiences == [lesson]
@@ -627,26 +667,26 @@ def test_delta_normalizes_and_deduplicates_query_writing_experience_updates():
         "plan_suggestion": "",
     }
     lessons = [
-        {"mode": "ADD", "lesson_id": "all-1", "lesson": " initial lesson "},
-        {"mode": "ADD", "lesson_id": "all-2", "lesson": "first\n lesson"},
-        {"mode": "REPLACE", "lesson_id": "all-1", "lesson": "updated guidance"},
-        {"mode": "ADD", "lesson_id": "all-3", "lesson": "third lesson"},
-        {"mode": "ADD", "lesson_id": "all-4", "lesson": "fourth lesson"},
+        {"mode": "ADD", "lesson_id": "ALL-1", "lesson": " initial lesson "},
+        {"mode": "ADD", "lesson_id": "ALL-2", "lesson": "first\n lesson"},
+        {"mode": "REPLACE", "lesson_id": "ALL-1", "lesson": "updated guidance"},
+        {"mode": "ADD", "lesson_id": "ALL-3", "lesson": "third lesson"},
+        {"mode": "ADD", "lesson_id": "ALL-4", "lesson": "fourth lesson"},
     ]
 
     delta = AnchorSynthesisDelta.model_validate({**common, "experiences": lessons})
 
     assert [(experience.lesson_id, experience.lesson) for experience in delta.experiences] == [
-        ("all-1", "updated guidance"),
-        ("all-2", "first lesson"),
-        ("all-3", "third lesson"),
+        ("ALL-1", "updated guidance"),
+        ("ALL-2", "first lesson"),
+        ("ALL-3", "third lesson"),
     ]
 
     long_lesson = AnchorSynthesisDelta.model_validate(
         {
             **common,
             "experiences": [
-                {"mode": "ADD", "lesson_id": "all-99", "lesson": "x" * 300}
+                {"mode": "ADD", "lesson_id": "ALL-99", "lesson": "x" * 300}
             ],
         }
     )
@@ -682,7 +722,7 @@ async def test_session_skips_experiences_when_turns_are_below_half_the_budget(
                 experiences=[
                     AstGrepExperience(
                         mode="ADD",
-                        lesson_id="all-1",
+                        lesson_id="ALL-1",
                         lesson="A reusable lesson discovered after debugging.",
                     )
                 ],
@@ -695,7 +735,7 @@ async def test_session_skips_experiences_when_turns_are_below_half_the_budget(
     result = await AnchorSynthesisSession(
         authority,
         workspace_root=tmp_path,
-        execute=execute,
+        runtime=ScriptedRuntime(execute),
     ).synthesize(_plan())
 
     assert result[0].experiences == []
@@ -717,7 +757,7 @@ def test_delta_caps_distinct_experience_updates_at_three():
             "experiences": [
                 {
                     "mode": "ADD",
-                    "lesson_id": f"all-{index}",
+                    "lesson_id": f"ALL-{index}",
                     "lesson": f"lesson {index}",
                 }
                 for index in range(1, 31)
@@ -726,9 +766,9 @@ def test_delta_caps_distinct_experience_updates_at_three():
     )
 
     assert [experience.lesson_id for experience in delta.experiences] == [
-        "all-1",
-        "all-2",
-        "all-3",
+        "ALL-1",
+        "ALL-2",
+        "ALL-3",
     ]
 
 
@@ -745,7 +785,7 @@ def test_delta_normalizes_lesson_whitespace():
         {
             **common,
             "experiences": [
-                {"mode": "ADD", "lesson_id": "all-1", "lesson": " a lesson "},
+                {"mode": "ADD", "lesson_id": "ALL-1", "lesson": " a lesson "},
             ],
         }
     )
@@ -754,13 +794,18 @@ def test_delta_normalizes_lesson_whitespace():
 
 
 @pytest.mark.asyncio
-async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("recovers", [False, True])
+async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovers):
     source = tmp_path / "src"
     cases = tmp_path / "cases"
     source.mkdir()
     cases.mkdir()
     authority = RuleGenerationAuthority(source, cases, GroundingPolicy.REPOSITORY_EVIDENCE, _rca())
-    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: ("query misses case1.c",))
+    validations = iter([("query misses case1.c",)] * (4 if recovers else 5) + [()])
+    monkeypatch.setattr(synthesis_module, "_query_errors", lambda *_args: next(validations))
+    monkeypatch.setattr(synthesis_module, "make_ast_grep_synthesis_task", partial(
+        make_ast_grep_synthesis_task, limits=RunLimits(request_limit=5),
+    ))
 
     class Conversation:
         def __init__(self) -> None:
@@ -796,17 +841,22 @@ async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, 
             return session
 
     runtime = Runtime()
-    result = await AnchorSynthesisSession(
+    session = AnchorSynthesisSession(
         authority,
         workspace_root=tmp_path,
         runtime=runtime,
-    ).synthesize(_plan())
-
-    assert result[0].anchor.query == ""
+    )
+    if recovers:
+        result = await session.synthesize(_plan())
+        assert result[0].anchor.query == "copy($A)"
+    else:
+        with pytest.raises(AnchorSynthesisError, match="model request limit of 5"):
+            await session.synthesize(_plan())
+        assert session.receipt is None
     assert len(runtime.sessions) == 1
     conversation = runtime.sessions[0]
     assert conversation.closed
-    assert len(conversation.prompts) == 3
+    assert len(conversation.prompts) == 5
     assert conversation.prompts[0].startswith("Generate and validate only the ast-grep query")
     assert all("query misses case1.c" in prompt for prompt in conversation.prompts[1:])
     assert all("Revise only the query fields for this target anchor." in prompt for prompt in conversation.prompts[1:])
@@ -889,26 +939,26 @@ async def test_repair_attempts_keep_only_final_experience_updates(
             1: [
                 AstGrepExperience(
                     mode="ADD",
-                    lesson_id="all-1",
+                    lesson_id="ALL-1",
                     lesson="First attempt produced an obsolete lesson.",
                 ),
                 AstGrepExperience(
                     mode="ADD",
-                    lesson_id="all-2",
+                    lesson_id="ALL-2",
                     lesson="First attempt produced another obsolete lesson.",
                 ),
             ],
             2: [
                 AstGrepExperience(
                     mode="ADD",
-                    lesson_id="all-3",
+                    lesson_id="ALL-3",
                     lesson="Second attempt produced an obsolete lesson.",
                 ),
             ],
             3: [
                 AstGrepExperience(
                     mode="ADD",
-                    lesson_id="all-4",
+                    lesson_id="ALL-4",
                     lesson="Final attempt produced the reusable lesson.",
                 ),
             ],
@@ -929,9 +979,9 @@ async def test_repair_attempts_keep_only_final_experience_updates(
     result = await AnchorSynthesisSession(
         authority,
         workspace_root=tmp_path,
-        execute=execute,
+        runtime=ScriptedRuntime(execute),
     ).synthesize(_plan())
 
     assert calls == 3
-    assert [experience.lesson_id for experience in result[0].experiences] == ["all-4"]
+    assert [experience.lesson_id for experience in result[0].experiences] == ["ALL-4"]
     assert recorded_batches == [result[0].experiences]

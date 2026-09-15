@@ -10,10 +10,10 @@ from pydantic import BaseModel, ConfigDict
 
 from ...agent.contracts import AgentTask, RuleGenerationAuthority
 from ...models.analysis import GroundingPolicy, RootCauseAnalysis
-from ...models.anchors import AnchorPlan, AnchorSynthesisResult
+from ...models.anchors import AnchorPlanRequest, AnchorSynthesisResult
 from ...mining.synthesis import (
     AnchorPlanError,
-    AnchorSynthesisLimitError,
+    AnchorSynthesisReceipt,
     AnchorSynthesisSession,
 )
 from ...utils.log import RuntimeLog
@@ -21,7 +21,7 @@ from ...utils.workspace import atomic_write_json
 from .config import ClaudeCodeConfig
 from .process import clip, redact
 
-ClaudeSynthesisHandler = Callable[[AnchorPlan], Awaitable[list[AnchorSynthesisResult]]]
+ClaudeSynthesisHandler = Callable[[AnchorPlanRequest], Awaitable[list[AnchorSynthesisResult]]]
 
 
 class ClaudeSynthesisHostContext(BaseModel):
@@ -34,6 +34,7 @@ class ClaudeSynthesisHostContext(BaseModel):
     cases_dir: Path
     grounding_policy: GroundingPolicy
     root_cause: RootCauseAnalysis
+    synthesis_cache_path: Path | None = None
     receipt_path: Path
     failure_path: Path
     executable: str
@@ -46,7 +47,6 @@ class ClaudeSynthesisHostContext(BaseModel):
     terminate_grace_seconds: float
     max_stdout_bytes: int
     max_stderr_bytes: int
-    max_repair_attempts: int
     max_synthesis_process_retries: int
     max_repair_payload_chars: int
 
@@ -68,6 +68,7 @@ class ClaudeSynthesisHostContext(BaseModel):
             cases_dir=authority.cases_dir,
             grounding_policy=authority.grounding_policy,
             root_cause=authority.root_cause,
+            synthesis_cache_path=authority.synthesis_cache_path,
             receipt_path=receipt_path,
             failure_path=failure_path,
             executable=executable,
@@ -80,7 +81,6 @@ class ClaudeSynthesisHostContext(BaseModel):
             terminate_grace_seconds=config.terminate_grace_seconds,
             max_stdout_bytes=config.max_stdout_bytes,
             max_stderr_bytes=config.max_stderr_bytes,
-            max_repair_attempts=config.max_repair_attempts,
             max_synthesis_process_retries=config.max_synthesis_process_retries,
             max_repair_payload_chars=config.max_repair_payload_chars,
         )
@@ -97,7 +97,6 @@ class ClaudeSynthesisHostContext(BaseModel):
             terminate_grace_seconds=self.terminate_grace_seconds,
             max_stdout_bytes=self.max_stdout_bytes,
             max_stderr_bytes=self.max_stderr_bytes,
-            max_repair_attempts=self.max_repair_attempts,
             max_synthesis_process_retries=self.max_synthesis_process_retries,
             max_repair_payload_chars=self.max_repair_payload_chars,
         )
@@ -120,13 +119,21 @@ def load_claude_synthesis_handler(path: Path) -> ClaudeSynthesisHandler:
         cases_dir=context.cases_dir,
         grounding_policy=context.grounding_policy,
         root_cause=context.root_cause,
+        synthesis_cache_path=context.synthesis_cache_path,
     )
-    session = AnchorSynthesisSession(authority, workspace_root=context.workspace_root, runtime=runtime)
+    receipt = (
+        AnchorSynthesisReceipt.model_validate_json(context.receipt_path.read_text(encoding="utf-8"))
+        if context.receipt_path.is_file()
+        else None
+    )
+    session = AnchorSynthesisSession(
+        authority, workspace_root=context.workspace_root, runtime=runtime, initial_receipt=receipt,
+    )
 
-    async def synthesize(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
+    async def synthesize(plan: AnchorPlanRequest) -> list[AnchorSynthesisResult]:
         try:
             results = await session.synthesize(plan)
-        except (AnchorPlanError, AnchorSynthesisLimitError):
+        except AnchorPlanError:
             raise
         except Exception as exc:
             atomic_write_json(

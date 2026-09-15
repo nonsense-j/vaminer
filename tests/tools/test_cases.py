@@ -34,6 +34,9 @@ def test_case_artifacts_are_bounded_and_top_level_only(tmp_path: Path):
         write_case_artifact(cases, "nested/case2.c", "bad\n")
     with pytest.raises(ValueError, match="caseN"):
         write_case_artifact(cases, "notes.c", "bad\n")
+    with pytest.raises(ValueError, match="caseN"):
+        write_case_artifact(cases, "notes.c", "\n")
+    assert not (cases / "notes.c").exists()
     with pytest.raises(ValueError, match="non-empty"):
         write_case_artifact(cases, "case2.c", " \n")
 

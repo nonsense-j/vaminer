@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
 
+from .errors import ToolInputError, validate_text_argument
 from .text import format_file_read, truncation_footer
 
 MAX_SRC_READ_BYTES = 512 * 1024
@@ -27,28 +29,29 @@ def _src_scope_path(
 
     root = Path(src_root).resolve()
     if not root.is_dir():
-        raise ValueError(f"src_root is not an existing directory: {root}")
+        raise RuntimeError(f"src_root is not an existing directory: {root}")
     if path is None or path in {"", "."}:
         return root, root
+    validate_text_argument(path, "path")
     relative = Path(path)
     if relative.is_absolute():
-        raise ValueError("src path must be relative to the bound Src Root")
+        raise ToolInputError("src path must be relative to the bound Src Root")
     current = root
     for part in relative.parts:
         if part in {"", "."}:
             continue
         current /= part
         if current.is_symlink():
-            raise ValueError(f"src path must not traverse symbolic links: {path}")
+            raise ToolInputError(f"src path must not traverse symbolic links: {path}")
     target = (root / relative).resolve()
     try:
         target.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"src path must stay inside the bound Src Root: {path}") from exc
+        raise ToolInputError(f"src path must stay inside the bound Src Root: {path}") from exc
     if not target.exists():
         relative_parts = relative.parts
         if len(relative_parts) <= len(root.parts) and root.parts[-len(relative_parts) :] == relative_parts:
-            raise ValueError(
+            raise ToolInputError(
                 f"src path repeats the bound Src Root: {path}; "
                 f"bound root: {root.as_posix()}; use '.' or omit path for the root"
             )
@@ -56,18 +59,20 @@ def _src_scope_path(
         while nearest != root and not nearest.is_dir():
             nearest = nearest.parent
         nearest_relative = nearest.relative_to(root).as_posix()
-        raise ValueError(
+        raise ToolInputError(
             f"src path does not exist relative to bound root {root.as_posix()}: {path}; "
             f"nearest existing directory: {nearest_relative}"
         )
     if not target.is_dir() and not (allow_file and target.is_file()):
         expected = "a file or directory" if allow_file else "a directory"
-        raise ValueError(f"src path is not {expected}: {path}")
+        raise ToolInputError(f"src path is not {expected}: {path}")
     return root, target
 
 
-def _bounded_process_error(label: str, stderr: str, returncode: int) -> RuntimeError:
+def _bounded_process_error(label: str, stderr: str, returncode: int) -> RuntimeError | ToolInputError:
     detail = stderr.strip()[:MAX_SRC_ERROR_CHARS]
+    if "regex parse error:" in stderr or "error parsing glob" in stderr:
+        return ToolInputError(detail)
     return RuntimeError(detail or f"{label} exited with {returncode}")
 
 
@@ -101,9 +106,11 @@ def list_src_files(
     """
 
     if max_results < 1 or max_results > MAX_SRC_LIST_RESULTS:
-        raise ValueError(f"max_results must be between 1 and {MAX_SRC_LIST_RESULTS}")
+        raise ToolInputError(f"max_results must be between 1 and {MAX_SRC_LIST_RESULTS}")
     if glob is not None and (not glob.strip() or len(glob) > 500):
-        raise ValueError("glob must be between 1 and 500 characters")
+        raise ToolInputError("glob must be between 1 and 500 characters")
+    if glob is not None:
+        validate_text_argument(glob, "glob")
     root, target = _src_scope_path(src_root, path)
     command = [
         "rg",
@@ -115,7 +122,7 @@ def list_src_files(
         "never",
     ]
     if glob is not None:
-        command.extend(("--glob", glob))
+        command.append(f"--glob={glob}")
     command.append(str(target))
     try:
         completed = subprocess.run(
@@ -180,16 +187,16 @@ def read_src_file(
     """
 
     if not path:
-        raise ValueError("src file path must be non-empty")
+        raise ToolInputError("src file path must be non-empty")
     _, target = _src_scope_path(src_root, path, allow_file=True)
     if not target.is_file():
-        raise ValueError(f"src path is not a regular file: {path}")
+        raise ToolInputError(f"src path is not a regular file: {path}")
     if start_line < 1 or max_lines < 1:
-        raise ValueError("start_line and max_lines must be positive")
+        raise ToolInputError("start_line and max_lines must be positive")
     if full_file and (start_line != 1 or end_line is not None):
-        raise ValueError("full_file cannot be combined with start_line or end_line bounds")
+        raise ToolInputError("full_file cannot be combined with start_line or end_line bounds")
     if target.stat().st_size > MAX_SRC_READ_BYTES:
-        raise ValueError(f"src file exceeds the {MAX_SRC_READ_BYTES}-byte read limit: {path}")
+        raise ToolInputError(f"src file exceeds the {MAX_SRC_READ_BYTES}-byte read limit: {path}")
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     if not lines and start_line == 1:
         return format_file_read(
@@ -216,7 +223,7 @@ def read_src_file(
     effective_max_lines = MAX_SRC_READ_BYTES if full_file else max_lines
     requested_end = end_line if end_line is not None else start_line + effective_max_lines - 1
     if requested_end < start_line:
-        raise ValueError("end_line must be greater than or equal to start_line")
+        raise ToolInputError("end_line must be greater than or equal to start_line")
     resolved_end = min(len(lines), requested_end, start_line + effective_max_lines - 1)
     return format_file_read(
         path=Path(path).as_posix(),
@@ -251,15 +258,20 @@ def search_src_files(
     """
 
     if not isinstance(pattern, str):
-        raise ValueError("search pattern must be a string")
+        raise ToolInputError("search pattern must be a string")
     if not pattern.strip() or len(pattern) > 500:
-        raise ValueError("search pattern must be between 1 and 500 characters")
+        raise ToolInputError("search pattern must be between 1 and 500 characters")
+    validate_text_argument(pattern, "pattern")
+    if "\n" in pattern:
+        raise ToolInputError("search pattern must be a single line; multiline search is not supported")
     if mode not in {"literal", "regex"}:
-        raise ValueError("search mode must be 'literal' or 'regex'")
+        raise ToolInputError("search mode must be 'literal' or 'regex'")
     if glob is not None and (not glob.strip() or len(glob) > 500):
-        raise ValueError("glob must be between 1 and 500 characters")
+        raise ToolInputError("glob must be between 1 and 500 characters")
+    if glob is not None:
+        validate_text_argument(glob, "glob")
     if max_results < 1 or max_results > MAX_SRC_SEARCH_RESULTS:
-        raise ValueError(f"max_results must be between 1 and {MAX_SRC_SEARCH_RESULTS}")
+        raise ToolInputError(f"max_results must be between 1 and {MAX_SRC_SEARCH_RESULTS}")
     root, target = _src_scope_path(src_root, path, allow_file=True)
 
     command = [
@@ -276,8 +288,8 @@ def search_src_files(
     if mode == "literal":
         command.append("--fixed-strings")
     if glob is not None:
-        command.extend(("--glob", glob))
-    command.extend(("--regexp", pattern, str(target)))
+        command.append(f"--glob={glob}")
+    command.extend((f"--regexp={pattern}", str(target)))
     try:
         completed = subprocess.run(
             command,
@@ -302,23 +314,21 @@ def search_src_files(
     for line in bounded_stdout.splitlines():
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"rg returned invalid JSON: {exc}") from exc
+        if not isinstance(event, dict):
+            raise RuntimeError("rg returned an unexpected JSON shape")
         event_type = event.get("type")
         if event_type not in {"match", "context"}:
             continue
         data = event.get("data")
         if not isinstance(data, dict):
-            continue
-        path_data = data.get("path")
+            raise RuntimeError("rg returned a malformed match")
         line_number = data.get("line_number")
-        lines_data = data.get("lines")
-        if not isinstance(path_data, dict) or not isinstance(line_number, int) or not isinstance(lines_data, dict):
-            continue
-        absolute = path_data.get("text")
-        text = lines_data.get("text")
-        if not isinstance(absolute, str) or not isinstance(text, str):
-            continue
+        if type(line_number) is not int or line_number < 1:
+            raise RuntimeError("rg returned a malformed line number")
+        absolute = _rg_text(data.get("path"), errors="surrogateescape")
+        text = _rg_text(data.get("lines"), errors="replace")
         try:
             relative = Path(absolute).resolve().relative_to(root).as_posix()
         except ValueError:
@@ -363,6 +373,19 @@ def search_src_files(
     elif len(matches) > max_results:
         rendered.append(truncation_footer())
     return "\n".join(rendered)
+
+
+def _rg_text(value: object, *, errors: str) -> str:
+    """ripgrep uses base64 for paths or lines that are not UTF-8."""
+    if isinstance(value, dict):
+        if isinstance(value.get("text"), str):
+            return value["text"]
+        if isinstance(value.get("bytes"), str):
+            try:
+                return base64.b64decode(value["bytes"], validate=True).decode("utf-8", errors=errors)
+            except ValueError as exc:
+                raise RuntimeError("rg returned invalid base64 text") from exc
+    raise RuntimeError("rg returned malformed text")
 
 
 __all__ = [

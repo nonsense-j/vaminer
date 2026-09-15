@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-from pydantic_ai import ModelRetry, ToolFailed
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -9,7 +8,6 @@ from pydantic_ai.models.test import TestModel
 from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.mining.synthesis import (
     AnchorPlanError,
-    AnchorSynthesisLimitError,
     AnchorSynthesisSession,
 )
 from src.miner.mining.tasks import (
@@ -29,7 +27,93 @@ from src.miner.models import (
 from src.miner.runtimes.pydantic import runtime as pydantic_runtime
 from src.miner.runtimes.pydantic import telemetry as pydantic_telemetry
 from src.miner.runtimes.pydantic.runtime import PydanticAIRuntime
+from src.miner.tools.errors import ToolInputError
 from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
+
+
+@pytest.mark.asyncio
+async def test_generator_corrects_plans_and_replans_after_admission_failure_with_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from src.miner.anchors.scanner import AnchorMatch, AnchorRunResult, AnchorScanResult
+    from src.miner.mining import synthesis
+    from src.miner.mining.validation import anchors as validation
+
+    source, cases = tmp_path / "src", tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    (source / "bug.c").write_text("copy();\n", encoding="utf-8")
+    (cases / "case1.c").write_text("copy();\n", encoding="utf-8")
+    task = make_rule_generation_task(
+        _root_cause(), workspace_root=tmp_path, source_root=source,
+        cases_dir=cases, grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
+    )
+
+    def scan(anchors, root, _language):
+        return AnchorScanResult(root=root, anchor_results=[
+            AnchorRunResult(anchor=anchor, matches=[AnchorMatch(
+                anchor_id=anchor["id"], query_weight=anchor["query_weight"],
+                behavior=anchor["behavior"], inspect_hint=anchor["inspect_hint"],
+                file="case1.c" if root == cases else "bug.c", start_line=1, end_line=1,
+            )])
+            for anchor in anchors
+        ])
+
+    monkeypatch.setattr(synthesis, "scan_anchors", scan)
+    monkeypatch.setattr(validation, "scan_anchors", scan)
+    parent_calls = 0
+    child_calls = 0
+
+    def respond(messages, info):
+        nonlocal parent_calls, child_calls
+        output_tool = info.output_tools[0].name
+        if output_tool == "return_anchor_synthesis_delta":
+            child_calls += 1
+            return ModelResponse(parts=[ToolCallPart(output_tool, {
+                "anchor_id": "copy-site", "type": "pattern", "query": "copy();",
+                "query_weight": child_calls, "adjustments": [], "plan_suggestion": "",
+            })])
+
+        parent_calls += 1
+        if parent_calls == 1:
+            return ModelResponse(parts=[ToolCallPart("synthesize_anchor_plan", {})])
+        if parent_calls in (2, 3, 5):
+            history = "\n".join(
+                str(part.content) for message in messages for part in message.parts
+                if hasattr(part, "content")
+            )
+            if parent_calls == 2:
+                assert "Tool input error" in history
+            if parent_calls == 3:
+                assert "unknown Case Artifacts: case99.c" in history
+            if parent_calls == 5:
+                feedback = str(messages[-1].parts[0].content)
+                assert "Replan and call synthesize_anchor_plan" in feedback
+                assert "case files are not admitted: case1.c" in feedback
+                assert "copy();" not in feedback
+                assert "case1.c:1" not in feedback
+                assert task.prompt in history
+                assert "unknown Case Artifacts: case99.c" in history
+                assert "copy();" in history
+            return ModelResponse(parts=[ToolCallPart("synthesize_anchor_plan", {"plan": {
+                "summary": "Copies must preserve bounds.",
+                "intents": [{
+                    "id": "copy-site", "behavior_weight": 4, "behavior": "Copy a value.",
+                    "inspect_hint": "Inspect the bound.",
+                    "required_cases": ["case99.c" if parent_calls == 2 else "case1.c"],
+                }],
+            }})])
+        assert parent_calls in (4, 6)
+        return ModelResponse(parts=[ToolCallPart(output_tool, {
+            "category": "SECURITY", "scenarios": {"unsafe": ["Unbounded copy."], "safe": []},
+        })])
+
+    result = await PydanticAIRuntime(model=FunctionModel(respond)).run(task)
+
+    assert parent_calls == 6
+    assert child_calls == 2
+    assert result.output.anchors[0].query_weight == 2
+    assert task.validate_output(result.output) == ()
 
 
 def _root_cause() -> RootCauseAnalysis:
@@ -61,7 +145,6 @@ def _tool_names(runtime: PydanticAIRuntime, task) -> set[str]:
     agent = runtime.build_agent(
         task,
         model=TestModel(),
-        validation_state=[],
         final_state=[],
     )
     return set(agent._function_toolset.tools)
@@ -156,7 +239,7 @@ def test_pydantic_phase_tools_match_closed_authority(tmp_path: Path):
     )
 
 
-def test_pydantic_read_tools_surface_correctable_value_errors_as_model_retries(tmp_path: Path):
+def test_pydantic_read_tools_classify_input_errors(tmp_path: Path):
     source = tmp_path / "src"
     cases = tmp_path / "cases"
     source.mkdir()
@@ -168,10 +251,25 @@ def test_pydantic_read_tools_surface_correctable_value_errors_as_model_retries(t
     src_tools = {tool.__name__: tool for tool in runtime._src_tools(source)}
     case_tools = {tool.__name__: tool for tool in runtime._case_tools(cases, writable=False)}
 
-    with pytest.raises(ModelRetry, match="start_line and max_lines must be positive"):
+    with pytest.raises(ToolInputError, match="start_line and max_lines must be positive"):
         src_tools["read_src_file"]("bug.c", start_line=0)
-    with pytest.raises(ModelRetry, match="start_line must be positive"):
+    with pytest.raises(ToolInputError, match="start_line must be positive"):
         case_tools["read_case_artifact"]("case1.c", start_line=0)
+
+
+def test_pydantic_case_writer_rejects_bad_names_as_retryable_feedback(tmp_path: Path):
+    cases = tmp_path / "cases"
+    cases.mkdir()
+
+    runtime = PydanticAIRuntime(model=TestModel())
+    writer = {tool.__name__: tool for tool in runtime._case_tools(cases, writable=True)}[
+        "write_case_artifact"
+    ]
+
+    assert "caseN.<ext>" in writer.__doc__
+    with pytest.raises(ToolInputError, match="caseN"):
+        writer("not-a-case.c", "content\n")
+    assert not (cases / "not-a-case.c").exists()
 
 
 @pytest.mark.asyncio
@@ -183,11 +281,11 @@ async def test_pydantic_src_tools_return_expected_failures_to_the_model(tmp_path
     runtime = PydanticAIRuntime(model=TestModel())
     src_tools = {tool.__name__: tool for tool in runtime._src_tools(source)}
 
-    with pytest.raises(ModelRetry, match="search pattern must be between"):
+    with pytest.raises(ToolInputError, match="search pattern must be between"):
         await src_tools["search_src_files"]("")
-    with pytest.raises(ModelRetry, match="must stay inside"):
+    with pytest.raises(ToolInputError, match="must stay inside"):
         await src_tools["list_src_files"]("../outside")
-    with pytest.raises(ToolFailed, match="regex parse error"):
+    with pytest.raises(ToolInputError, match="regex parse error"):
         await src_tools["search_src_files"]("[", mode="regex")
 
 
@@ -264,8 +362,7 @@ async def test_pydantic_attempts_include_structured_output_schema_repairs(tmp_pa
 @pytest.mark.parametrize(
     ("failure", "expected"),
     [
-        (AnchorPlanError("bad plan"), ModelRetry),
-        (AnchorSynthesisLimitError("plan limit"), ToolFailed),
+        (AnchorPlanError("bad plan"), ToolInputError),
         (RuntimeError("child runtime failed"), RuntimeError),
     ],
 )
@@ -296,7 +393,6 @@ async def test_pydantic_plan_tool_translates_only_correctable_failures(
     agent = PydanticAIRuntime(model=TestModel()).build_agent(
         task,
         model=TestModel(),
-        validation_state=[],
         final_state=[],
     )
     tool = agent._function_toolset.tools["synthesize_anchor_plan"]
@@ -321,7 +417,8 @@ async def test_pydantic_plan_tool_translates_only_correctable_failures(
 @pytest.mark.parametrize(
     ("failure", "expected"),
     [
-        (AstGrepQueryError("invalid pattern"), ModelRetry),
+        (AstGrepQueryError("invalid pattern"), ToolInputError),
+        (AstGrepRunnerError("ast-grep returned invalid JSON: decoder failed"), AstGrepRunnerError),
         (AstGrepRunnerError("ast-grep timed out"), AstGrepRunnerError),
     ],
 )
@@ -366,7 +463,6 @@ async def test_pydantic_ast_grep_tool_repairs_only_query_failures(
     agent = PydanticAIRuntime(model=TestModel()).build_agent(
         task,
         model=TestModel(),
-        validation_state=[],
         final_state=[],
     )
     tool = agent._function_toolset.tools["run_ast_grep_query"]

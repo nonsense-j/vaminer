@@ -73,11 +73,12 @@ class InputRun:
     async def execute(self, task: AgentTask[Any]) -> AgentRunResult[Any]:
         identity = self.runtime.identity
         logger.info(
-            "Agent task selected: phase=%s task=%s runtime=%s model=%s",
+            "Agent task selected: phase=%s task=%s runtime=%s model=%s max_turns=%s",
             task.phase.value,
             task.task_id,
             identity.runtime_id,
             identity.model_id,
+            task.limits.request_limit,
         )
         result = await self.runtime.run(task)
         if result.identity != identity:

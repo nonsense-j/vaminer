@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -11,6 +12,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
+
+from .errors import ToolInputError, validate_text_argument
 
 QueryType = Literal["pattern", "rule"]
 OutputMode = Literal["count", "sample", "full"]
@@ -35,7 +38,7 @@ class AstGrepRunnerError(RuntimeError):
         super().__init__(message)
 
 
-class AstGrepQueryError(AstGrepRunnerError):
+class AstGrepQueryError(AstGrepRunnerError, ToolInputError):
     """Raised when ast-grep rejects model-authored query syntax or semantics."""
 
 
@@ -117,26 +120,29 @@ def _relative_file(root: Path, value: Any) -> str:
         raise AstGrepRunnerError(f"ast-grep returned a file outside the target directory: {value}") from exc
 
 
-def _coordinate(value: Any, *, one_based: bool) -> int:
-    if not isinstance(value, int):
-        return 1 if one_based else 0
-    return value + 1 if one_based else value
+def _coordinate(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise AstGrepRunnerError("ast-grep returned a malformed match coordinate")
+    return value + 1
 
 
 def _normalize_site(root: Path, raw: dict[str, Any], *, include_metavariables: bool) -> dict[str, Any]:
     range_info = raw.get("range") if isinstance(raw.get("range"), dict) else {}
     start = range_info.get("start") if isinstance(range_info.get("start"), dict) else {}
     end = range_info.get("end") if isinstance(range_info.get("end"), dict) else {}
+    text = raw.get("text", raw.get("lines"))
+    if not isinstance(text, str):
+        raise AstGrepRunnerError("ast-grep returned malformed match text")
     site: dict[str, Any] = {
         "file": _relative_file(root, raw.get("file")),
-        "text": str(raw.get("text") or raw.get("lines") or ""),
+        "text": text,
         "start": {
-            "line": _coordinate(start.get("line"), one_based=True),
-            "column": _coordinate(start.get("column"), one_based=True),
+            "line": _coordinate(start.get("line")),
+            "column": _coordinate(start.get("column")),
         },
         "end": {
-            "line": _coordinate(end.get("line"), one_based=True),
-            "column": _coordinate(end.get("column"), one_based=True),
+            "line": _coordinate(end.get("line")),
+            "column": _coordinate(end.get("column")),
         },
     }
     if include_metavariables:
@@ -204,6 +210,8 @@ def _run_ast_grep(command: list[str], *, root: Path, timeout_seconds: int) -> su
         )
         raise AstGrepRunnerError(message, stderr=stderr, stdout=stdout) from exc
     except OSError as exc:
+        if exc.errno == errno.E2BIG:
+            raise AstGrepQueryError("query exceeds the operating system argument limit; use a shorter query") from exc
         raise AstGrepRunnerError(f"ast-grep could not start: {exc}") from exc
 
 
@@ -272,6 +280,11 @@ def run_ast_grep(
         raise AstGrepQueryError(f"unsupported query type: {query_type!r}")
     if not isinstance(query, str) or not query.strip():
         raise AstGrepQueryError("query must be a non-empty string")
+    try:
+        validate_text_argument(query, "query")
+        validate_text_argument(language, "language")
+    except ToolInputError as exc:
+        raise AstGrepQueryError(str(exc)) from exc
     if not isinstance(output, str) or output not in {"count", "sample", "full"}:
         raise AstGrepQueryError(f"unsupported output mode: {output!r}")
     if not isinstance(sample_size, int) or isinstance(sample_size, bool) or sample_size < 1:
@@ -290,10 +303,8 @@ def run_ast_grep(
         command = [
             binary,
             "run",
-            "--pattern",
-            query,
-            "--lang",
-            language,
+            f"--pattern={query}",
+            f"--lang={language}",
             "--json=compact",
         ]
         if debug_query is not None:

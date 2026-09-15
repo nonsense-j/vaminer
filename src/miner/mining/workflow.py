@@ -10,6 +10,7 @@ from ..anchors.review import review_anchors
 from ..models.analysis import RootCauseAnalysis
 from ..models.issue import IssueCollectionInfo
 from ..models.vas import ExampleSuiteVASSource, IssueVASSource, VASCoreInfo, VASFull
+from ..utils.cache import AgentCache
 from ..utils.config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from ..utils.log import logger, run_log_file
 from ..utils.telemetry import trace_pipeline
@@ -120,6 +121,9 @@ class VAMiner:
             source_root=prepared.source_root,
             cases_dir=workspace.cases_dir,
             grounding_policy=prepared.grounding_policy,
+            synthesis_cache_path=AgentCache(
+                "Anchor Synthesis", workspace.cache_dir, runtime=self.runtime.identity.runtime_id,
+            ).path,
         )
         core = run.load(rule_task)
         if core is None:

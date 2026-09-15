@@ -74,13 +74,20 @@ def _validate_rule_generation(
 ) -> list[str]:
     if not isinstance(authority, RuleGenerationAuthority):  # pragma: no cover - AgentTask enforces this.
         return ["Rule Generation output received the wrong Phase Authority"]
-    return validate_vas_core(
+    errors = validate_vas_core(
         value,
         source_root=authority.source_root,
         cases_dir=authority.cases_dir,
         root_cause=authority.root_cause,
         grounding_policy=authority.grounding_policy,
     )
+    if errors:
+        return [
+            "Anchor acceptance failed. Replan and call synthesize_anchor_plan with the complete revised plan, "
+            "then resubmit the rule draft.",
+            *errors,
+        ]
+    return []
 
 
 def _validate_anchor_synthesis(
@@ -117,7 +124,7 @@ ISSUE_COLLECTION = PhaseDefinition(
         "web_search",
         "web_fetch",
     ),
-    limits=RunLimits(request_limit=MINER_MAX_TURNS_ISSUE_COLLECTION, output_retries=2),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_ISSUE_COLLECTION),
     validator=_validate_issue_collection,
     result_type=IssueCollectionInfo,
 )
@@ -136,7 +143,7 @@ ROOT_CAUSE = PhaseDefinition(
         "read_case_artifact",
         "write_case_artifact",
     ),
-    limits=RunLimits(request_limit=MINER_MAX_TURNS_ROOT_CAUSE, output_retries=2),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_ROOT_CAUSE),
     validator=_validate_root_cause,
     result_type=RootCauseAnalysis,
 )
@@ -148,7 +155,7 @@ RULE_GENERATION = PhaseDefinition(
     instructions=_instructions("rule_generator.md"),
     output_type=RuleGenerationDraft,
     tools=("list_case_artifacts", "read_case_artifact", "synthesize_anchor_plan"),
-    limits=RunLimits(request_limit=MINER_MAX_TURNS_RULE_GENERATION, output_retries=2),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_RULE_GENERATION),
     validator=_validate_rule_generation,
     result_type=VASCoreInfo,
 )
@@ -169,7 +176,7 @@ AST_GREP_SYNTHESIS = PhaseDefinition(
         "read_skill_resource",
         "run_ast_grep_query",
     ),
-    limits=RunLimits(request_limit=MINER_MAX_TURNS_PER_ANCHOR, output_retries=2),
+    limits=RunLimits(request_limit=MINER_MAX_TURNS_PER_ANCHOR),
     validator=_validate_anchor_synthesis,
     result_type=AnchorSynthesisDelta,
 )
@@ -224,7 +231,7 @@ def _rule_input_policy(grounding: GroundingPolicy) -> str:
 ## Example Suite grounding
 
 - Design complementary retrieval signals from the RCA and Case Artifacts.
-- After synthesis, every Case Artifact and every bad-example source file named by an RCA component should be admitted by at least one Anchor with `query_weight >= 3`.
+- After synthesis, the Anchors should collectively admit every Case Artifact and every bad-example source file named by an RCA component.
 - RCA component spans identify defect evidence and relevant files; they are not mandatory Anchor match locations.
 """
     return """# Input Policy
@@ -232,7 +239,7 @@ def _rule_input_policy(grounding: GroundingPolicy) -> str:
 ## Issue grounding
 
 - Design complementary retrieval signals from the RCA and Case Artifacts.
-- After synthesis, every Case Artifact should be admitted by at least one Anchor with `query_weight >= 3`.
+- After synthesis, the Anchors should collectively admit every Case Artifact.
 - Each enabled query must faithfully match its target behavior in at least one source file named by an RCA component; exact component-span overlap is not required.
 """
 
@@ -418,12 +425,14 @@ def make_rule_generation_task(
     cases_dir: Path,
     grounding_policy: GroundingPolicy,
     task_id: str | None = None,
+    synthesis_cache_path: Path | None = None,
 ) -> AgentTask[VASCoreInfo]:
     authority = RuleGenerationAuthority(
         source_root=source_root,
         cases_dir=cases_dir,
         grounding_policy=grounding_policy,
         root_cause=root_cause,
+        synthesis_cache_path=synthesis_cache_path,
     )
     return AgentTask(
         task_id=task_id or "rule-generation",

@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from git import GitCommandError, Repo
 
+from .errors import ToolInputError, ToolUnavailableError, validate_text_argument
 from ..models.issue import RepoCheckout
 from ..utils.config import GITHUB_MIRROR_ENABLED
 from ..utils.paths import is_windows_reserved_name
@@ -78,6 +79,19 @@ def clone_repository(
         fixed_sha: SHA of the fixed commit (optional)
         github_mirror_enabled: Try the configured GitHub mirror before direct GitHub.
     """
+    if not repo_url.strip() or repo_url != repo_url.strip() or repo_url.startswith("-"):
+        raise ToolInputError("repo_url must be a non-empty repository URL")
+    validate_text_argument(repo_url, "repo_url")
+    try:
+        parsed = urlparse(repo_url)
+        if "://" in repo_url and parsed.scheme != "file" and not parsed.hostname:
+            raise ValueError("URL must include a host")
+        parsed.port
+    except ValueError as exc:
+        raise ToolInputError(f"Invalid repo_url: {exc}") from exc
+    for name, revision in (("buggy_sha", buggy_sha), ("fixed_sha", fixed_sha)):
+        if revision is not None and re.fullmatch(r"[A-Fa-f0-9]{7,64}", revision) is None:
+            raise ToolInputError(f"{name} must be a commit SHA (7-64 hexadecimal characters)")
     owner, repo_name = _parse_repo_url(repo_url)
     workspace_root = Path(workspace_root).resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
@@ -106,12 +120,29 @@ def clone_repository(
             use_github_mirror = False
             repo.git.fetch("origin", ref, depth=1)
 
-    fetch(buggy_sha)
+    def fetch_revision(ref: str) -> None:
+        try:
+            fetch(ref)
+        except GitCommandError as exc:
+            diagnostic = str(exc.stderr or "")
+            if any(marker in diagnostic.lower() for marker in (
+                "couldn't find remote ref", "not our ref", "unadvertised object", "repository not found",
+                "does not appear to be a git repository",
+            )):
+                raise ToolInputError(f"Check repo_url and commit SHA {ref}: {diagnostic}") from exc
+            if any(marker in diagnostic.lower() for marker in (
+                "could not resolve host", "failed to connect", "connection timed out", "unable to access",
+                "authentication failed", "could not read username",
+            )):
+                raise ToolUnavailableError(f"Repository fetch failed: {diagnostic}") from exc
+            raise
+
+    fetch_revision(buggy_sha)
     repo.git.branch("buggy", "FETCH_HEAD")
 
     fixed_branch = None
     if fixed_sha:
-        fetch(fixed_sha)
+        fetch_revision(fixed_sha)
         repo.git.branch("fixed", "FETCH_HEAD")
         fixed_branch = "fixed"
 
@@ -144,19 +175,21 @@ def read_patch_diff_from_repo(
     """
     repo_path = Path(repo_path).resolve()
     if not repo_path.is_dir():
-        raise ValueError(f"repo_path is not an existing directory: {repo_path}")
+        raise RuntimeError(f"repo_path is not an existing directory: {repo_path}")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
+    if path is not None:
+        validate_text_argument(path, "path")
 
     relative = Path(path) if path else None
     if relative is not None and relative.is_absolute():
-        raise ValueError("diff path must be relative")
+        raise ToolInputError("diff path must be relative")
     if relative is not None:
         candidate = (repo_path / relative).resolve()
         try:
             relative = candidate.relative_to(repo_path)
         except ValueError as exc:
-            raise ValueError(f"diff path must stay inside the repository: {path}") from exc
+            raise ToolInputError(f"diff path must stay inside the repository: {path}") from exc
         if relative == Path("."):
             relative = None
 
@@ -185,7 +218,7 @@ def read_patch_diff_from_repo(
     if completed.returncode != 0:
         raise _bounded_process_error("git diff", completed.stderr, completed.returncode)
     if len(completed.stdout.encode("utf-8", errors="replace")) > MAX_REPO_DIFF_BYTES:
-        raise ValueError(
+        raise ToolInputError(
             f"repository diff output exceeds the {MAX_REPO_DIFF_BYTES}-byte limit; use a narrower path"
         )
     scope = f" for {relative.as_posix()}" if relative is not None else ""

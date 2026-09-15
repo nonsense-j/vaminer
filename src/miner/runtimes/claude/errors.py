@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 
 class ClaudeCodeError(RuntimeError):
     """Base class for Claude adapter failures."""
@@ -40,11 +38,11 @@ class ClaudeCodeOutputLimitError(ClaudeCodeError):
 
 
 class ClaudeCodeRequestLimitError(ClaudeCodeError):
-    """Raised after the observable model-request limit is exceeded."""
+    """Raised when no model requests remain in the task budget."""
 
     def __init__(self, limit: int, *, observed: int, cli_name: str = "Claude") -> None:
         super().__init__(
-            f"{cli_name} exceeded the per-task model request limit of {limit}; "
+            f"{cli_name} reached the per-task model request limit of {limit}; "
             f"observed request {observed}"
         )
         self.limit = limit
@@ -78,13 +76,3 @@ class ClaudeCodeProviderError(ClaudeCodeError):
         super().__init__(f"{cli_name} provider {category} error{suffix}: {message}")
         self.category = category
         self.status_code = status_code
-
-
-class ClaudeCodeValidationError(ClaudeCodeError):
-    """Raised when all bounded structured-output repair attempts fail."""
-
-    def __init__(self, errors: Sequence[str], *, attempts: int, cli_name: str = "Claude") -> None:
-        detail = "\n- ".join(errors)
-        super().__init__(f"{cli_name} output remained invalid after {attempts} attempt(s):\n- {detail}")
-        self.errors = tuple(errors)
-        self.attempts = attempts

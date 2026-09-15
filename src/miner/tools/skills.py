@@ -13,6 +13,7 @@ from pathlib import Path
 import portalocker
 
 from ..models.anchors import AstGrepExperience, AstGrepExperienceMode
+from .errors import ToolInputError, validate_text_argument
 from .text import format_file_read, truncation_footer
 
 MAX_SKILL_RESOURCE_FILES = 100
@@ -36,9 +37,9 @@ def _skill_root(skill_roots: Mapping[str, Path], skill_name: str) -> Path:
         root = Path(skill_roots[skill_name]).resolve()
     except KeyError as exc:
         available = ", ".join(sorted(skill_roots)) or "none"
-        raise ValueError(f"unknown task skill {skill_name!r}; available skills: {available}") from exc
+        raise ToolInputError(f"unknown task skill {skill_name!r}; available skills: {available}") from exc
     if not root.is_dir() or not (root / "SKILL.md").is_file():
-        raise ValueError(f"skill root is unavailable: {skill_name!r}")
+        raise RuntimeError(f"skill root is unavailable: {skill_name!r}")
     return root
 
 
@@ -66,24 +67,25 @@ def _skill_resource_lock(root: Path, *, exclusive: bool) -> Iterator[None]:
 
 def _skill_file(skill_roots: Mapping[str, Path], skill_name: str, resource: str) -> tuple[Path, Path]:
     root = _skill_root(skill_roots, skill_name)
+    validate_text_argument(resource, "resource")
     relative = Path(resource)
     if not resource.strip() or relative.is_absolute():
-        raise ValueError("skill resource path must be non-empty and relative")
+        raise ToolInputError("skill resource path must be non-empty and relative")
     candidate = root / relative
     current = root
     for part in relative.parts:
         current /= part
         if current.is_symlink():
-            raise ValueError(f"skill resource must not traverse symbolic links: {resource}")
+            raise ToolInputError(f"skill resource must not traverse symbolic links: {resource}")
     resolved = candidate.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise ValueError(f"skill resource must stay inside {skill_name!r}: {resource}") from exc
+        raise ToolInputError(f"skill resource must stay inside {skill_name!r}: {resource}") from exc
     if not resolved.is_file():
-        raise ValueError(f"skill resource does not exist: {skill_name}/{resource}")
+        raise ToolInputError(f"skill resource does not exist: {skill_name}/{resource}")
     if resolved.stat().st_size > MAX_SKILL_RESOURCE_BYTES:
-        raise ValueError(
+        raise ToolInputError(
             f"skill resource exceeds the {MAX_SKILL_RESOURCE_BYTES}-byte read limit: "
             f"{skill_name}/{resource}"
         )
@@ -98,7 +100,7 @@ def list_skill_resources(
 ) -> str:
     """List regular non-symlink files under one task-declared skill root."""
     if max_files < 1 or max_files > MAX_SKILL_RESOURCE_FILES:
-        raise ValueError(f"max_files must be between 1 and {MAX_SKILL_RESOURCE_FILES}")
+        raise ToolInputError(f"max_files must be between 1 and {MAX_SKILL_RESOURCE_FILES}")
     root = _skill_root(skill_roots, skill_name)
     resources: list[str] = []
     truncated = False
@@ -133,7 +135,7 @@ def read_skill_resource(
 ) -> str:
     """Read one bounded line range from a task-declared skill resource."""
     if start_line < 1 or max_lines < 1 or max_lines > MAX_SKILL_RESOURCE_LINES:
-        raise ValueError(
+        raise ToolInputError(
             f"start_line must be positive and max_lines must be between 1 and {MAX_SKILL_RESOURCE_LINES}"
         )
     root = _skill_root(skill_roots, skill_name)
@@ -141,12 +143,12 @@ def read_skill_resource(
         _, source = _skill_file(skill_roots, skill_name, resource)
         lines = source.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     if start_line > len(lines):
-        raise ValueError(
+        raise ToolInputError(
             f"start_line {start_line} exceeds {skill_name}/{resource} length ({len(lines)} lines)"
         )
     resolved_end = min(len(lines), end_line if end_line is not None else start_line + max_lines - 1)
     if resolved_end < start_line or resolved_end - start_line + 1 > max_lines:
-        raise ValueError(f"requested line range exceeds the {max_lines}-line read limit")
+        raise ToolInputError(f"requested line range exceeds the {max_lines}-line read limit")
     return format_file_read(
         path=f"{skill_name}/{source.relative_to(root).as_posix()}",
         content="".join(lines[start_line - 1 : resolved_end]),
@@ -213,12 +215,12 @@ def _render_ast_grep_experiences(experiences: Sequence[AstGrepExperience]) -> st
             scopes.append(scope)
         grouped[scope].append(experience)
 
-    ordered_scopes = (["all"] if "all" in grouped else []) + [
-        scope for scope in scopes if scope != "all"
+    ordered_scopes = (["ALL"] if "ALL" in grouped else []) + [
+        scope for scope in scopes if scope != "ALL"
     ]
     lines = [_EXPERIENCE_HEADER.rstrip()]
     for scope in ordered_scopes:
-        lines.extend(("", f"## {'Language-Agnostic Lessons' if scope == 'all' else f'{scope} Query Lessons'}", ""))
+        lines.extend(("", f"## {'Language-Agnostic Lessons' if scope == 'ALL' else f'{scope} Query Lessons'}", ""))
         lines.extend(f"- [{item.lesson_id}] {item.lesson}" for item in grouped[scope])
     return "\n".join(lines) + "\n"
 

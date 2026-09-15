@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from typing import NoReturn
 
-from pydantic_ai.capabilities import Capability, WebFetch, WebSearch
-from pydantic_ai.exceptions import ModelRetry
+from pydantic import ValidationError
+from pydantic_ai import ModelRetry, RunContext, ToolFailed
+from pydantic_ai.capabilities import Capability, Hooks, WebFetch, WebSearch
+from pydantic_ai.capabilities.abstract import RawToolArgs, ValidatedToolArgs
 from pydantic_ai.messages import ToolCallPart
-from pydantic_ai.tools import Tool
+from pydantic_ai.tools import Tool, ToolDefinition
 from pydantic_ai_harness.cache_stability import CacheStabilityMonitor
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
@@ -17,6 +20,7 @@ from pydantic_ai_harness.compaction import (
 )
 
 from ...tools.github import search_commit_by_tag, search_commit_by_time
+from ...tools.errors import ToolInputError, ToolUnavailableError, tool_error_feedback, validate_text_argument
 from ...utils.fetch import FetchError, fetch_page
 from .config import (
     MINER_COMPACTION_KEEP_TOKENS,
@@ -28,10 +32,46 @@ from .context import MinerContext
 
 
 async def _web_fetch(url: str) -> dict[str, str]:
+    validate_text_argument(url, "url")
     try:
         return await fetch_page(url)
     except FetchError as exc:
-        raise ModelRetry(f"Failed to fetch {url}: {exc}") from exc
+        raise ToolUnavailableError(f"Failed to fetch {url}: {exc}") from exc
+
+
+def tool_feedback_capability() -> Hooks[MinerContext]:
+    """Keep argument repair inside the turn budget, including deferred tools.
+
+    Output tools retain SDK schema and deterministic validation; all repairs
+    share the Agent's request budget.
+    """
+    hooks = Hooks[MinerContext](id="tool-feedback", defer_loading=False)
+
+    @hooks.on.tool_validate_error
+    async def invalid_args(
+        ctx: RunContext[MinerContext], *, call: ToolCallPart, tool_def: ToolDefinition,
+        args: RawToolArgs, error: ValidationError | ModelRetry,
+    ) -> NoReturn:
+        if isinstance(error, ValidationError):
+            details = "\n".join(
+                f"{'.'.join(map(str, item['loc'])) or 'arguments'}: {item['msg']}"
+                for item in error.errors(include_url=False, include_input=False, include_context=False)
+            )
+        else:
+            details = str(error)
+        raise ToolFailed(f"Tool input error: {details}\nCorrect the arguments before calling again.") from error
+
+    @hooks.on.tool_execute_error
+    async def execution_error(
+        ctx: RunContext[MinerContext], *, call: ToolCallPart, tool_def: ToolDefinition,
+        args: ValidatedToolArgs, error: Exception,
+    ) -> NoReturn:
+        feedback = tool_error_feedback(error)
+        if feedback is not None:
+            raise ToolFailed(feedback) from error
+        raise error
+
+    return hooks
 
 
 def file_read_key(call: ToolCallPart) -> str | None:
@@ -87,8 +127,22 @@ def commit_history_capability() -> Capability[MinerContext]:
 
 def web_search_capability() -> WebSearch[MinerContext]:
     """Provide deferred fallback web search."""
+    from ddgs.exceptions import DDGSException
+    from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool
+
+    search = duckduckgo_search_tool().function
+
+    async def web_search(query: str):
+        validate_text_argument(query, "query")
+        if not query.strip():
+            raise ToolInputError("search query must be non-empty")
+        try:
+            return await search(query)
+        except DDGSException as exc:
+            raise ToolUnavailableError(f"Web search failed: {exc}") from exc
+
     return WebSearch(
-        local=True,
+        local=Tool(web_search, description="Search public web sources for issue evidence."),
         id="web-search",
         description=(
             "Fallback web search for unresolved advisory, pull-request, release, or commit evidence "
@@ -122,6 +176,7 @@ __all__ = [
     "commit_history_capability",
     "compaction_capability",
     "file_read_key",
+    "tool_feedback_capability",
     "web_fetch_capability",
     "web_search_capability",
 ]

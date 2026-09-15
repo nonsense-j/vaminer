@@ -21,6 +21,7 @@ from ..runtimes.claude.config import LANGFUSE_CLAUDE_PLUGIN_ID, ClaudeCodeConfig
 from ..runtimes.claude.mcp import (
     CASES_DIR_ENV,
     PROFILE_ENV,
+    TOOL_FAILURE_ENV,
     SERVER_NAME,
     SOURCE_ROOT_ENV,
     WORKSPACE_ROOT_ENV,
@@ -210,6 +211,7 @@ def check_claude_langfuse_hook(
 def _mcp_environment(config: ClaudeCodeConfig, *, workspace: Path, source: Path, cases: Path) -> dict[str, str]:
     return {
         PROFILE_ENV: MCPProfile.ROOT_CAUSE.value,
+        TOOL_FAILURE_ENV: str(workspace / "tool-failure.json"),
         WORKSPACE_ROOT_ENV: str(workspace),
         SOURCE_ROOT_ENV: str(source),
         CASES_DIR_ENV: str(cases),

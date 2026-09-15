@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 from pydantic import BaseModel, ValidationError
 
-from ...anchors.scanner import AnchorScanError
 from ...agent.contracts import (
     AgentPhase,
     AgentRunResult,
@@ -40,13 +40,13 @@ from .errors import (
     ClaudeCodeOutputLimitError,
     ClaudeCodeProcessError,
     ClaudeCodeProtocolError,
+    ClaudeCodeRequestLimitError,
     ClaudeCodeTimeoutError,
     ClaudeCodeToolExecutionError,
-    ClaudeCodeValidationError,
 )
 from .mcp import SERVER_NAME
 from .policy import InvocationFiles, PolicyCompiler, cleanup_session_transcript, model_output_type
-from .process import ProcessRunner, clip, redact
+from .process import ProcessResult, ProcessRunner, clip, redact
 from .protocol import ClaudeStreamDecoder
 from .tracing import emit_session_trace
 
@@ -136,7 +136,6 @@ class _ClaudeAgentSession:
         self._executable = self._compiler.resolve_executable(self._environment)
         self._policy = self._compiler.compile(task)
         self._timeout = task.limits.timeout_seconds or runtime.config.default_timeout_seconds
-        self._max_repairs = min(task.limits.output_retries, runtime.config.max_repair_attempts)
         self._observed_turns = 0
         self._usage: RuntimeUsage | None = None
         self._started = False
@@ -166,7 +165,10 @@ class _ClaudeAgentSession:
         if remaining is not None:
             remaining -= self._observed_turns
             if remaining < 1:
-                return None, ["model request limit exhausted during output repair"]
+                raise ClaudeCodeRequestLimitError(
+                    self._task.limits.request_limit, observed=self._observed_turns + 1,
+                    cli_name=self._runtime.config.display_name,
+                )
         attempt_task = self._task
         if remaining != self._task.limits.request_limit:
             attempt_task = replace(
@@ -189,6 +191,7 @@ class _ClaudeAgentSession:
             expected_mcp_server=SERVER_NAME,
             expected_mcp_tools=self._policy.qualified_mcp_tools,
             session_mode="resumed" if self._started else "fresh",
+            request_limit=remaining,
         )
         relay_finished = asyncio.Event()
         relay_task = None
@@ -202,8 +205,9 @@ class _ClaudeAgentSession:
                 )
             )
         try:
-            process = await self._runtime._runner.run(
+            process = await self._runtime._run_process(
                 argv,
+                files=self._files,
                 cwd=self._task.workspace_root,
                 environment=self._environment,
                 prompt=prompt,
@@ -235,11 +239,14 @@ class _ClaudeAgentSession:
         self._runtime._raise_tool_failure(self._files.tool_failure)
         decoded = decoder.finish(process)
         self._usage = _merge_usage(self._usage, decoded.usage)
-        self._observed_turns += decoded.usage.turns or 0
+        self._observed_turns += max(1, decoded.usage.turns or 0)
         if decoded.validation_errors:
             return None, list(decoded.validation_errors)
         assert decoded.output is not None
-        final = self._runtime._final_output(self._task, decoded.output, receipt_path=self._files.receipt)
+        try:
+            final = self._runtime._final_output(self._task, decoded.output, receipt_path=self._files.receipt)
+        except AnchorSynthesisAcceptanceError as exc:
+            return None, [str(exc)]
         errors = list(self._task.validate_output(cast(Any, final)))
         if errors:
             return None, errors
@@ -256,13 +263,13 @@ class _ClaudeAgentSession:
     async def _send_with_repairs(self, prompt: str) -> AgentRunResult[Any]:
         errors: list[str] = []
         attempts = 0
-        for _ in range(self._max_repairs + 1):
+        while True:
             attempts += 1
             current_prompt = prompt
             if errors:
                 current_prompt = (
                     "The previous complete output failed structured or deterministic acceptance. "
-                    "Correct only the fields implicated by the feedback below. Preserve the existing "
+                    "Address the feedback using the available tools, then return a corrected output. Preserve the existing "
                     "evidence and tool results; do not repeat research unless the feedback challenges "
                     "that evidence. Return one corrected complete typed output:\n- "
                     + clip(redact("\n- ".join(errors)), self._runtime.config.max_repair_payload_chars)
@@ -270,13 +277,6 @@ class _ClaudeAgentSession:
             result, errors = await self._send_once(current_prompt)
             if result is not None:
                 return replace(result, attempts=attempts)
-            if errors == ["model request limit exhausted during output repair"]:
-                break
-        raise ClaudeCodeValidationError(
-            errors or ["model request limit exhausted during output repair"],
-            attempts=attempts,
-            cli_name=self._runtime.config.display_name,
-        )
 
     def _recover_after_process_failure(self, error: BaseException) -> str:
         cleanup_session_transcript(
@@ -296,7 +296,10 @@ class _ClaudeAgentSession:
     async def send(self, prompt: str) -> AgentRunResult[Any]:
         if self._closed:
             raise ClaudeCodeError("Claude session is already closed")
-        max_process_retries = self._runtime.config.max_synthesis_process_retries
+        max_process_retries = (
+            self._runtime.config.max_synthesis_process_retries
+            if self._task.phase is AgentPhase.AST_GREP_SYNTHESIS else 0
+        )
         current_prompt = prompt
         for process_attempt in range(max_process_retries + 1):
             try:
@@ -373,6 +376,34 @@ class ClaudeCodeRuntime:
             error_type=ClaudeCodeToolExecutionError,
         )
 
+    async def _run_process(
+        self,
+        argv: list[str],
+        *,
+        files: InvocationFiles,
+        cwd: Path,
+        environment: dict[str, str],
+        prompt: str,
+        timeout_seconds: float,
+        stdout_line_handler: Callable[[str], None],
+    ) -> ProcessResult:
+        """Stop the CLI when an MCP tool or child reports a fatal failure."""
+        invocation = asyncio.create_task(self._runner.run(
+            argv, cwd=cwd, environment=environment, prompt=prompt,
+            timeout_seconds=timeout_seconds, stdout_line_handler=stdout_line_handler,
+        ))
+        try:
+            while not invocation.done():
+                self._raise_synthesis_failure(files.synthesis_failure)
+                self._raise_tool_failure(files.tool_failure)
+                await asyncio.wait({invocation}, timeout=0.1)
+            self._raise_synthesis_failure(files.synthesis_failure)
+            self._raise_tool_failure(files.tool_failure)
+            return await invocation
+        finally:
+            invocation.cancel()
+            await asyncio.gather(invocation, return_exceptions=True)
+
     @staticmethod
     def _final_output(
         task: AgentTask[Any],
@@ -396,202 +427,6 @@ class ClaudeCodeRuntime:
             finalize_root_cause_cases(cast(RootCauseAnalysis, model_output), cases_dir=authority.cases_dir)
         return model_output
 
-    async def _run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:
-        self._compiler.validate(task)
-        environment = self._compiler.environment()
-        executable = self._compiler.resolve_executable(environment)
-        policy = self._compiler.compile(task)
-        timeout = task.limits.timeout_seconds or self.config.default_timeout_seconds
-        max_repairs = min(task.limits.output_retries, self.config.max_repair_attempts)
-        errors: list[str] = []
-        usage: RuntimeUsage | None = None
-        observed_turns = 0
-        completed_attempts = 0
-
-        with tempfile.TemporaryDirectory(prefix="vaminer-claude-") as raw_temp:
-            temporary_root = Path(raw_temp)
-            files = self._compiler.materialize(
-                temporary_root,
-                task=task,
-                policy=policy,
-                executable=executable,
-                model_id=self.identity.model_id,
-            )
-            try:
-                for attempt in range(1, max_repairs + 2):
-                    remaining = task.limits.request_limit
-                    if remaining is not None:
-                        remaining -= observed_turns
-                        if remaining < 1:
-                            break
-                    completed_attempts = attempt
-                    attempt_task = task
-                    if remaining != task.limits.request_limit:
-                        attempt_task = replace(
-                            task,
-                            limit_override=replace(task.limits, request_limit=remaining),
-                        )
-                    if errors:
-                        feedback = "\n- ".join(errors)
-                        prompt = (
-                            "The previous complete output failed structured or deterministic acceptance. "
-                            "Correct only the fields implicated by the feedback below. Preserve the existing "
-                            "evidence and tool results; do not repeat research unless the feedback challenges "
-                            "that evidence. Return one corrected complete typed output:\n- "
-                            + clip(redact(feedback), self.config.max_repair_payload_chars)
-                        )
-                    else:
-                        prompt = task.prompt
-
-                    argv = self._compiler.argv(
-                        executable=executable,
-                        task=attempt_task,
-                        policy=policy,
-                        files=files,
-                        model_id=self.identity.model_id,
-                        resume=attempt > 1,
-                    )
-                    decoder = ClaudeStreamDecoder(
-                        output_type=model_output_type(task),
-                        agent_name=task.agent_name,
-                        cli_name=self.config.display_name,
-                        runtime_log=self._runtime_log,
-                        expected_mcp_server=SERVER_NAME,
-                        expected_mcp_tools=policy.qualified_mcp_tools,
-                        session_mode="resumed" if attempt > 1 else "fresh",
-                    )
-                    relay_finished = asyncio.Event()
-                    relay_task = None
-                    if files.synthesis_log is not None:
-                        files.synthesis_log.write_text("", encoding="utf-8")
-                        relay_task = asyncio.create_task(
-                            _relay_synthesis_log(
-                                files.synthesis_log,
-                                relay_finished,
-                                runtime_log=self._runtime_log,
-                            )
-                        )
-                    try:
-                        process = await self._runner.run(
-                            argv,
-                            cwd=task.workspace_root,
-                            environment=environment,
-                            prompt=prompt,
-                            timeout_seconds=timeout,
-                            stdout_line_handler=decoder.feed_line,
-                        )
-                    finally:
-                        if relay_task is not None:
-                            relay_finished.set()
-                            await relay_task
-                        try:
-                            await emit_session_trace(
-                                files.session_id,
-                                environment=environment,
-                                state_dir=files.trace_state,
-                                executable=executable,
-                                display_name=self.config.display_name,
-                            )
-                        except Exception:  # noqa: BLE001 - tracing must never affect Agent execution.
-                            logger.debug(
-                                "Failed to run bundled %s Langfuse hook",
-                                self.config.display_name,
-                                exc_info=True,
-                            )
-                    decoded = None
-                    final = None
-                    try:
-                        self._raise_synthesis_failure(files.synthesis_failure)
-                        self._raise_tool_failure(files.tool_failure)
-                        if decoder.line_number == 0:
-                            for raw in process.stdout.splitlines():
-                                decoder.feed_line(raw)
-                        decoded = decoder.finish(process)
-                        usage = _merge_usage(usage, decoded.usage)
-                        observed_turns += decoded.usage.turns or 0
-                        if decoded.validation_errors:
-                            errors = list(decoded.validation_errors)
-                            final = None
-                        else:
-                            assert decoded.output is not None
-                            final = self._final_output(task, decoded.output, receipt_path=files.receipt)
-                            errors = list(task.validate_output(cast(Any, final)))
-                    except ClaudeCodeProtocolError:
-                        raise
-                    except AnchorScanError:
-                        raise
-                    except AnchorSynthesisAcceptanceError as exc:
-                        errors = [str(exc)]
-                    if not errors:
-                        assert final is not None
-                        return AgentRunResult(
-                            output=cast(OutputT, final),
-                            identity=self.identity,
-                            usage=usage,
-                            attempts=attempt,
-                        )
-                    logger.warning(
-                        "%s output rejected for %s (attempt %s): %s",
-                        self.config.display_name,
-                        task.task_id,
-                        attempt,
-                        "; ".join(errors),
-                    )
-            finally:
-                cleanup_session_transcript(
-                    files.session_id,
-                    environment,
-                    executable=executable,
-                )
-
-        raise ClaudeCodeValidationError(
-            errors or ["model request limit exhausted during output repair"],
-            attempts=max(1, completed_attempts),
-            cli_name=self.config.display_name,
-        )
-
-    async def _run_with_process_retries(
-        self,
-        task: AgentTask[OutputT],
-    ) -> AgentRunResult[OutputT]:
-        """Restart a crashed Synthesizer with a fresh Claude session."""
-
-        max_attempts = (
-            1 + self.config.max_synthesis_process_retries
-            if task.phase is AgentPhase.AST_GREP_SYNTHESIS
-            else 1
-        )
-        attempt_task = task
-        for process_attempt in range(1, max_attempts + 1):
-            try:
-                result = await self._run(attempt_task)
-            except (ClaudeCodeProcessError, ClaudeCodeTimeoutError, ClaudeCodeOutputLimitError) as exc:
-                if process_attempt >= max_attempts:
-                    raise
-                logger.warning(
-                    "%s process failed for %s (attempt %s/%s); retrying with a fresh session: %s",
-                    self.config.display_name,
-                    task.task_id,
-                    process_attempt,
-                    max_attempts,
-                    redact(clip(str(exc), 2_000)),
-                )
-                attempt_task = replace(
-                    task,
-                    prompt=(
-                        "Continue the ast-grep synthesis task after the previous process crashed and "
-                        "its session could not be resumed.\n\nPrevious process error:\n- "
-                        + redact(clip(str(exc), self.config.max_repair_payload_chars))
-                        + "\n\n[Original assignment]\n"
-                        + task.prompt
-                    ),
-                )
-                continue
-            if process_attempt == 1:
-                return result
-            return replace(result, attempts=result.attempts + process_attempt - 1)
-        raise AssertionError("unreachable")
-
     async def run(self, task: AgentTask[OutputT]) -> AgentRunResult[OutputT]:
         self._runtime_log.started(task.agent_name, {"task_id": task.task_id, "prompt": task.prompt})
         try:
@@ -601,7 +436,11 @@ class ClaudeCodeRuntime:
                 metadata={"phase": task.phase.value, "runtime": self.runtime_id, "model": self.identity.model_id},
                 truncate=False,
             ) as observation:
-                result = await self._run_with_process_retries(task)
+                session = self.open_session(task)
+                try:
+                    result = await session.send(task.prompt)
+                finally:
+                    await session.close()
                 if observation is not None:
                     try:
                         observation.update(

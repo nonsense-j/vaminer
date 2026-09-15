@@ -6,6 +6,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from .errors import ToolInputError, validate_text_argument
 from .text import format_file_read
 
 CASE_ARTIFACT_RE = re.compile(r"^case\d+(?:_var\d+)?\.[A-Za-z0-9]+$")
@@ -17,7 +18,7 @@ MAX_CASE_READ_LINES = 200
 def _case_artifact_path(cases_dir: Path, path: str, *, create_root: bool = False) -> Path:
     """Resolve one bare case filename and reject nested or symlinked targets."""
     if not path or Path(path).name != path or CASE_ARTIFACT_RE.fullmatch(path) is None:
-        raise ValueError(
+        raise ToolInputError(
             "case artifact path must be a bare filename matching caseN.ext or caseN_varM.ext"
         )
 
@@ -26,16 +27,16 @@ def _case_artifact_path(cases_dir: Path, path: str, *, create_root: bool = False
         root.mkdir(parents=True, exist_ok=True)
     root = root.resolve()
     if not root.is_dir():
-        raise ValueError(f"cases directory is not an existing directory: {root}")
+        raise RuntimeError(f"cases directory is not an existing directory: {root}")
 
     target = root / path
     if target.is_symlink():
-        raise ValueError(f"case artifact must not be a symbolic link: {path}")
+        raise ToolInputError(f"case artifact must not be a symbolic link: {path}")
     resolved = target.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:  # pragma: no cover - filename validation already blocks traversal.
-        raise ValueError(f"case artifact must stay inside the cases directory: {path}") from exc
+        raise ToolInputError(f"case artifact must stay inside the cases directory: {path}") from exc
     return resolved
 
 
@@ -43,7 +44,7 @@ def list_case_artifacts(cases_dir: Path) -> str:
     """List valid top-level case artifacts in deterministic order."""
     root = Path(cases_dir).resolve()
     if not root.is_dir():
-        raise ValueError(f"cases directory is not an existing directory: {root}")
+        raise RuntimeError(f"cases directory is not an existing directory: {root}")
     paths = sorted(
         path.name
         for path in root.iterdir()
@@ -67,14 +68,14 @@ def read_case_artifact(
     """
     target = _case_artifact_path(cases_dir, path)
     if not target.is_file():
-        raise ValueError(f"case artifact does not exist: {path}")
+        raise ToolInputError(f"case artifact does not exist: {path}")
     size = target.stat().st_size
     if size > MAX_CASE_READ_BYTES:
-        raise ValueError(f"case artifact exceeds the {MAX_CASE_READ_BYTES}-byte read limit: {path}")
+        raise ToolInputError(f"case artifact exceeds the {MAX_CASE_READ_BYTES}-byte read limit: {path}")
     if start_line < 1:
-        raise ValueError("start_line must be positive")
+        raise ToolInputError("start_line must be positive")
     if max_lines < 1:
-        raise ValueError("max_lines must be positive")
+        raise ToolInputError("max_lines must be positive")
 
     lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     total_lines = len(lines)
@@ -109,9 +110,9 @@ def read_case_artifact(
 
     resolved_end = min(total_lines, end_line if end_line is not None else start_line + max_lines - 1)
     if resolved_end < start_line:
-        raise ValueError("end_line must be greater than or equal to start_line")
+        raise ToolInputError("end_line must be greater than or equal to start_line")
     if resolved_end - start_line + 1 > max_lines:
-        raise ValueError(f"requested line range exceeds the {max_lines}-line read limit")
+        raise ToolInputError(f"requested line range exceeds the {max_lines}-line read limit")
     return format_file_read(
         path=path,
         content="".join(lines[start_line - 1 : resolved_end]),
@@ -123,13 +124,21 @@ def read_case_artifact(
 
 
 def write_case_artifact(cases_dir: Path, path: str, content: str) -> str:
-    """Atomically write one bounded, non-empty case artifact."""
+    """Atomically write one bounded, non-empty Case Artifact.
+
+    ``path`` must be a bare ``caseN.<ext>`` original or
+    ``caseN_varM.<ext>`` variant filename. Invalid names are rejected before
+    any content is written; callers should correct the name and retry.
+    """
+    validate_text_argument(content, "content")
     target = _case_artifact_path(cases_dir, path, create_root=True)
+    if target.is_dir():
+        raise ToolInputError(f"case artifact path refers to a directory: {path}")
     encoded = content.encode("utf-8")
     if not content.strip():
-        raise ValueError("case artifact content must be non-empty")
+        raise ToolInputError("case artifact content must be non-empty")
     if len(encoded) > MAX_CASE_ARTIFACT_BYTES:
-        raise ValueError(f"case artifact exceeds the {MAX_CASE_ARTIFACT_BYTES}-byte write limit")
+        raise ToolInputError(f"case artifact exceeds the {MAX_CASE_ARTIFACT_BYTES}-byte write limit")
 
     temporary_path: Path | None = None
     try:

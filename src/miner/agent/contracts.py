@@ -55,6 +55,7 @@ class RuleGenerationAuthority:
     cases_dir: Path
     grounding_policy: GroundingPolicy
     root_cause: RootCauseAnalysis
+    synthesis_cache_path: Path | None = None
 
     @property
     def phase(self) -> AgentPhase:
@@ -106,15 +107,12 @@ class InstructionLayers:
 class RunLimits:
     request_limit: int | None = None
     timeout_seconds: float | None = None
-    output_retries: int = 2
 
     def __post_init__(self) -> None:
         if self.request_limit is not None and self.request_limit < 1:
             raise ValueError("request_limit must be positive when provided")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive when provided")
-        if self.output_retries < 0:
-            raise ValueError("output_retries must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)

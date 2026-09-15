@@ -4,8 +4,8 @@ Read these compact, non-redundant query-writing lessons before constructing a qu
 
 ## Language-Agnostic Lessons
 
-- [all-1] A rule that uses `regex` must also constrain a set of AST node kinds, commonly with `kind`; regex alone is rejected before scanning.
-- [all-2] For an ambiguous or empty raw pattern, inspect `debug_query=pattern` first to preserve ast-grep metavariables; use `ast`, `sexp`, or `cst` only for deeper Tree-sitter structure, and read stderr verbatim.
+- [ALL-1] A rule that uses `regex` must also constrain a set of AST node kinds, commonly with `kind`; regex alone is rejected before scanning.
+- [ALL-2] For an ambiguous or empty raw pattern, inspect `debug_query=pattern` first to preserve ast-grep metavariables; use `ast`, `sexp`, or `cst` only for deeper Tree-sitter structure, and read stderr verbatim.
 
 ## C Query Lessons
 

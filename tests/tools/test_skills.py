@@ -25,7 +25,7 @@ def _record_concurrent_experience(arguments: tuple[str, int]) -> int:
         [
             AstGrepExperience(
                 mode="ADD",
-                lesson_id=f"all-{index + 1}",
+                lesson_id=f"ALL-{index + 1}",
                 lesson=f"Reusable concurrent lesson number {index}.",
             )
         ],
@@ -62,7 +62,7 @@ def test_ast_grep_experiences_are_read_merged_and_deduplicated(tmp_path: Path):
     (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
     pitfall = AstGrepExperience(
         mode="ADD",
-        lesson_id="all-1",
+        lesson_id="ALL-1",
         lesson="A regex rule also needs an AST kind.",
     )
 
@@ -72,14 +72,14 @@ def test_ast_grep_experiences_are_read_merged_and_deduplicated(tmp_path: Path):
     )
     extension = AstGrepExperience(
         mode="REPLACE",
-        lesson_id="all-1",
+        lesson_id="ALL-1",
         lesson="A regex rule also needs an AST kind for candidate-node selection.",
     )
     assert record_ast_grep_experiences(skill, [pitfall, punctuation_only_duplicate]) == 0
     assert record_ast_grep_experiences(skill, [extension]) == 1
     replacement = AstGrepExperience(
         mode="REPLACE",
-        lesson_id="all-1",
+        lesson_id="ALL-1",
         lesson=(
             "A regex rule also needs an AST kind for candidate-node selection "
             "in every query."
@@ -98,7 +98,7 @@ def test_ast_grep_experiences_are_read_merged_and_deduplicated(tmp_path: Path):
 
     assert "## Language-Agnostic Lessons" in rendered
     assert "## C Query Lessons" in rendered
-    assert "- [all-1] A regex rule also needs an AST kind for candidate-node selection in every query." in rendered
+    assert "- [ALL-1] A regex rule also needs an AST kind for candidate-node selection in every query." in rendered
     assert "- [C-1] C-specific lesson." in rendered
 
 
@@ -115,10 +115,10 @@ def test_experience_update_modes_are_id_addressed(tmp_path: Path):
         skill,
         [AstGrepExperience(mode="ADD", lesson_id="C-1", lesson="Another C lesson.")],
     ) == 1
-    with pytest.raises(ValueError, match="unknown ast-grep experience all-1"):
+    with pytest.raises(ValueError, match="unknown ast-grep experience ALL-1"):
         record_ast_grep_experiences(
             skill,
-            [AstGrepExperience(mode="REPLACE", lesson_id="all-1", lesson="Missing lesson.")],
+            [AstGrepExperience(mode="REPLACE", lesson_id="ALL-1", lesson="Missing lesson.")],
         )
 
     content = (skill / AST_GREP_EXPERIENCES_RESOURCE).read_text(encoding="utf-8")
@@ -132,20 +132,20 @@ def test_unknown_replace_does_not_partially_apply_same_batch(tmp_path: Path):
     (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
     record_ast_grep_experiences(
         skill,
-        [AstGrepExperience(mode="ADD", lesson_id="all-1", lesson="Existing lesson.")],
+        [AstGrepExperience(mode="ADD", lesson_id="ALL-1", lesson="Existing lesson.")],
     )
 
-    with pytest.raises(ValueError, match="unknown ast-grep experience all-99"):
+    with pytest.raises(ValueError, match="unknown ast-grep experience ALL-99"):
         record_ast_grep_experiences(
             skill,
             [
-                AstGrepExperience(mode="ADD", lesson_id="all-2", lesson="Batch addition."),
-                AstGrepExperience(mode="REPLACE", lesson_id="all-99", lesson="Missing lesson."),
+                AstGrepExperience(mode="ADD", lesson_id="ALL-2", lesson="Batch addition."),
+                AstGrepExperience(mode="REPLACE", lesson_id="ALL-99", lesson="Missing lesson."),
             ],
         )
 
     content = (skill / AST_GREP_EXPERIENCES_RESOURCE).read_text(encoding="utf-8")
-    assert "- [all-1] Existing lesson." in content
+    assert "- [ALL-1] Existing lesson." in content
     assert "Batch addition." not in content
 
 
@@ -170,7 +170,7 @@ def test_concurrent_ast_grep_experience_writes_do_not_lose_updates(tmp_path: Pat
     overflow = [
         AstGrepExperience(
             mode="ADD",
-            lesson_id=f"all-{index + 25}",
+            lesson_id=f"ALL-{index + 25}",
             lesson=f"Later query lesson number {index}.",
         )
         for index in range(5)
@@ -219,7 +219,7 @@ def test_skill_resource_reader_waits_for_experience_writer(
     (skill / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
     record_ast_grep_experiences(
         skill,
-        [AstGrepExperience(mode="ADD", lesson_id="all-1", lesson="Initial reusable query lesson.")],
+        [AstGrepExperience(mode="ADD", lesson_id="ALL-1", lesson="Initial reusable query lesson.")],
     )
     writer_entered = Event()
     allow_write = Event()
@@ -235,7 +235,7 @@ def test_skill_resource_reader_waits_for_experience_writer(
         writer = executor.submit(
             record_ast_grep_experiences,
             skill,
-            [AstGrepExperience(mode="ADD", lesson_id="all-2", lesson="Later reusable query lesson.")],
+            [AstGrepExperience(mode="ADD", lesson_id="ALL-2", lesson="Later reusable query lesson.")],
         )
         assert writer_entered.wait(timeout=2)
         reader = executor.submit(

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import wraps
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn, get_type_hints
 
-from ...models.anchors import AnchorPlan, AnchorSynthesisResult
-from ...tools.ast_grep import AstGrepQueryError, AstGrepRunnerError, run_ast_grep
+from ...models.anchors import AnchorPlanRequest, AnchorSynthesisResult
+from ...tools.ast_grep import run_ast_grep
+from ...tools.errors import ToolInputError, ToolUnavailableError, tool_error_feedback
 from ...tools.cases import list_case_artifacts as list_cases_impl
 from ...tools.cases import read_case_artifact as read_case_impl
 from ...tools.cases import write_case_artifact as write_case_impl
@@ -130,7 +133,10 @@ class MCPServerSettings:
         values = os.environ if env is None else env
         profile = MCPProfile.parse(_required(values, PROFILE_ENV))
         workspace = _directory(_required(values, WORKSPACE_ROOT_ENV), "workspace root")
-        source = cases = repo = skill = context = tool_failure = None
+        source = cases = repo = skill = context = None
+        tool_failure = Path(_required(values, TOOL_FAILURE_ENV)).expanduser().resolve()
+        if not tool_failure.parent.is_dir():
+            raise ValueError("tool failure receipt parent is not an existing directory")
         fixed_diff = _bool(values.get(FIXED_DIFF_ENV))
         if profile in {MCPProfile.ROOT_CAUSE, MCPProfile.RULE_GENERATION, MCPProfile.AST_GREP_SYNTHESIS}:
             source = _scoped(_required(values, SOURCE_ROOT_ENV), "source root", workspace)
@@ -141,9 +147,6 @@ class MCPServerSettings:
             skill = _directory(_required(values, SKILL_ROOT_ENV), "skill root")
             if not (skill / "SKILL.md").is_file():
                 raise ValueError("skill root does not contain SKILL.md")
-            tool_failure = Path(_required(values, TOOL_FAILURE_ENV)).expanduser().resolve()
-            if not tool_failure.parent.is_dir():
-                raise ValueError("tool failure receipt parent is not an existing directory")
         if profile is MCPProfile.RULE_GENERATION:
             context = Path(_required(values, SYNTHESIS_CONTEXT_ENV)).expanduser().resolve()
             if not context.is_file():
@@ -181,6 +184,53 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_json_value(item) for item in value]
     return value
+
+
+class _ToolRegistrar:
+    """Make known failures MCP feedback and persist every unexpected failure.
+
+    MCP normally converts all exceptions to tool results. The sticky receipt
+    ensures a tool bug cannot be swallowed by the CLI and accepted by the host.
+    Argument-schema validation still happens in MCP before these tool bodies.
+    """
+
+    def __init__(self, server: Any, settings: MCPServerSettings) -> None:
+        self.server = server
+        self.settings = settings
+
+    def _failed(self, name: str, error: Exception) -> NoReturn:
+        feedback = tool_error_feedback(error)
+        if feedback is not None:
+            if isinstance(error, (ToolInputError, OSError)):
+                raise ToolInputError(feedback) from error
+            raise ToolUnavailableError(feedback) from error
+        path = self.settings.tool_failure_path
+        if path is not None:
+            atomic_write_json(path, {
+                "type": type(error).__name__,
+                "message": redact(clip(f"{name}: {error}", 2_000)),
+            })
+        raise error
+
+    def tool(self, *, name: str) -> Callable[[Callable[..., Any]], Any]:
+        def register(function: Callable[..., Any]) -> Any:
+            if inspect.iscoroutinefunction(function):
+                @wraps(function)
+                async def wrapped(*args, **kwargs):
+                    try:
+                        return await function(*args, **kwargs)
+                    except Exception as error:
+                        self._failed(name, error)
+            else:
+                @wraps(function)
+                def wrapped(*args, **kwargs):
+                    try:
+                        return function(*args, **kwargs)
+                    except Exception as error:
+                        self._failed(name, error)
+            wrapped.__annotations__ = get_type_hints(function, include_extras=True)
+            return self.server.tool(name=name)(wrapped)
+        return register
 
 
 def _register(server: Any, name: str, function: Callable[..., Any]) -> None:
@@ -249,6 +299,12 @@ def _register_case_tools(server: Any, cases_dir: Path, *, writable: bool) -> Non
     _register(server, "read_case_artifact", read_case_artifact)
     if writable:
         def write_case_artifact(path: str, content: str) -> str:
+            """Write a Case Artifact named ``caseN.<ext>`` or ``caseN_varM.<ext>``.
+
+            Invalid filenames are rejected before writing. Correct the
+            filename and retry when the tool reports a naming error.
+            """
+
             return write_case_impl(cases_dir, path, content)
 
         _register(server, "write_case_artifact", write_case_artifact)
@@ -307,14 +363,14 @@ def _register_root_cause_tools(server: Any, settings: MCPServerSettings) -> None
         _register(server, "read_patch_diff", read_patch_diff)
 
 
-RuleSynthesisHandler = Callable[[AnchorPlan], Awaitable[list[AnchorSynthesisResult]]]
+RuleSynthesisHandler = Callable[[AnchorPlanRequest], Awaitable[list[AnchorSynthesisResult]]]
 
 
 def _default_synthesis_handler(settings: MCPServerSettings) -> RuleSynthesisHandler:
     assert settings.synthesis_context_path is not None
     handler: RuleSynthesisHandler | None = None
 
-    async def synthesize(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
+    async def synthesize(plan: AnchorPlanRequest) -> list[AnchorSynthesisResult]:
         nonlocal handler
         if handler is None:
             from .synthesis import load_claude_synthesis_handler
@@ -337,7 +393,8 @@ def _register_rule_tools(
     _register_case_tools(server, settings.cases_dir, writable=False)
     synthesize = handler or _default_synthesis_handler(settings)
 
-    async def synthesize_anchor_plan(plan: AnchorPlan) -> list[AnchorSynthesisResult]:
+    async def synthesize_anchor_plan(plan: AnchorPlanRequest) -> list[AnchorSynthesisResult]:
+        """Submit the complete Anchor set: full intents synthesize, reuse_anchor_id entries preserve results."""
         return await synthesize(plan)
 
     _register(server, "synthesize_anchor_plan", synthesize_anchor_plan)
@@ -377,39 +434,26 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
         """
 
         if target not in {"src", "cases"}:
-            raise ValueError("target must be 'src' or 'cases'")
+            raise ToolInputError("target must be 'src' or 'cases'")
         if (
             not isinstance(sample_size, int)
             or isinstance(sample_size, bool)
             or sample_size < 1
             or sample_size > MINER_AST_GREP_MAX_SAMPLE_SIZE
         ):
-            raise ValueError(f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}")
+            raise ToolInputError(f"sample_size must be between 1 and {MINER_AST_GREP_MAX_SAMPLE_SIZE}")
         root = settings.source_root if target == "src" else settings.cases_dir
-        try:
-            return await asyncio.to_thread(
-                run_ast_grep,
-                root,
-                language=language,
-                query_type=query_type,
-                query=query,
-                output=output,
-                sample_size=sample_size,
-                debug_query=debug_query,
-                timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
-            )
-        except AstGrepQueryError:
-            raise
-        except AstGrepRunnerError as exc:
-            if settings.tool_failure_path is not None:
-                atomic_write_json(
-                    settings.tool_failure_path,
-                    {
-                        "type": type(exc).__name__,
-                        "message": redact(clip(str(exc), 2_000)),
-                    },
-                )
-            raise
+        return await asyncio.to_thread(
+            run_ast_grep,
+            root,
+            language=language,
+            query_type=query_type,
+            query=query,
+            output=output,
+            sample_size=sample_size,
+            debug_query=debug_query,
+            timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+        )
 
     _register(server, "list_skill_resources", list_skill_resources)
     _register(server, "read_skill_resource", read_skill_resource)
@@ -425,14 +469,15 @@ def build_server(
 ) -> Any:
     resolved = settings or MCPServerSettings.from_env(env)
     server = (fast_mcp_factory or _load_mcp_factory())(SERVER_NAME)
+    registrar = _ToolRegistrar(server, resolved)
     if resolved.profile is MCPProfile.ISSUE:
-        _register_issue_tools(server, resolved)
+        _register_issue_tools(registrar, resolved)
     elif resolved.profile is MCPProfile.ROOT_CAUSE:
-        _register_root_cause_tools(server, resolved)
+        _register_root_cause_tools(registrar, resolved)
     elif resolved.profile is MCPProfile.RULE_GENERATION:
-        _register_rule_tools(server, resolved, rule_synthesis_handler)
+        _register_rule_tools(registrar, resolved, rule_synthesis_handler)
     else:
-        _register_synthesis_tools(server, resolved)
+        _register_synthesis_tools(registrar, resolved)
     return server
 
 

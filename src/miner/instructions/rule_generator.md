@@ -17,19 +17,21 @@ Read the RCA and its Case Artifacts, choose the best-matching issue `category`, 
 
 ## Step 2: Choose retrieval intents
 
-Choose all distinct local behaviors that provide useful retrieval or investigation starting points. For each intent, provide a unique id, behavior weight, query-observable `behavior`, non-verdict `inspect_hint`, and the Case Artifacts that demonstrate that behavior.
+Choose all distinct, defect-related local behaviors that provide useful retrieval or investigation starting points. For each intent, provide a unique id, `behavior_weight`, query-observable `behavior`, non-verdict `inspect_hint`, and the Case Artifacts that demonstrate that behavior. These intents represent important code patterns in the defect's causal chain, so their behavior weights should be correspondingly high, reflecting each operation's relevance to the rule.
 
 The complete plan must assign every declared Defect Case Artifact to at least one intent. Keep intents behaviorally independent and collectively comprehensive: do not merge distinct local operations merely to reduce the number of intents, and do not stop after an arbitrary number of intents. A Case Artifact may be referenced by multiple intents when it demonstrates multiple independent local behaviors. Exclude fix-only behavior, absent operations, generic syntax, and duplicates.
 
 ## Step 3: Synthesize and review the plan
 
-Call `synthesize_anchor_plan` with the summary and complete initial Anchor Plan, leaving `draft_query` omitted or null. Review the synthesized batch and its suggestions. Revise the plan and run synthesis once more only when a concrete plan change improves the retrieval portfolio without changing the RCA meaning or losing case coverage.
+Use `synthesize_anchor_plan` to synthesize an executable Anchor query for every intent in the complete plan. Review the resulting Anchor set and the tool feedback. Adjust the plan and run the tool again only when the feedback identifies a necessary, valuable improvement to intent design, case coverage, or query quality.
 
-When replanning, optionally attach an unvalidated raw ast-grep pattern or YAML rule as `draft_query` to any revised or merged intent. Adapt or combine prior queries as useful; omit the draft when no useful starting point exists. The Synthesizer refines and validates each supplied draft.
+For initial synthesis, submit the rule summary and the complete ordered list of full `AnchorIntent` objects without `draft_query`.
+
+For revised synthesis, submit the **complete** desired ordered Anchor set again. Use `reuse_anchor_id` for each unchanged Anchor, and submit a full `AnchorIntent` for each new or changed Anchor that needs synthesis. A revised or merged intent may include an unvalidated raw ast-grep pattern or YAML rule as `draft_query`; adapt or combine prior queries when useful, and omit the draft when it is not a good starting point. Keep every declared Case Artifact assigned after the revision.
 
 ## Step 4: Submit the rule-owned fields
 
-Return `RuleGenerationDraft` with `category` and `scenarios`. The host uses the latest accepted plan and synthesis batch to assemble the remaining fields.
+Return `RuleGenerationDraft` with `category` and `scenarios`. The host uses the latest accepted plan and synthesis batch to assemble the remaining fields and check Anchor admission. If acceptance fails, use the reported case names and existing evidence to replan, run synthesis, and resubmit the draft.
 
 # Constraints
 
@@ -38,4 +40,4 @@ Return `RuleGenerationDraft` with `category` and `scenarios`. The host uses the 
 - Do not impose a fixed limit on the number of Case Artifacts or Anchor Intents; continue until the declared cases are collectively covered by independent intents.
 - Do not consider whether executable queries will duplicate one another; the host performs query-based deduplication after every target query is independently synthesized and accepted.
 - Keep the summary, scenarios, and intents repository-independent and non-verdict.
-- Stop after the draft is returned.
+- Finish when the rule draft passes host acceptance.

@@ -14,6 +14,7 @@ from .errors import (
     ClaudeCodeConfigurationError,
     ClaudeCodeProcessError,
     ClaudeCodeProtocolError,
+    ClaudeCodeRequestLimitError,
 )
 from .process import ProcessResult, clip, redact
 
@@ -169,6 +170,7 @@ class ClaudeStreamDecoder:
         expected_mcp_server: str | None = None,
         expected_mcp_tools: tuple[str, ...] = (),
         session_mode: Literal["fresh", "resumed"] = "fresh",
+        request_limit: int | None = None,
     ) -> None:
         self.output_type = output_type
         self.agent_name = agent_name
@@ -177,6 +179,7 @@ class ClaudeStreamDecoder:
         self.expected_mcp_server = expected_mcp_server
         self.expected_mcp_tools = expected_mcp_tools
         self.session_mode = session_mode
+        self.request_limit = request_limit
         self.events: list[RuntimeLogEvent] = []
         self.result_event: dict[str, Any] | None = None
         self.parsed_count = 0
@@ -283,7 +286,18 @@ class ClaudeStreamDecoder:
 
     def finish(self, process: ProcessResult) -> DecodedClaudeRun:
         """Validate the buffered terminal state after the subprocess exits."""
-        if process.returncode != 0:
+        terminal = self.result_event or {}
+        native_output_failure = (
+            terminal.get("terminal_reason") == "structured_output_retry_exhausted"
+            or terminal.get("subtype") == "error_max_structured_output_retries"
+        )
+        if terminal.get("subtype") == "error_max_turns":
+            if self.request_limit is not None:
+                raise ClaudeCodeRequestLimitError(
+                    self.request_limit, observed=self.request_limit, cli_name=self.cli_name,
+                )
+            raise ClaudeCodeProtocolError(f"{self.cli_name} reached its max-turns limit")
+        if process.returncode != 0 and not native_output_failure:
             detail = redact(clip(process.stderr or process.stdout, 2_000))
             raise ClaudeCodeProcessError(
                 f"{self.cli_name} exited with {process.returncode}: {detail}",
@@ -299,10 +313,6 @@ class ClaudeStreamDecoder:
         if self.result_event is None:
             raise ClaudeCodeProtocolError(f"{self.cli_name} stream ended without a terminal result event")
 
-        native_output_failure = (
-            self.result_event.get("terminal_reason") == "structured_output_retry_exhausted"
-            or self.result_event.get("subtype") == "error_max_structured_output_retries"
-        )
         if not native_output_failure and (
             self.result_event.get("is_error")
             or self.result_event.get("subtype") not in {None, "success"}

@@ -1,12 +1,14 @@
 """GitHub fetcher tools."""
 
 import re
+from datetime import datetime
 from urllib.parse import quote
 
 import httpx
 
 from ..utils.config import GITHUB_TOKEN
 from ..models.issue import CommitRawInfo, IssueRawInfo
+from .errors import ToolInputError, validate_text_argument
 
 
 def _headers() -> dict:
@@ -24,7 +26,7 @@ def _is_github_commit_url(url: str) -> bool:
 
 
 def _parse_commit_url(url: str) -> tuple[str, str, str] | None:
-    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/commit/([a-f0-9]+)", url)
+    m = re.fullmatch(r"https?://github\.com/([^/]+)/([^/]+)/commit/([a-fA-F0-9]+)(?:[?#].*)?", url)
     return (m.group(1), m.group(2), m.group(3)) if m else None
 
 
@@ -55,8 +57,6 @@ def _fetch_commit_info(
             timestamp=data["commit"]["committer"]["date"][:16],
             msg=data["commit"]["message"],
         )
-    except Exception as exc:  # noqa: BLE001 - external failures are returned to the agent.
-        return CommitRawInfo(commit_url=None, cur_sha=revision, parent_sha="", timestamp="", msg=f"Error: {exc}")
     finally:
         if owned_client:
             client.close()
@@ -69,11 +69,13 @@ def fetch_github_issue(issue_url: str, fetch_extra_notes: bool = False) -> Issue
         issue_url: GitHub issue URL (e.g., https://github.com/owner/repo/issues/123)
         fetch_extra_notes: Whether to fetch issue comments as extra notes.
     """
-    m = re.match(r"https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)", issue_url)
+    validate_text_argument(issue_url, "issue_url")
+    m = re.fullmatch(r"https?://github\.com/([^/]+)/([^/]+)/issues/([0-9]+)(?:[?#].*)?", issue_url)
     if not m:
-        return IssueRawInfo(raw_desc=f"Invalid issue URL: {issue_url}")
+        raise ToolInputError("issue_url must be https://github.com/<owner>/<repo>/issues/<number>")
 
-    owner, repo, issue_number = m.group(1), m.group(2), int(m.group(3))
+    owner, repo, issue_number = m.groups()
+    _validate_repository(owner, repo)
     with httpx.Client(timeout=30) as client:
         issue = (
             client.get(
@@ -133,9 +135,11 @@ def parse_commit(commit_url: str) -> CommitRawInfo:
     Args:
         commit_url: Full GitHub commit URL (e.g., https://github.com/owner/repo/commit/abc123)
     """
+    validate_text_argument(commit_url, "commit_url")
     parsed = _parse_commit_url(commit_url)
     if not parsed:
-        return CommitRawInfo(commit_url=commit_url, cur_sha="", parent_sha="", timestamp="", msg="Invalid URL")
+        raise ToolInputError("commit_url must be https://github.com/<owner>/<repo>/commit/<sha>")
+    _validate_repository(*parsed[:2])
     return _fetch_commit_info(*parsed)
 
 
@@ -147,9 +151,11 @@ def search_commit_by_tag(owner: str, repo: str, tag_prefix: str) -> list[CommitR
         repo: Repository name
         tag_prefix: Tag prefix to search (e.g., 'v2.7')
     """
+    validate_text_argument(tag_prefix, "tag_prefix")
     tag_prefix = tag_prefix.strip()
     if not tag_prefix:
-        return "tag_prefix must be non-empty; provide the narrowest evidence-supported prefix."
+        raise ToolInputError("tag_prefix must be non-empty; provide the narrowest evidence-supported prefix.")
+    _validate_repository(owner, repo)
 
     encoded_ref = quote(f"tags/{tag_prefix}", safe="/")
     with httpx.Client(timeout=30) as client:
@@ -161,17 +167,15 @@ def search_commit_by_tag(owner: str, repo: str, tag_prefix: str) -> list[CommitR
             .raise_for_status()
             .json()
         )
+        if not isinstance(references, list):
+            raise RuntimeError("GitHub returned malformed tag references")
         tag_names = [
             item["ref"].removeprefix("refs/tags/")
             for item in references
-            if isinstance(item, dict)
-            and isinstance(item.get("ref"), str)
-            and item["ref"].startswith("refs/tags/")
+            if item["ref"].startswith("refs/tags/")
             and item["ref"].removeprefix("refs/tags/").startswith(tag_prefix)
         ]
         commits = [_fetch_commit_info(owner, repo, tag_name, client=client) for tag_name in tag_names]
-    commits = [commit for commit in commits if commit.commit_url is not None]
-
     if not commits:
         return f"No tags found matching prefix '{tag_prefix}' in {owner}/{repo}."
 
@@ -188,6 +192,13 @@ def search_commit_by_time(owner: str, repo: str, since: str, until: str) -> list
         since: Start time (ISO format: YYYY-MM-DDTHH:MM:SSZ)
         until: End time (ISO format: YYYY-MM-DDTHH:MM:SSZ)
     """
+    _validate_repository(owner, repo)
+    try:
+        start, end = datetime.fromisoformat(since), datetime.fromisoformat(until)
+        if start.tzinfo is None or end.tzinfo is None or start > end:
+            raise ValueError("invalid interval")
+    except ValueError as exc:
+        raise ToolInputError("since and until must be ISO timestamps with timezones, with since <= until") from exc
     with httpx.Client(timeout=30) as client:
         data = (
             client.get(
@@ -199,6 +210,8 @@ def search_commit_by_time(owner: str, repo: str, since: str, until: str) -> list
             .json()
         )
 
+    if not isinstance(data, list):
+        raise RuntimeError("GitHub returned a malformed commit list")
     if not data:
         return f"No commits found in {owner}/{repo} between {since} and {until}"
     if len(data) >= 100:
@@ -219,3 +232,8 @@ def search_commit_by_time(owner: str, repo: str, since: str, until: str) -> list
     ]
     commits.sort(key=lambda c: c.timestamp)
     return commits
+
+
+def _validate_repository(owner: str, repo: str) -> None:
+    if any(re.fullmatch(r"[A-Za-z0-9_.-]+", part) is None or part in {".", ".."} for part in (owner, repo)):
+        raise ToolInputError("owner and repo must be non-empty GitHub names, without slashes")

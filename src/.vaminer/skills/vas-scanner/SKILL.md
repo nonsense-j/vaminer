@@ -50,7 +50,7 @@ Run:
 python3 <skill-dir>/scripts/scan.py prepare <VAS-ID> <repo-path> [--max-candidates N|all]
 ```
 
-Keep the returned `scan_dir` for all later commands. Preparation snapshots the normalized bundled rule as `rule.json`, executes every enabled Anchor, records every match and matched-file hash in `anchor_map.json`, admits only files with at least one `query_weight >= 3` Anchor, ranks admitted files, applies the candidate budget, and creates one Markdown task per scheduled file.
+Keep the returned `scan_dir` for all later commands. Preparation snapshots the normalized bundled rule as `rule.json`, executes every enabled Anchor, records every match and matched-file hash in `anchor_map.json`, admits only files with at least one Anchor meeting `ADMISSION_QUERY_WEIGHT` from `scripts/config.py`, ranks admitted files, applies the candidate budget, and creates one Markdown task per scheduled file.
 
 A successful Anchor query with zero matches is valid. An Anchor process/query failure stops preparation. Weight 1–2 matches never admit a file by themselves, but they remain in the Anchor Map and contribute to score and navigation Hints after another Anchor admits that file.
 
@@ -114,8 +114,8 @@ Always record `[]` for a successfully completed analysis with no warnings. `reco
 
 Shared-check semantics are deterministic:
 
-- An evidence location with an explicit `anchor_refs` entry and `query_weight >= 3` receives the analyzer's conditional `alert_hint`.
-- Every other `query_weight >= 3` location in a successfully completed primary candidate receives its original inspect Hint plus `Already Checked Safe`.
+- An evidence location with an explicit `anchor_refs` entry and a query weight meeting the scan's configured admission threshold receives the analyzer's conditional `alert_hint`.
+- Every other location meeting that threshold in a successfully completed primary candidate receives its original inspect Hint plus `Already Checked Safe`.
 - Cross-file Anchor-linked evidence receives alerts immediately, but the Host never infers that an unmentioned cross-file location is safe.
 - An alert always wins over a safe state at the same exact Anchor location; later safe completion cannot erase it.
 - The Host validates structure and provenance, not the analyzer's semantic judgment.

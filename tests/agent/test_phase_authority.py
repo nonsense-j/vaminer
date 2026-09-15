@@ -129,6 +129,8 @@ def test_repository_root_cause_task_builds_typed_intake_and_fixed_diff_capabilit
     assert "source_layout" not in task.prompt
     assert "fixed_revision_available" not in task.prompt
     assert "read_patch_diff" in task.tools
+    assert "Every filename passed to `write_case_artifact`" in task.instructions.render("")
+    assert "correct the name and retry" in task.instructions.render("")
 
 
 def test_example_suite_root_cause_task_builds_bounded_typed_intake(tmp_path: Path):

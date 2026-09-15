@@ -72,7 +72,7 @@ class RootCauseAnalysis(InlineJsonSchemaModel):
         ...,
         min_length=1,
         description=(
-            "Complete manifest of bare caseN or caseN_varM filenames directly under "
-            "the cases root; no fixed case-count limit"
+            "Complete manifest of bare caseN.<ext> or caseN_varM.<ext> filenames "
+            "directly under the cases root; no fixed case-count limit"
         ),
     )

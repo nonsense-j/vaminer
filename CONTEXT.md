@@ -19,11 +19,12 @@ VAMiner turns one Mining Input into a Variant Analysis Specification (VAS). The 
 
 ## Invariants
 
+- Tool input correction, structured-output repair, and child query acceptance share the remaining Agent turn budget. There are no separate tool, output, or Anchor Plan retry-count limits; validators retain their acceptance criteria.
 - Instructions compile exactly as canonical shared instructions → input policy → Runtime Adapter binding. The Adapter binding names concrete tools and structured output; it cannot redefine responsibility or constraints.
 - One mining run uses one Runtime Adapter and one model identity for every parent and child Agent.
 - RCA is the only Agent that writes workspace data, and it writes only through typed Case Artifact operations. Synthesizers return bounded experiences rather than writing directly; the host accepts only the final output from each Synthesizer, applies the turns-quality gate, and merges up to three deduplicated lessons into the shared ast-grep skill with a process-safe read/write lock and atomic replacement. Cleanup is explicit; acceptance and cache loading are pure.
 - Example Suite RCA receives the complete verified snapshot file list as Src-Root-relative paths and must not infer unlisted files. It uses the same Src tools as repository RCA and may request `full_file` reads within the shared byte limit.
-- Rule Generation cannot read source or validate queries. It produces semantics and submits at most two Anchor Plans. During replanning it may copy, adapt, or combine prior queries into optional raw `draft_query` inputs, including for merged intents; the Synthesizer starts from each draft and owns final query syntax and validation.
+- Rule Generation cannot read source or validate queries. It produces semantics and submits Anchor Plans within its remaining turn budget. During replanning it may copy, adapt, or combine prior queries into optional raw `draft_query` inputs, including for merged intents; the Synthesizer starts from each draft and owns final query syntax and validation.
 - Anchor Plans have no fixed Case Artifact or Anchor Intent count. Every declared Case Artifact must be assigned to at least one independent intent, and the accepted Anchor set must collectively recall all declared cases.
 - A Synthesizer cannot change RCA, summary, intent fields, or invoke another Agent. Invalid query semantics may degrade that one Anchor to `query: ""`; protocol, authority, and external execution failures propagate.
 - Runtime Artifacts, generic filesystem permissions, arbitrary metadata, and capability negotiation are not part of the architecture.

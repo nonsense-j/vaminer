@@ -46,6 +46,7 @@ from src.miner.runtimes.claude.policy import PolicyCompiler, cleanup_session_tra
 from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
 from src.miner.runtimes.claude.protocol import ClaudeStreamDecoder, decode_claude_stream
 from src.miner.runtimes.claude.runtime import ClaudeCodeRuntime, _relay_synthesis_log
+from src.miner.tools.errors import ToolInputError
 from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
 from src.miner.utils.log import RuntimeLog
 
@@ -303,6 +304,10 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
     assert root.tools["write_case_artifact"]("case2.c", "sample();\n") == (
         "wrote case2.c (10 bytes)"
     )
+    assert "caseN.<ext>" in root.tools["write_case_artifact"].__doc__
+    with pytest.raises(ValueError, match="caseN"):
+        root.tools["write_case_artifact"]("not-a-case.c", "sample();\n")
+    assert not (cases / "not-a-case.c").exists()
     synthesis = build_server(
         settings=MCPServerSettings(
             profile=MCPProfile.AST_GREP_SYNTHESIS,
@@ -333,7 +338,7 @@ async def test_mcp_tool_bodies_reject_null_strings_without_nonetype_errors(tmp_p
 
     with pytest.raises(ValueError, match="search pattern must be a string"):
         server.tools["search_src_files"](None)
-    with pytest.raises(AstGrepQueryError, match="query must be a non-empty string"):
+    with pytest.raises(ToolInputError, match="query must be a non-empty string"):
         await server.tools["run_ast_grep_query"]("src", "c", "pattern", None)
 
 
@@ -383,14 +388,9 @@ async def test_mcp_ast_grep_tool_forwards_query_debug_controls(
         raise AstGrepQueryError(raw_stderr, stderr=raw_stderr, returncode=8)
 
     monkeypatch.setattr(mcp_module, "run_ast_grep", reject)
-    with pytest.raises(AstGrepQueryError) as raised:
-        await server.tools["run_ast_grep_query"](
-            "cases",
-            "c",
-            "rule",
-            "regex: danger",
-        )
-    assert str(raised.value) == raw_stderr
+    with pytest.raises(ToolInputError) as raised:
+        await server.tools["run_ast_grep_query"]("cases", "c", "rule", "regex: danger")
+    assert raw_stderr in str(raised.value)
 
 
 def test_protocol_normalizes_type_and_content():
@@ -552,7 +552,7 @@ async def test_mcp_records_fatal_ast_grep_tool_failure(tmp_path: Path, monkeypat
 
     assert json.loads(failure_path.read_text(encoding="utf-8")) == {
         "type": "AstGrepRunnerError",
-        "message": "ast-grep timed out",
+        "message": "run_ast_grep_query: ast-grep timed out",
     }
 
 
@@ -738,6 +738,86 @@ async def test_runtime_uses_ephemeral_invocation_and_returns_typed_delta(tmp_pat
     assert result.output.anchor_id == "copy-site"
     assert result.identity.runtime_id == "claude-cli"
     assert not (tmp_path / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_generator_resumes_with_compact_replan_feedback_and_accepts_new_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    from src.miner.anchors.scanner import AnchorMatch, AnchorRunResult, AnchorScanResult
+    from src.miner.mining.validation import anchors as validation
+
+    workspace, source, cases = _workspace(tmp_path)
+    task = make_rule_generation_task(
+        _rca(), workspace_root=workspace, source_root=source,
+        cases_dir=cases, grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
+    )
+    runtime = ClaudeCodeRuntime(ClaudeCodeConfig(executable=PYTHON_EXECUTABLE, model="test-model"))
+
+    def scan(anchors, root, _language):
+        return AnchorScanResult(root=root, anchor_results=[
+            AnchorRunResult(anchor=anchor, matches=[AnchorMatch(
+                anchor_id=anchor["id"], query_weight=anchor["query_weight"],
+                behavior=anchor["behavior"], inspect_hint=anchor["inspect_hint"],
+                file="case1.c" if root == cases else "bug.c", start_line=1, end_line=1,
+            )])
+            for anchor in anchors
+        ])
+
+    monkeypatch.setattr(validation, "scan_anchors", scan)
+
+    class Runner:
+        def __init__(self):
+            self.sessions = []
+            self.prompts = []
+
+        async def run(self, argv, **kwargs):
+            flag = "--resume" if "--resume" in argv else "--session-id"
+            self.sessions.append((flag, argv[argv.index(flag) + 1]))
+            self.prompts.append(kwargs["prompt"])
+            mcp = json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text(encoding="utf-8"))
+            environment = mcp["mcpServers"]["vaminer"]["env"]
+            context = json.loads(Path(environment[SYNTHESIS_CONTEXT_ENV]).read_text(encoding="utf-8"))
+            intent = {
+                "id": "copy-site", "behavior_weight": 4,
+                "behavior": "Copy a value.", "inspect_hint": "Inspect the bound.",
+            }
+            # Simulate the receipt published by synthesis in each CLI invocation.
+            receipt = {
+                "plan": {"summary": "Copies must preserve bounds.", "intents": [
+                    {**intent, "required_cases": ["case1.c"]},
+                ]},
+                "results": [{
+                    "anchor": {**intent, "type": "pattern", "query": "copy();",
+                               "query_weight": len(self.sessions)},
+                    "adjustments": [], "plan_suggestion": "",
+                }],
+            }
+            Path(context["receipt_path"]).write_text(json.dumps(receipt), encoding="utf-8")
+            return ProcessResult(
+                stdout=json.dumps({
+                    "type": "result", "subtype": "success", "num_turns": 1,
+                    "structured_output": {
+                        "category": "SECURITY", "scenarios": {"unsafe": ["Unbounded copy."], "safe": []},
+                    },
+                }),
+                stderr="", returncode=0, duration_ms=1,
+            )
+
+    runner = Runner()
+    runtime._runner = runner
+    result = await runtime.run(task)
+
+    assert [flag for flag, _ in runner.sessions] == ["--session-id", "--resume"]
+    assert runner.sessions[0][1] == runner.sessions[1][1]
+    assert runner.prompts[0] == task.prompt
+    feedback = runner.prompts[1]
+    assert "Replan and call synthesize_anchor_plan" in feedback
+    assert "case files are not admitted: case1.c" in feedback
+    assert "copy();" not in feedback
+    assert "case1.c:1" not in feedback
+    assert task.prompt not in feedback
+    assert result.output.anchors[0].query_weight == 2
 
 
 @pytest.mark.asyncio

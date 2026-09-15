@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import replace
+from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..agent.contracts import (
-    AgentRunResult,
     AgentRuntime,
     AgentSession,
-    AgentTask,
     RuleGenerationAuthority,
 )
 from ..anchors.scanner import AnchorQueryError, scan_anchors
@@ -22,20 +19,20 @@ from ..models.anchors import (
     Anchor,
     AnchorIntent,
     AnchorPlan,
+    AnchorPlanRequest,
+    AnchorReuse,
     AnchorSynthesisDelta,
     AnchorSynthesisResult,
     QueryType,
 )
 from ..models.vas import RuleGenerationDraft, VASCoreInfo
+from ..tools.errors import ToolInputError
 from ..tools.skills import record_ast_grep_experiences
 from ..utils.config import MINER_AST_GREP_MAX_PARALLEL_RUNS
 from ..utils.log import logger
+from ..utils.workspace import atomic_write_json
 from .tasks import make_ast_grep_synthesis_task
 
-SynthesisExecutor = Callable[
-    [AgentTask[AnchorSynthesisDelta]],
-    Awaitable[AgentRunResult[AnchorSynthesisDelta]],
-]
 _CASE_NAME = re.compile(r"^case(?P<number>\d+)(?:_var(?P<variant>\d+))?(?P<suffix>\.[A-Za-z0-9]+)$")
 
 
@@ -43,11 +40,7 @@ class AnchorSynthesisError(RuntimeError):
     """Base failure raised by the host-owned synthesis Module."""
 
 
-class AnchorPlanError(AnchorSynthesisError):
-    pass
-
-
-class AnchorSynthesisLimitError(AnchorSynthesisError):
+class AnchorPlanError(AnchorSynthesisError, ToolInputError):
     pass
 
 
@@ -62,6 +55,20 @@ class AnchorSynthesisReceipt(BaseModel):
 
     plan: AnchorPlan
     results: list[AnchorSynthesisResult] = Field(..., min_length=1)
+
+    @model_validator(mode="after")
+    def validate_canonical_results(self) -> "AnchorSynthesisReceipt":
+        if [item.anchor.id for item in self.results] != [intent.id for intent in self.plan.intents]:
+            raise ValueError("synthesis results must match the complete plan in order")
+        for intent, result in zip(self.plan.intents, self.results, strict=True):
+            anchor = result.anchor
+            if (
+                anchor.behavior != intent.behavior
+                or anchor.inspect_hint != intent.inspect_hint
+                or anchor.behavior_weight != intent.behavior_weight
+            ):
+                raise ValueError(f"synthesis result drifted from intent {intent.id!r}")
+        return self
 
 
 def validate_anchor_plan(plan: AnchorPlan, declared_cases: Sequence[str]) -> tuple[str, ...]:
@@ -167,25 +174,6 @@ def deduplicate_query_anchors(
     return [result.anchor for _, result in kept]
 
 
-class _CallableAgentSession:
-    """Compatibility bridge for tests and lightweight host executors."""
-
-    def __init__(
-        self,
-        task: AgentTask[AnchorSynthesisDelta],
-        execute: SynthesisExecutor,
-    ) -> None:
-        self._task = task
-        self._execute = execute
-
-    async def send(self, prompt: str) -> AgentRunResult[AnchorSynthesisDelta]:
-        task = self._task if prompt == self._task.prompt else replace(self._task, prompt=prompt)
-        return await self._execute(task)
-
-    async def close(self) -> None:
-        return None
-
-
 def _query_errors(
     anchor: Anchor,
     intent: AnchorIntent,
@@ -247,28 +235,18 @@ class AnchorSynthesisSession:
         authority: RuleGenerationAuthority,
         *,
         workspace_root: Path,
-        execute: SynthesisExecutor | None = None,
-        runtime: AgentRuntime | None = None,
+        runtime: AgentRuntime,
         max_parallel: int = MINER_AST_GREP_MAX_PARALLEL_RUNS,
+        initial_receipt: AnchorSynthesisReceipt | None = None,
     ) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be positive")
         self.authority = authority
         self.workspace_root = workspace_root
-        if runtime is None and execute is not None:
-            owner = getattr(execute, "__self__", None)
-            if owner is not None and callable(getattr(owner, "open_session", None)):
-                runtime = owner
-                execute = None
-        self._execute = execute
         self._runtime = runtime
-        if self._execute is None and self._runtime is None:
-            raise ValueError("AnchorSynthesisSession requires execute or runtime")
-        if self._execute is not None and self._runtime is not None:
-            raise ValueError("AnchorSynthesisSession accepts execute or runtime, not both")
         self._max_parallel = max_parallel
         self._calls = 0
-        self._latest: AnchorSynthesisReceipt | None = None
+        self._latest = initial_receipt
 
     @property
     def receipt(self) -> AnchorSynthesisReceipt | None:
@@ -291,17 +269,19 @@ class AnchorSynthesisSession:
             root_cause=self.authority.root_cause,
             iteration=iteration,
         )
-        if self._runtime is not None:
-            child_session: AgentSession[AnchorSynthesisDelta] = self._runtime.open_session(task)
-        else:
-            assert self._execute is not None
-            child_session = _CallableAgentSession(task, self._execute)
-        last_delta: AnchorSynthesisDelta | None = None
+        child_session: AgentSession[AnchorSynthesisDelta] = self._runtime.open_session(task)
         last_errors: tuple[str, ...] = ()
         synthesizer_turns: int | None = None
+        observed_turns = 0
+        max_turns = task.limits.request_limit
         try:
-            for repair in range(1 + task.limits.output_retries):
-                if repair and last_errors:
+            while True:
+                if max_turns is not None and observed_turns >= max_turns:
+                    raise AnchorSynthesisError(
+                        f"{task.task_id} exhausted its model request limit of {max_turns}:\n- "
+                        + "\n- ".join(last_errors)
+                    )
+                if last_errors:
                     prompt = (
                         "The previous query failed deterministic validation:\n\n- "
                         + "\n- ".join(last_errors)
@@ -314,6 +294,7 @@ class AnchorSynthesisSession:
                 # Runtime sessions report cumulative usage across resumed sends.
                 if run.usage is not None and run.usage.turns is not None:
                     synthesizer_turns = run.usage.turns
+                observed_turns = max(observed_turns + 1, synthesizer_turns or 0)
                 anchor = _assemble_anchor(intent, last_delta)
                 last_errors = _query_errors(anchor, intent, self.authority)
                 if not last_errors:
@@ -324,26 +305,8 @@ class AnchorSynthesisSession:
                         plan_suggestion=last_delta.plan_suggestion,
                     )
                     break
-            else:
-                assert last_delta is not None
-                disabled = Anchor(
-                    id=intent.id,
-                    behavior_weight=intent.behavior_weight,
-                    query_weight=min(last_delta.query_weight, intent.behavior_weight),
-                    type=last_delta.query_type if last_delta else QueryType.PATTERN,
-                    query="",
-                    behavior=intent.behavior,
-                    inspect_hint=intent.inspect_hint,
-                )
-                result = AnchorSynthesisResult(
-                    anchor=disabled,
-                    adjustments=[*last_delta.adjustments, "Disabled after deterministic query validation failed."],
-                    experiences=last_delta.experiences,
-                    plan_suggestion=last_delta.plan_suggestion,
-                )
         finally:
             await child_session.close()
-        max_turns = task.limits.request_limit
         if (
             result.experiences
             and max_turns is not None
@@ -362,11 +325,31 @@ class AnchorSynthesisSession:
                 logger.warning("Could not persist ast-grep synthesis experiences: %s", exc)
         return result
 
-    async def synthesize(self, plan: AnchorPlan) -> list[AnchorSynthesisResult]:
-        self._calls += 1
-        if self._calls > 2:
-            raise AnchorSynthesisLimitError("Rule Generation may invoke Anchor synthesis at most twice")
-        normalized_plan = _normalize_anchor_plan(plan)
+    def _resolve_plan(
+        self, request: AnchorPlanRequest | AnchorPlan,
+    ) -> tuple[AnchorPlan, dict[str, AnchorSynthesisResult]]:
+        previous = {
+            intent.id: (intent, result)
+            for intent, result in zip(self._latest.plan.intents, self._latest.results, strict=True)
+        } if self._latest is not None else {}
+        intents: list[AnchorIntent] = []
+        reused: dict[str, AnchorSynthesisResult] = {}
+        for entry in request.intents:
+            if isinstance(entry, AnchorReuse):
+                if entry.reuse_anchor_id not in previous:
+                    raise AnchorPlanError(
+                        f"cannot reuse unknown anchor {entry.reuse_anchor_id!r}; "
+                        "reference an anchor from the latest successful batch or submit a complete intent"
+                    )
+                intent, result = previous[entry.reuse_anchor_id]
+                intents.append(intent.model_copy(deep=True))
+                reused[intent.id] = result.model_copy(deep=True)
+            else:
+                intents.append(entry)
+        return _normalize_anchor_plan(AnchorPlan(summary=request.summary, intents=intents)), reused
+
+    async def synthesize(self, plan: AnchorPlanRequest | AnchorPlan) -> list[AnchorSynthesisResult]:
+        normalized_plan, reused = self._resolve_plan(plan)
         errors = validate_anchor_plan(
             normalized_plan,
             self.authority.root_cause.extracted_case_files,
@@ -374,11 +357,23 @@ class AnchorSynthesisSession:
         if errors:
             raise AnchorPlanError("Anchor Plan rejected:\n- " + "\n- ".join(errors))
 
+        for intent in normalized_plan.intents:
+            if intent.id in reused:
+                errors = _query_errors(reused[intent.id].anchor, intent, self.authority)
+                if errors:
+                    raise AnchorPlanError(
+                        f"anchor {intent.id!r} cannot be reused; submit a complete intent to synthesize it again:\n- "
+                        + "\n- ".join(errors)
+                    )
+
         semaphore = asyncio.Semaphore(self._max_parallel)
 
+        self._calls += 1
         iteration = self._calls
 
         async def bounded(intent: AnchorIntent) -> AnchorSynthesisResult:
+            if intent.id in reused:
+                return reused[intent.id]
             async with semaphore:
                 return await self._synthesize_one(
                     normalized_plan,
@@ -393,7 +388,10 @@ class AnchorSynthesisSession:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._latest = AnchorSynthesisReceipt(plan=normalized_plan, results=results)
+        receipt = AnchorSynthesisReceipt(plan=normalized_plan, results=results)
+        if self.authority.synthesis_cache_path is not None:
+            atomic_write_json(self.authority.synthesis_cache_path, receipt.model_dump(mode="json", by_alias=True))
+        self._latest = receipt
         return results
 
     def finalize(self, draft: RuleGenerationDraft) -> VASCoreInfo:
@@ -404,10 +402,8 @@ __all__ = [
     "AnchorPlanError",
     "AnchorSynthesisAcceptanceError",
     "AnchorSynthesisError",
-    "AnchorSynthesisLimitError",
     "AnchorSynthesisReceipt",
     "AnchorSynthesisSession",
-    "SynthesisExecutor",
     "deduplicate_query_anchors",
     "finalize_rule_generation",
     "validate_anchor_plan",
