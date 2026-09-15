@@ -1,3 +1,5 @@
+"""Behavior tests for the closed agent contracts and phase authority."""
+
 from dataclasses import replace
 from pathlib import Path
 

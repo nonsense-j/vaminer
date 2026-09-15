@@ -1,3 +1,5 @@
+"""Behavior tests for the top-level mining workflow."""
+
 import json
 from pathlib import Path
 

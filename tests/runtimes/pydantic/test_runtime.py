@@ -1,3 +1,5 @@
+"""Behavior tests for the Pydantic AI runtime."""
+
 from pathlib import Path
 
 import pytest

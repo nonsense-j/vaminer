@@ -1,3 +1,5 @@
+"""Behavior tests for anchor synthesis planning and execution."""
+
 import asyncio
 from dataclasses import replace
 from functools import partial

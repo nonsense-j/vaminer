@@ -7,7 +7,7 @@ from src.miner.agent import AgentRunResult, RuleGenerationAuthority, RuntimeIden
 from src.miner.mining import synthesis
 from src.miner.mining.synthesis import AnchorPlanError, AnchorSynthesisReceipt, AnchorSynthesisSession
 from src.miner.models import AnchorPlan, AnchorPlanRequest, AnchorSynthesisDelta, GroundingPolicy
-from tests.mining.test_synthesis_session import ScriptedRuntime, _plan, _rca
+from tests.mining.test_synthesis import ScriptedRuntime, _plan, _rca
 
 
 def _authority(tmp_path: Path) -> RuleGenerationAuthority:

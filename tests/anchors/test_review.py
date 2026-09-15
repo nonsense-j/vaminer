@@ -1,5 +1,7 @@
 """Admission-threshold coverage for the deterministic Anchor review."""
 
+"""Behavior tests for anchor review rendering and admission views."""
+
 from pathlib import Path
 
 from src.miner.anchors.review import (

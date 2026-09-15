@@ -1,3 +1,5 @@
+"""Behavior tests for typed agent cache loading."""
+
 from pathlib import Path
 
 from pydantic import BaseModel

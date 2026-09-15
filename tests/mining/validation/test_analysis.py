@@ -1,3 +1,5 @@
+"""Behavior tests for root-cause analysis validation."""
+
 from pathlib import Path
 
 from src.miner.mining.validation.analysis import (

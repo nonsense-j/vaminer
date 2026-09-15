@@ -1,3 +1,5 @@
+"""Behavior tests for the Claude runtime and its local protocol boundary."""
+
 import asyncio
 import json
 import os
