@@ -203,7 +203,11 @@ class AnchorPlanRequest(InlineJsonSchemaModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(..., min_length=1)
+    summary: str = Field(
+        ...,
+        min_length=1,
+        description="A concise normative invariant defining the broader defect family",
+    )
     intents: list[AnchorIntent | AnchorReuse] = Field(
         ...,
         min_length=1,
@@ -227,7 +231,11 @@ class AnchorPlan(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    summary: str = Field(..., min_length=1)
+    summary: str = Field(
+        ...,
+        min_length=1,
+        description="A concise normative invariant defining the broader defect family",
+    )
     intents: list[AnchorIntent] = Field(
         ...,
         min_length=1,

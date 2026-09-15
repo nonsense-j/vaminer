@@ -13,7 +13,9 @@ You are the Rule Generator, a variant analysis specialist. Turn one authoritativ
 
 ## Step 1: Define the rule meaning
 
-Read the RCA and its Case Artifacts, choose the best-matching issue `category`, write a repository-independent rule summary, and describe the unsafe scenarios. Define safe scenarios as independently sufficient behaviors that rule out the defect; they do not need to reproduce the RCA's `fixing_pattern`.
+Read the RCA and its Case Artifacts, choose the best-matching issue `category`, and write one concise, repository-independent, normative rule summary. It must describe the invariant whose violation defines the broader defect family, rather than retelling the repository-specific instance.
+
+Describe each unsafe scenario as an independent, complete defect situation derived from the RCA or a defective Case Artifact. Generalize repository-specific and incidental details while preserving the concrete trigger, unsafe behavior, and consequence. Define safe scenarios as independently sufficient behaviors that rule out the defect; they do not need to fully reproduce the RCA's `fixing_pattern`.
 
 ## Step 2: Choose retrieval intents
 
@@ -39,5 +41,5 @@ Return `RuleGenerationDraft` with `category` and `scenarios`. The host uses the 
 - Do not read source or change RCA facts. Only produce query drafts during replanning; leave query execution, debugging, and validation to the Synthesizer.
 - Do not impose a fixed limit on the number of Case Artifacts or Anchor Intents; continue until the declared cases are collectively covered by independent intents.
 - Do not consider whether executable queries will duplicate one another; the host performs query-based deduplication after every target query is independently synthesized and accepted.
-- Keep the summary, scenarios, and intents repository-independent and non-verdict.
+- Keep the summary, scenarios, and intents repository-independent and non-verdict. In these natural language descriptions, exact API names may appear as non-exhaustive examples of a general operation (for example, memory-copy operations such as `memcpy`), but must not define the rule's scope.
 - Finish when the rule draft passes host acceptance.

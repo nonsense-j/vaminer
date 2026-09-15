@@ -47,8 +47,15 @@ VASSource = IssueVASSource | ExampleSuiteVASSource
 class Scenarios(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    unsafe: list[str] = Field(..., min_length=1)
-    safe: list[str]
+    unsafe: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Independent, complete defect situations derived from the RCA or defective cases",
+    )
+    safe: list[str] = Field(
+        ...,
+        description="Independent behaviors, each sufficient to rule out the defect",
+    )
 
 
 class VASFull(BaseModel):
@@ -60,7 +67,10 @@ class VASFull(BaseModel):
     category: IssueCategory
     language: AstGrepLanguage
     sources: list[VASSource] = Field(default_factory=list)
-    summary: str
+    summary: str = Field(
+        ...,
+        description="A concise normative invariant defining the broader defect family",
+    )
     scenarios: Scenarios
     anchors: list[Anchor] = Field(..., min_length=1)
 
@@ -73,7 +83,10 @@ class VASCoreInfo(BaseModel):
     category: IssueCategory
     language: AstGrepLanguage
     root_cause_summary: str
-    summary: str
+    summary: str = Field(
+        ...,
+        description="A concise normative invariant defining the broader defect family",
+    )
     scenarios: Scenarios
     anchors: list[Anchor] = Field(..., min_length=1)
 
