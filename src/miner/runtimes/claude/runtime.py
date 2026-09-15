@@ -278,17 +278,11 @@ class _ClaudeAgentSession:
             if result is not None:
                 return replace(result, attempts=attempts)
 
-    def _recover_after_process_failure(self, error: BaseException) -> str:
-        cleanup_session_transcript(
-            self._files.session_id,
-            self._environment,
-            executable=self._executable,
-        )
-        self._files = self._materialize()
-        self._started = False
+    def _resume_after_process_failure(self, error: BaseException) -> str:
+        self._started = True
         return (
-            "Continue the ast-grep synthesis task after the previous process crashed and its session "
-            "could not be resumed.\n\nPrevious process error:\n- "
+            "Resume the ast-grep synthesis task in this session after the previous process "
+            "terminated unexpectedly.\n\nPrevious process error:\n- "
             + redact(clip(str(error), self._runtime.config.max_repair_payload_chars))
             + "\n\nReturn one complete typed output for the most recent request."
         )
@@ -309,13 +303,14 @@ class _ClaudeAgentSession:
                 if process_attempt >= max_process_retries:
                     raise
                 logger.warning(
-                    "%s process failed for %s; retrying with a fresh recovery session: %s",
+                    "%s process failed for %s; resuming session %s: %s",
                     self._runtime.config.display_name,
                     self._task.task_id,
+                    self._files.session_id,
                     redact(clip(str(exc), 2_000)),
                 )
                 current_prompt = (
-                    self._recover_after_process_failure(exc)
+                    self._resume_after_process_failure(exc)
                     + "\n\nMost recent request:\n"
                     + current_prompt
                 )

@@ -914,7 +914,7 @@ async def test_runtime_repairs_output_with_remaining_turn_budget(
 
 
 @pytest.mark.asyncio
-async def test_synthesizer_retries_crashed_process_with_fresh_session(tmp_path: Path):
+async def test_synthesizer_resumes_crashed_process_with_same_session(tmp_path: Path):
     workspace, source, cases = _workspace(tmp_path)
     intent = AnchorIntent(
         id="copy-site",
@@ -981,8 +981,8 @@ async def test_synthesizer_retries_crashed_process_with_fresh_session(tmp_path: 
 
     assert result.output.anchor_id == "copy-site"
     assert result.attempts == 2
-    assert runner.session_flags == ["--session-id", "--session-id"]
-    assert len(set(runner.session_ids)) == 2
+    assert runner.session_flags == ["--session-id", "--resume"]
+    assert len(set(runner.session_ids)) == 1
 
 
 @pytest.mark.asyncio
