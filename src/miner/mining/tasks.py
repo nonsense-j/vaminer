@@ -258,7 +258,7 @@ def _synthesis_input_policy(
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
 - `src` is the complete immutable Example Suite snapshot analyzed by RCA. Files may be flat or nested and may contain multiple bad/unsafe and good/safe demonstrations.
 - Analyze source code only; ignore manifests, configuration, build metadata, and other non-source files.
-- Produce useful matches in `src`; the host separately checks grounding against RCA-declared source files. The faithful query match may be outside the exact component span.
+- Use `src` matches to assess how well the query signals the target behavior; matches need not overlap an exact defect span.
 - Good/safe source is contrastive evidence only and is not a required positive match.
 - Interpret additional `src` matches as other suite examples; accept them only when they remain plausible instances of the target behavior.
 """
@@ -268,7 +268,7 @@ def _synthesis_input_policy(
 
 - The Src Root bound to every src tool is `{bound_root}`. All tool paths are relative to this root.
 - `src` is the affected repository source corpus analyzed by RCA.
-- Produce useful matches in `src`; the host separately checks grounding against RCA-declared source files. The faithful query match may be outside the exact component span.
+- Use `src` matches to assess how well the query signals the target behavior; matches need not overlap an exact defect span.
 - Treat other repository matches as precision evidence, not automatically as required positives or confirmed defects.
 """
 
