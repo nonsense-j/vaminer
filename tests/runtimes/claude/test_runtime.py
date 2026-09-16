@@ -373,6 +373,8 @@ async def test_mcp_wire_schemas_split_tool_and_parameter_semantics(tmp_path: Pat
         )
         for tool in await server.list_tools():
             assert "Args:" not in tool.description, tool.name
+            assert "$ref" not in json.dumps(tool.input_schema), tool.name
+            assert "$defs" not in tool.input_schema, tool.name
             for parameter, schema in tool.input_schema.get("properties", {}).items():
                 assert schema.get("description"), f"{tool.name}.{parameter}"
             tools[tool.name] = tool

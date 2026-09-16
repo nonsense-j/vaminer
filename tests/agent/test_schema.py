@@ -2,12 +2,14 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel, Field, TypeAdapter
+from pydantic_ai import Tool
 from pydantic_ai.tools import GenerateToolJsonSchema
 
 from src.miner.agent import AgentPhase
 from src.miner.mining.tasks import PHASE_DEFINITIONS
 from src.miner.models import RuleGenerationDraft
 from src.miner.models.base import InlineJsonSchemaModel
+from src.miner.models.tool import AnchorPlanInput
 
 
 def _find_keyword(node: Any, keyword: str) -> bool:
@@ -48,6 +50,71 @@ def test_rule_generation_draft_inlines_scenarios_schema():
     assert scenarios["required"] == ["unsafe", "safe"]
     assert scenarios["properties"]["unsafe"]["items"] == {"type": "string"}
     assert scenarios["properties"]["safe"]["items"] == {"type": "string"}
+
+
+def test_anchor_plan_tool_schema_keeps_plan_wrapper_and_inlines_all_references():
+    async def synthesize_anchor_plan(plan: AnchorPlanInput):
+        return plan
+
+    tool = Tool(synthesize_anchor_plan)
+    schema = tool.function_schema.json_schema
+
+    assert schema["required"] == ["plan"]
+    plan_schema = schema["properties"]["plan"]
+    assert plan_schema["type"] == "object"
+    assert plan_schema["additionalProperties"] is False
+    assert plan_schema["required"] == ["summary", "intents"]
+    intent_schema, reuse_schema = plan_schema["properties"]["intents"]["items"]["anyOf"]
+    assert intent_schema["required"] == [
+        "id",
+        "behavior_weight",
+        "behavior",
+        "inspect_hint",
+        "required_cases",
+    ]
+    assert "draft_query" not in intent_schema["required"]
+    assert reuse_schema["required"] == ["reuse_anchor_id"]
+    assert not _find_keyword(schema, "$ref")
+    assert not _find_keyword(schema, "$defs")
+    assert not _find_keyword(schema, "definitions")
+
+    validated = tool.function_schema.validator.validate_python(
+        {
+            "plan": {
+                "summary": "Copies must preserve bounds.",
+                "intents": [
+                    {
+                        "id": "copy-site",
+                        "behavior_weight": 4,
+                        "behavior": "Copy a value.",
+                        "inspect_hint": "Inspect the bound.",
+                        "required_cases": ["case1.c"],
+                    }
+                ],
+            }
+        }
+    )
+    assert validated["plan"].intents[0].id == "copy-site"
+
+    revised = tool.function_schema.validator.validate_python(
+        {
+            "plan": {
+                "summary": "Copies must preserve bounds.",
+                "intents": [
+                    {"reuse_anchor_id": "copy-site"},
+                    {
+                        "id": "length-site",
+                        "behavior_weight": 3,
+                        "behavior": "Derive a copy length.",
+                        "inspect_hint": "Inspect its range.",
+                        "required_cases": ["case1.c"],
+                        "draft_query": "$LEN = size($SRC)",
+                    },
+                ],
+            }
+        }
+    )
+    assert revised["plan"].intents[0].reuse_anchor_id == "copy-site"
 
 
 def test_inline_schema_model_expands_multi_level_refs_and_preserves_siblings():

@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, WithJsonSchema
 
 from .anchors import AnchorPlanRequest
 
@@ -126,6 +126,9 @@ PatchPath = Annotated[
 # synthesize_anchor_plan
 AnchorPlanInput = Annotated[
     AnchorPlanRequest,
+    WithJsonSchema(
+        AnchorPlanRequest.model_json_schema(mode="validation", by_alias=True),
+    ),
     Field(description="Complete desired Anchor set; reuse entries preserve prior results."),
 ]
 

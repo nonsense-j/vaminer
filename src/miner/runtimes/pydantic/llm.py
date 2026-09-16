@@ -37,6 +37,7 @@ def get_llm() -> OpenAIChatModel:
             LLM_MODEL,
             provider=OpenAIProvider(base_url=OPENAI_BASE_URL, api_key=OPENAI_API_KEY),
             profile=OpenAIModelProfile(
+                openai_supports_tool_choice_required=False,
                 openai_supports_strict_tool_definition=False,
                 openai_chat_supports_multiple_system_messages=False,
             ),
