@@ -41,7 +41,11 @@ def _case_artifact_path(cases_dir: Path, path: str, *, create_root: bool = False
 
 
 def list_case_artifacts(cases_dir: Path) -> str:
-    """List valid top-level case artifacts in deterministic order."""
+    """List valid top-level Case Artifacts in deterministic order.
+
+    Args:
+        cases_dir: Bound directory containing the Case Artifacts.
+    """
     root = Path(cases_dir).resolve()
     if not root.is_dir():
         raise RuntimeError(f"cases directory is not an existing directory: {root}")
@@ -62,6 +66,13 @@ def read_case_artifact(
     max_lines: int = MAX_CASE_READ_LINES,
 ) -> str:
     """Read a bounded line range from one case artifact.
+
+    Args:
+        cases_dir: Bound directory containing the Case Artifact.
+        path: Bare artifact filename matching ``caseN.ext`` or ``caseN_varM.ext``.
+        start_line: One-based first line to return.
+        end_line: Optional inclusive last line to return.
+        max_lines: Maximum number of lines to return.
 
     A start position past EOF returns empty content together with the artifact
     length and a recovery message.
@@ -129,6 +140,11 @@ def write_case_artifact(cases_dir: Path, path: str, content: str) -> str:
     ``path`` must be a bare ``caseN.<ext>`` original or
     ``caseN_varM.<ext>`` variant filename. Invalid names are rejected before
     any content is written; callers should correct the name and retry.
+
+    Args:
+        cases_dir: Bound directory where the artifact will be written.
+        path: Bare artifact filename matching ``caseN.ext`` or ``caseN_varM.ext``.
+        content: Non-empty artifact content.
     """
     validate_text_argument(content, "content")
     target = _case_artifact_path(cases_dir, path, create_root=True)

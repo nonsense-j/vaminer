@@ -13,6 +13,7 @@ from ..agent.contracts import (
     AgentRuntime,
     AgentSession,
     RuleGenerationAuthority,
+    TurnBudgetExceeded,
 )
 from ..anchors.scanner import AnchorQueryError, scan_anchors
 from ..models.anchors import (
@@ -205,6 +206,16 @@ def _query_errors(
     return tuple(errors)
 
 
+def _turn_exhaustion_hint(max_turns: int, errors: Sequence[str]) -> str:
+    return (
+        f"The query-writing budget of {max_turns} model turns is exhausted. Use this final retry "
+        "to stop working on an executable query and return the synthesis delta with query set to an empty string. "
+        "Summarize the failed approaches and a recommended plan change in plan_suggestion.\n\n"
+        "Last deterministic validation failures:\n- "
+        + "\n- ".join(errors)
+    )
+
+
 def finalize_rule_generation(
     authority: RuleGenerationAuthority,
     draft: RuleGenerationDraft,
@@ -276,12 +287,10 @@ class AnchorSynthesisSession:
         max_turns = task.limits.request_limit
         try:
             while True:
-                if max_turns is not None and observed_turns >= max_turns:
-                    raise AnchorSynthesisError(
-                        f"{task.task_id} exhausted its model request limit of {max_turns}:\n- "
-                        + "\n- ".join(last_errors)
-                    )
-                if last_errors:
+                exhaustion_retry = max_turns is not None and observed_turns >= max_turns
+                if exhaustion_retry:
+                    prompt = _turn_exhaustion_hint(max_turns, last_errors)
+                elif last_errors:
                     prompt = (
                         "The previous query failed deterministic validation:\n\n- "
                         + "\n- ".join(last_errors)
@@ -289,13 +298,33 @@ class AnchorSynthesisSession:
                     )
                 else:
                     prompt = task.prompt
-                run = await child_session.send(prompt)
+                try:
+                    run = await child_session.send(
+                        prompt,
+                        request_limit_extension=int(exhaustion_retry),
+                    )
+                except TurnBudgetExceeded:
+                    if max_turns is None or exhaustion_retry:
+                        raise
+                    exhaustion_retry = True
+                    run = await child_session.send(
+                        _turn_exhaustion_hint(max_turns, last_errors),
+                        request_limit_extension=1,
+                    )
                 last_delta = run.output
                 # Runtime sessions report cumulative usage across resumed sends.
                 if run.usage is not None and run.usage.turns is not None:
                     synthesizer_turns = run.usage.turns
                 observed_turns = max(observed_turns + 1, synthesizer_turns or 0)
                 anchor = _assemble_anchor(intent, last_delta)
+                if exhaustion_retry:
+                    result = AnchorSynthesisResult(
+                        anchor=anchor,
+                        adjustments=last_delta.adjustments,
+                        experiences=last_delta.experiences,
+                        plan_suggestion=last_delta.plan_suggestion,
+                    )
+                    break
                 last_errors = _query_errors(anchor, intent, self.authority)
                 if not last_errors:
                     result = AnchorSynthesisResult(

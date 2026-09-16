@@ -132,7 +132,6 @@ output/
 │   ├── caches/                         # Issue Collection, RCA, and Rule Generation caches
 │   ├── logs/                           # Per-trace workflow logs
 │   │   └── <trace-id>__<runtime>.log
-│   └── anchor_review.md
 ```
 
 `<trace-id>` is the overall Langfuse workflow trace id when tracing is enabled. Without Langfuse, VAMINER generates a local id with the same format. Set `VAMINER_OUTPUT_DIR` or pass `--output-dir` to relocate the complete `output/` tree.
@@ -153,7 +152,7 @@ The generated JSON rule is consumed by an agent through the `vas-scanner` skill;
 
    Copy the whole directory, not only `SKILL.md`. It contains the scanner scripts, analysis guidance, and every generated rule in the `rules/` subdirectory. If the skill was installed before a new rule was generated, copy the new `VAS-XXXX.json` into the installed skill's `rules/` directory or reinstall the skill.
 
-2. Ensure `ast-grep` or `sg` is available on the coding agent's `PATH`.
+2. Ensure `ast-grep` or `sg` is available on the coding agent's `PATH`. The scanner uses only Python 3.12+ standard-library modules and does not require the parent VAMiner environment or `portalocker`.
 
 3. Open the target project with the agent and invoke the installed skill with the desired rule:
 
@@ -163,11 +162,17 @@ The generated JSON rule is consumed by an agent through the `vas-scanner` skill;
 
    Replace `VAS-XXXX` with the generated rule ID. If your agent uses a different skills directory or invocation syntax, use its equivalent while keeping the complete `vas-scanner` directory intact.
 
-The skill deterministically uses the rule's ast-grep anchors to rank candidate files, asks the agent to analyze each candidate against the rule scenarios, and writes the final `report.json` under:
+The skill deterministically uses the rule's ast-grep anchors to rank candidate files, asks parallel subagents to analyze independent task files, and writes the final `report.json` under:
 
 ```text
 <target-project>/.vas/VAS-XXXX/run_<timestamp>/report.json
 ```
+
+The main Agent runs `preflight`, creates or reuses `.vas/repository_overview.md`,
+runs `prepare`, schedules the generated tasks using the returned concurrency,
+and retries failed tasks. Each subagent records its own Facts and reports in its
+task result file. `finalize` checks that every task result exists before writing
+the report.
 
 ## Mining Workflow
 
@@ -178,13 +183,13 @@ The miner runs a deterministic sequence:
 3. **Rule Generation** produces the rule summary, independent unsafe/safe scenarios, and one anchor intent for each distinct, local, rule-sensitive causal-chain site. When revising the plan, it can attach optional query drafts derived from the previous synthesis batch, including for merged intents.
 4. **AST-Grep Synthesis** runs each intent in an isolated, bounded Synthesizer context. A child returns query fields plus concise reusable ast-grep experiences for one target id; the host combines the query with the canonical intent and safely merges new experiences into the skill.
 5. **Assembly and Validation** uses the authoritative RCA, latest accepted Anchor Plan, Rule Generation draft, and accepted query deltas to build the complete VAS.
-6. **Post-generation Anchor Report** independently renders case coverage and repository hotspot results.
+6. **Post-generation Anchor Check** checks case coverage and source admission, logging non-blocking warnings.
 
-The Rule Generator does not load the ast-grep skill or validate queries. Its optional `draft_query` is a raw pattern or YAML rule string that it may copy, adapt, or combine during replanning. The AST-Grep Synthesizer starts from a supplied draft and owns refinement, final query syntax, validation, and query/behavior alignment. If no trustworthy query can be produced, `query: ""` marks that anchor as disabled; it is skipped during scanning and ranking and is reported prominently in the anchor review and run log.
+The Rule Generator does not load the ast-grep skill or validate queries. Its optional `draft_query` is a raw pattern or YAML rule string that it may copy, adapt, or combine during replanning. The AST-Grep Synthesizer starts from a supplied draft and owns refinement, final query syntax, validation, and query/behavior alignment. If no trustworthy query can be produced, `query: ""` marks that anchor as disabled; it is skipped during scanning and ranking and is reported prominently in the run log.
 
 One mining run selects exactly one Runtime Adapter and one configured model. All phases, including child Synthesizers, retain that identity; there is no per-phase routing or runtime fallback. `VAMiner` accepts either an Issue or Example Suite through an Input Adapter, then uses one shared RCA → Rule Generation → persistence workflow.
 
-`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts replans within the parent Agent turn budget, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Each Synthesizer contributes only the experiences from its final complete output: they are ID-deduplicated and capped at three after the multi-round quality gate; the shared persisted skill has no fixed total experience count. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools and `run_ast_grep_query`; the query tool returns ast-grep stderr verbatim and accepts `debug_query` for raw patterns. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
+`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts replans within the parent Agent turn budget, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Each Synthesizer contributes only the experiences from its final complete output: they are ID-deduplicated and capped at three after the multi-round quality gate; the shared persisted skill has no fixed total experience count. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools, `run_ast_grep_query`, and `debug_ast_grep_pattern`; query execution and pattern debugging are separate tools, and both preserve ast-grep stderr verbatim. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
 
 ### Miner module responsibilities
 
@@ -196,7 +201,7 @@ One mining run selects exactly one Runtime Adapter and one configured model. All
 - `src/miner/runtimes/shared/` contains the host-owned Anchor Synthesis Session.
 - `src/miner/runtimes/pydantic/` contains the in-process Pydantic AI Adapter, LLM construction, hooks, and exact typed tools.
 - `src/miner/runtimes/claude/` contains the Claude CLI Adapter, policy compiler, bundled Langfuse transcript hook, bounded subprocess decoder, and exact phase-scoped MCP tools.
-- `src/miner/anchors/` contains generated-rule scanning and post-generation review.
+- `src/miner/anchors/` contains generated-rule scanning and post-generation coverage checks.
 - `src/miner/main.py` is the CLI composition root for runtime selection, workflow execution, assembly, and persistence.
 
 ### LLM configuration

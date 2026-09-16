@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from ..mining.tasks import AST_GREP_SKILL_ROOT
-from ..tools.ast_grep import run_ast_grep
+from ..tools.ast_grep import AstGrepUnavailableError, run_query
 from ..utils.config import PROJECT_ROOT
 from .models import CheckResult
 
@@ -119,7 +119,7 @@ def check_ast_grep(*, timeout_seconds: float) -> CheckResult:
         with tempfile.TemporaryDirectory(prefix="vaminer-preflight-ast-grep-") as raw_temp:
             root = Path(raw_temp)
             (root / "probe.c").write_text("int vaminer_preflight(void) { return 0; }\n", encoding="utf-8")
-            result = run_ast_grep(
+            result = run_query(
                 root,
                 language="c",
                 query_type="pattern",
@@ -133,6 +133,10 @@ def check_ast_grep(*, timeout_seconds: float) -> CheckResult:
                 "ast-grep started but did not return the expected probe match",
                 detail=result,
             )
+    except AstGrepUnavailableError as exc:
+        detail = str(exc)
+        summary, separator, _ = detail.partition(": ")
+        return CheckResult.failed("ast-grep", summary if separator else detail, detail=detail)
     except Exception as exc:  # noqa: BLE001 - diagnostics must turn failures into a report.
         return CheckResult.failed("ast-grep", "ast-grep functional probe failed", detail=f"{type(exc).__name__}: {exc}")
     return CheckResult.passed(

@@ -42,16 +42,16 @@ Read the target intent, `SKILL.md`, `references/experiences.md`, every required 
 **Inspect the structure**
 
 - When the query fails to parse or produce zero matches, inspect the query syntax and usage.
-- For a raw pattern, set `debug_query=pattern` to inspect ast-grep's matcher root and metavariables.
+- For a raw pattern, call `debug_ast_grep_pattern` to inspect ast-grep's matcher root and metavariables.
 - Use `ast` or `sexp` for named Tree-sitter nodes. Use `cst` when unnamed syntax matters.
-- `debug_query` does not accept a YAML rule. For a string-form pattern inside a rule, debug the pattern separately. For an object-form pattern, debug its full `context` as a raw pattern and confirm that `selector` names the intended node. Then run the complete rule to validate all constraints.
+- `debug_ast_grep_pattern` accepts raw patterns only. For a string-form pattern inside a rule, debug the pattern separately. For an object-form pattern, debug its full `context` as a raw pattern and confirm that `selector` names the intended node. Then run the complete rule to validate all constraints.
 
 **Refine and score**
 
 - Inspect additional matches to assess query breadth. Add only the local context needed to improve precision, and preserve matches for every required case.
 - Set the highest `query_weight` supported by the results. Use a lower weight when the faithful query remains a broad proxy for the behavior.
 
-**If validation fails**
+**If validation eventually fails**
 
 If no faithful query can satisfy the evidence within the target behavior, return an empty query and explain the mismatch in `adjustments`.
 

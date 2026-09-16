@@ -255,11 +255,25 @@ class AgentRunResult[OutputT: BaseModel]:
             raise ValueError("attempts must be positive")
 
 
+class TurnBudgetExceeded(RuntimeError):
+    """Raised by a Runtime Adapter when an Agent exhausts its model-turn budget."""
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit = limit
+        detail = f" of {limit}" if limit is not None else ""
+        super().__init__(f"Agent model-turn budget{detail} is exhausted")
+
+
 @runtime_checkable
 class AgentSession(Protocol[OutputT]):
     """One runtime conversation that can receive follow-up prompts."""
 
-    async def send(self, prompt: str) -> AgentRunResult[OutputT]: ...
+    async def send(
+        self,
+        prompt: str,
+        *,
+        request_limit_extension: int = 0,
+    ) -> AgentRunResult[OutputT]: ...
 
     async def close(self) -> None: ...
 
@@ -296,4 +310,5 @@ __all__ = [
     "RuntimeIdentity",
     "RuntimeLogEvent",
     "RuntimeUsage",
+    "TurnBudgetExceeded",
 ]

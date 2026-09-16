@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from src.miner.tools.errors import ToolInputError
+from src.miner.tools.errors import ToolExecutionError, ToolInputError
 from src.miner.tools import src as src_module
 from src.miner.tools.src import list_src_files, read_src_file, search_src_files
 
@@ -133,7 +133,8 @@ def test_rg_process_failures_are_actionable(
         raise failure
 
     monkeypatch.setattr(src_module.subprocess, "run", fail)
-    with pytest.raises(RuntimeError, match=message):
+    error_type = RuntimeError if isinstance(failure, FileNotFoundError) else ToolExecutionError
+    with pytest.raises(error_type, match=message):
         search_src_files(tmp_path, "x")
 
 
@@ -165,7 +166,36 @@ def test_rg_output_and_stderr_are_bounded(tmp_path: Path, monkeypatch: pytest.Mo
         "run",
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 2, stdout="", stderr="e" * 9_000),
     )
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(ToolExecutionError) as error:
         search_src_files(tmp_path, "x")
     assert len(str(error.value)) == src_module.MAX_SRC_ERROR_CHARS
 
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("not-json\n", "rg returned invalid JSON"),
+        (json.dumps({"type": "match", "data": None}) + "\n", "rg returned a malformed match"),
+        (
+            json.dumps({
+                "type": "match",
+                "data": {"path": {"text": "a.c"}, "line_number": "1", "lines": {"text": "x"}},
+            }) + "\n",
+            "rg returned a malformed line number",
+        ),
+    ],
+)
+def test_rg_malformed_output_is_tool_execution_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    message: str,
+):
+    monkeypatch.setattr(
+        src_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=stdout, stderr=""),
+    )
+
+    with pytest.raises(ToolExecutionError, match=message):
+        search_src_files(tmp_path, "x")

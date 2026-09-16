@@ -31,6 +31,11 @@ QUERY_ERROR_MARKERS = (
     "failed to parse pattern",
     "invalid pattern",
 )
+AST_GREP_INSTALL_HINT = (
+    "Uninstall the .cmd shim, then reinstall the native ast-grep .exe with "
+    "Scoop (`scoop uninstall ast-grep`, then `scoop install ast-grep`) or "
+    "Cargo (`cargo uninstall ast-grep`, then `cargo install ast-grep --locked`)."
+)
 
 
 @dataclass(frozen=True)
@@ -142,12 +147,23 @@ def sorted_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def find_ast_grep(explicit: str | None = None) -> str:
     if explicit:
-        return explicit
-    for name in ("ast-grep", "sg"):
-        binary = shutil.which(name)
-        if binary:
-            return binary
-    raise AnchorExecutionError("ast-grep is required but was not found on PATH")
+        binary = shutil.which(explicit)
+        if binary is None:
+            raise AnchorExecutionError(f"configured ast-grep executable was not found on PATH: {explicit}")
+    else:
+        binary = None
+        for name in ("ast-grep", "sg"):
+            binary = shutil.which(name)
+            if binary:
+                break
+        if binary is None:
+            raise AnchorExecutionError("ast-grep is required but was not found on PATH")
+    if binary.casefold().endswith(".cmd"):
+        raise AnchorExecutionError(
+            f"ast-grep resolved to a .cmd shim instead of a native .exe binary: {binary}. "
+            f"{AST_GREP_INSTALL_HINT}"
+        )
+    return binary
 
 
 def has_top_level_key(query: str, key: str) -> bool:

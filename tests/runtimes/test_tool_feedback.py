@@ -7,10 +7,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from pydantic_ai import UnexpectedModelBehavior, UsageLimitExceeded
+from pydantic_ai import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelResponse, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import FunctionModel
 
+from src.miner.agent import TurnBudgetExceeded
 from src.miner.mining.tasks import (
     make_ast_grep_synthesis_task, make_issue_collection_task, make_root_cause_task, make_rule_generation_task,
 )
@@ -21,12 +22,11 @@ from src.miner.runtimes.claude.policy import InvocationFiles
 from src.miner.runtimes.claude.process import ProcessResult
 from src.miner.runtimes.claude.runtime import ClaudeCodeRuntime
 from src.miner.runtimes.claude.errors import (
-    ClaudeCodeChildSynthesisError, ClaudeCodeRequestLimitError, ClaudeCodeToolExecutionError,
+    ClaudeCodeChildSynthesisError, ClaudeCodeToolExecutionError,
 )
 from src.miner.runtimes.pydantic import runtime as sdk
 from src.miner.runtimes.pydantic.capabilities import tool_feedback_capability
-from src.miner.tools.ast_grep import AstGrepRunnerError
-from src.miner.tools.errors import ToolInputError
+from src.miner.tools.errors import ToolExecutionError, ToolInputError
 
 
 @pytest.fixture
@@ -94,7 +94,7 @@ async def test_persistent_bad_calls_end_at_request_limit(synthesis_task, name):
         calls += 1
         return ModelResponse(parts=[ToolCallPart(name, {"path": "missing.c"})])
 
-    with pytest.raises(UsageLimitExceeded):
+    with pytest.raises(TurnBudgetExceeded, match="budget of 5"):
         await sdk.PydanticAIRuntime(model=FunctionModel(respond)).run(task)
     assert calls == 5
 
@@ -125,7 +125,7 @@ async def test_claude_native_output_failure_resumes_without_resetting_turns(synt
 
     runtime._runner = Runner()
     if exhausts_turns:
-        with pytest.raises(ClaudeCodeRequestLimitError):
+        with pytest.raises(TurnBudgetExceeded, match="budget of 5"):
             await runtime.run(task)
     else:
         result = await runtime.run(task)
@@ -160,7 +160,7 @@ async def test_output_repairs_share_the_turn_budget(synthesis_task, runtime_kind
     def payload():
         nonlocal calls
         calls += 1
-        valid = recovers and calls == 5
+        valid = recovers and calls in {5, 6}
         if not valid and schema_failure:
             return {}
         return {
@@ -172,17 +172,18 @@ async def test_output_repairs_share_the_turn_budget(synthesis_task, runtime_kind
         def respond(messages, info):
             return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, payload())])
         runtime = sdk.PydanticAIRuntime(model=FunctionModel(respond))
-        limit_error = UsageLimitExceeded
+        limit_error = TurnBudgetExceeded
     else:
         class Runner:
             async def run(self, argv, **kwargs):
-                assert int(argv[argv.index("--max-turns") + 1]) == 5 - calls
+                expected_turns = 5 - calls if calls < 5 else 1
+                assert int(argv[argv.index("--max-turns") + 1]) == expected_turns
                 return ProcessResult(stdout=json.dumps({
                     "type": "result", "subtype": "success", "structured_output": payload(), "num_turns": 1,
                 }), stderr="", returncode=0, duration_ms=1)
         runtime = ClaudeCodeRuntime(ClaudeCodeConfig(executable=sys.executable))
         runtime._runner = Runner()
-        limit_error = ClaudeCodeRequestLimitError
+        limit_error = TurnBudgetExceeded
 
     if recovers:
         session = runtime.open_session(task)
@@ -192,23 +193,33 @@ async def test_output_repairs_share_the_turn_budget(synthesis_task, runtime_kind
             assert result.attempts == 5
             with pytest.raises(limit_error):
                 await session.send("Check the output again.")
+            final = await session.send(
+                "Return the terminal fallback.",
+                request_limit_extension=1,
+            )
+            assert final.output.anchor_id == "copy"
+            with pytest.raises(limit_error):
+                await session.send(
+                    "Try another terminal fallback.",
+                    request_limit_extension=1,
+                )
         finally:
             await session.close()
     else:
         with pytest.raises(limit_error):
             await runtime.run(task)
-    assert calls == 5
+    assert calls == (6 if recovers else 5)
 
 
 @pytest.mark.parametrize("error", [
     ValueError("tool implementation bug"), TypeError("tool implementation bug"),
-    PermissionError("tool implementation bug"), AstGrepRunnerError("ast-grep returned invalid JSON: bad output"),
+    PermissionError("tool implementation bug"),
 ])
 async def test_sdk_does_not_hide_tool_bugs(synthesis_task, monkeypatch, error):
     def fail(*args, **kwargs):
         raise error
 
-    monkeypatch.setattr(sdk, "run_ast_grep", fail)
+    monkeypatch.setattr(sdk, "run_query", fail)
     def respond(messages, info):
         return ModelResponse(parts=[ToolCallPart("run_ast_grep_query", {
             "target": "src", "language": "c", "query_type": "pattern", "query": "copy()",
@@ -251,9 +262,15 @@ async def test_deferred_tools_share_the_feedback_policy():
     assert result.output == "done"
 
 
-async def test_mcp_schema_and_input_errors_are_results_without_fatal_receipt(synthesis_task, tmp_path):
+async def test_mcp_schema_and_tool_errors_are_results_without_fatal_receipt(
+    synthesis_task,
+    tmp_path,
+    monkeypatch,
+):
     from mcp.server import MCPServer
     from mcp.types import CallToolRequestParams
+    from src.miner.runtimes.claude import mcp
+
     failure = tmp_path / "tool-failure.json"
     server = build_server(settings=MCPServerSettings(
         profile=MCPProfile.AST_GREP_SYNTHESIS, workspace_root=tmp_path,
@@ -270,6 +287,23 @@ async def test_mcp_schema_and_input_errors_are_results_without_fatal_receipt(syn
         None, CallToolRequestParams(name="read_src_file", arguments={"path": "bug.c"}),
     )
     assert not result.is_error
+
+    def fail_query(*_args, **_kwargs):
+        raise ToolExecutionError("native ast-grep diagnostic")
+
+    monkeypatch.setattr(mcp, "run_query", fail_query)
+    result = await server._handle_call_tool(None, CallToolRequestParams(
+        name="run_ast_grep_query",
+        arguments={
+            "target": "src",
+            "language": "c",
+            "query_type": "pattern",
+            "query": "copy($A)",
+        },
+    ))
+    assert result.is_error
+    assert "native ast-grep diagnostic" in str(result.content)
+    assert not failure.exists()
 
 
 @pytest.mark.parametrize("profile", list(MCPProfile))

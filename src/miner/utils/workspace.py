@@ -310,11 +310,6 @@ class Workspace:
         return self.root / "cases"
 
     @property
-    def anchor_review_path(self) -> Path:
-        self.run_output_dir.mkdir(parents=True, exist_ok=True)
-        return self.run_output_dir / "anchor_review.md"
-
-    @property
     def example_suite_snapshot_dir(self) -> Path:
         return self.root / "src" / "input_snapshot"
 

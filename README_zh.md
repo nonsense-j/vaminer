@@ -132,7 +132,6 @@ output/
 │   ├── caches/                         # Issue Collection、RCA、Rule Generation 三种缓存
 │   ├── logs/                           # 每次运行的 workflow 日志
 │   │   └── <trace-id>__<runtime>.log
-│   └── anchor_review.md
 ```
 
 启用 Langfuse 时，`<trace-id>` 就是整个 workflow 的 Langfuse Trace ID；未启用时，VAMINER 会生成相同格式的本地 ID。可以通过 `VAMINER_OUTPUT_DIR` 或 `--output-dir` 整体调整 `output/` 的位置。
@@ -153,7 +152,7 @@ output/
 
    必须复制整个目录，而不只是 `SKILL.md`。该目录包含扫描脚本、分析规范，以及 `rules/` 子目录中的所有已生成规则。如果安装 Skill 后又生成了新规则，请把新的 `VAS-XXXX.json` 复制到已安装 Skill 的 `rules/` 目录，或重新安装整个 Skill。
 
-2. 确认编程 Agent 的 `PATH` 中可以找到 `ast-grep` 或 `sg`。
+2. 确认编程 Agent 的 `PATH` 中可以找到 `ast-grep` 或 `sg`。Scanner 只需要 Python 3.12+ 标准库，不依赖 VAMiner 主项目环境或 `portalocker`。
 
 3. 使用 Agent 打开目标项目，并指定要执行的规则：
 
@@ -163,11 +162,14 @@ output/
 
    将 `VAS-XXXX` 替换为实际生成的规则 ID。如果所使用的 Agent 采用其他 Skill 目录或调用语法，请使用对应方式，但要保持 `vas-scanner` 目录内容完整。
 
-该 Skill 会使用规则中的 ast-grep 锚点确定性地查找并排序候选文件，再让 Agent 根据规则场景逐个分析候选文件。最终的 `report.json` 会写入：
+该 Skill 会使用规则中的 ast-grep 锚点确定性地查找并排序候选文件，再让主 Agent 按配置并行调度 subagent 分析 task。每个 subagent 独立记录自己的 Facts 和 reports，`finalize` 会确认所有 task 都完成后生成最终 `report.json`：
 
 ```text
 <target-project>/.vas/VAS-XXXX/run_<timestamp>/report.json
 ```
+
+主 Agent 依次调用 `preflight`、`prepare` 和 `finalize`，并根据 `prepare`
+返回的并发配置重试失败或缺少结果的 task。
 
 ## 规则生成流程
 
@@ -178,13 +180,13 @@ Miner 按照以下确定性顺序执行：
 3. **规则生成（Rule Generation）**：生成规则摘要、相互独立的不安全/安全场景，并为因果链中每个不同、局部且规则敏感的位置生成锚点意图。修订计划时，可以根据上一轮合成结果为意图附带可选查询草稿，包括合并后的意图。
 4. **AST-Grep 合成（AST-Grep Synthesis）**：在隔离且有界的 Synthesizer 上下文中逐个处理 intent。child 返回一个目标 id 的 query 字段与简洁、可复用的 ast-grep 经验，host 与 canonical intent 组装 Anchor，并安全地把新经验合并回 Skill。
 5. **组装与验证（Assembly and Validation）**：使用权威 RCA、最新验收的 Anchor Plan、Rule Generation draft 和已验收 query delta 构建完整 VAS。
-6. **生成后锚点报告（Post-generation Anchor Report）**：独立生成用例覆盖和仓库热点报告。
+6. **生成后锚点检查（Post-generation Anchor Check）**：独立检查用例覆盖和源码准入，并记录非阻断 warning。
 
-Rule Generator 不加载 ast-grep Skill，也不验证查询。可选的 `draft_query` 是原始 pattern 或 YAML rule 字符串，可在重新规划时复制、调整或组合上一轮查询形成。AST-Grep Synthesizer 从提供的草稿开始，负责完善查询、最终语法、验证以及查询与行为的一致性。如果无法生成可信查询，`query: ""` 会把该锚点标记为禁用；扫描和排序会跳过它，并在锚点审查文档和运行日志中突出显示。
+Rule Generator 不加载 ast-grep Skill，也不验证查询。可选的 `draft_query` 是原始 pattern 或 YAML rule 字符串，可在重新规划时复制、调整或组合上一轮查询形成。AST-Grep Synthesizer 从提供的草稿开始，负责完善查询、最终语法、验证以及查询与行为的一致性。如果无法生成可信查询，`query: ""` 会把该锚点标记为禁用；扫描和排序会跳过它，并在运行日志中突出显示。
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它允许在父 Agent 的 Turn 预算内重新提交 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。每个 Synthesizer 只贡献其最终完整输出中的 experience：通过多轮质量门槛后按 lesson ID 去重，并且每个 Synthesizer 最多保留 3 条；共享持久化 skill 的 experience 总数没有固定上限。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具和 `run_ast_grep_query`；query 工具会原样返回 ast-grep stderr，并为原始 pattern 提供 `debug_query`。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它允许在父 Agent 的 Turn 预算内重新提交 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。每个 Synthesizer 只贡献其最终完整输出中的 experience：通过多轮质量门槛后按 lesson ID 去重，并且每个 Synthesizer 最多保留 3 条；共享持久化 skill 的 experience 总数没有固定上限。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具、`run_ast_grep_query` 和 `debug_ast_grep_pattern`；query 执行与 pattern 调试由两个独立工具完成，并且都会原样返回 ast-grep stderr。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
 
 ### Miner 模块职责
 
@@ -196,7 +198,7 @@ Rule Generator 不加载 ast-grep Skill，也不验证查询。可选的 `draft_
 - `src/miner/runtimes/shared/`：包含 host-owned Anchor Synthesis Session。
 - `src/miner/runtimes/pydantic/`：包含进程内 Pydantic AI Adapter、LLM 构建、Hook 和精确 typed 工具。
 - `src/miner/runtimes/claude/`：包含 Claude CLI Adapter、策略编译、内置 Langfuse transcript hook、有界子进程解码和精确的 Phase-scoped MCP 工具。
-- `src/miner/anchors/`：负责生成规则扫描和生成后审查。
+- `src/miner/anchors/`：负责生成规则扫描和生成后覆盖检查。
 - `src/miner/main.py`：作为 CLI 组合入口，负责运行时选择、工作流执行、组装和持久化。
 
 ### LLM 配置

@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from git import GitCommandError, Repo
 
-from .errors import ToolInputError, ToolUnavailableError, validate_text_argument
+from .errors import ToolExecutionError, ToolInputError, ToolUnavailableError, validate_text_argument
 from ..models.issue import RepoCheckout
 from ..utils.config import GITHUB_MIRROR_ENABLED
 from ..utils.paths import is_windows_reserved_name
@@ -135,7 +135,7 @@ def clone_repository(
                 "authentication failed", "could not read username",
             )):
                 raise ToolUnavailableError(f"Repository fetch failed: {diagnostic}") from exc
-            raise
+            raise ToolExecutionError(diagnostic or str(exc)) from exc
 
     fetch_revision(buggy_sha)
     repo.git.branch("buggy", "FETCH_HEAD")
@@ -154,9 +154,9 @@ def clone_repository(
     )
 
 
-def _bounded_process_error(label: str, stderr: str, returncode: int) -> RuntimeError:
+def _bounded_process_error(label: str, stderr: str, returncode: int) -> ToolExecutionError:
     detail = stderr.strip()[:MAX_REPO_ERROR_CHARS]
-    return RuntimeError(detail or f"{label} exited with {returncode}")
+    return ToolExecutionError(detail or f"{label} exited with {returncode}")
 
 
 def read_patch_diff_from_repo(
@@ -166,6 +166,11 @@ def read_patch_diff_from_repo(
     timeout_seconds: float = 30,
 ) -> str:
     """Read the ``buggy`` to ``fixed`` diff from one verified checkout.
+
+    Args:
+        repo_path: Bound repository checkout containing ``buggy`` and ``fixed`` branches.
+        path: Optional file or directory relative to ``repo_path``.
+        timeout_seconds: Maximum time allowed for ``git diff``.
 
     This tool is already rooted at the repository checkout. ``path`` may be a
     file or directory relative to that root; do not include the workspace
@@ -214,7 +219,8 @@ def read_patch_diff_from_repo(
     except FileNotFoundError as exc:
         raise RuntimeError("repository diff requires git on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"repository diff timed out after {timeout_seconds:g} seconds") from exc
+        detail = exc.stderr if isinstance(exc.stderr, str) else ""
+        raise ToolExecutionError(detail or f"repository diff timed out after {timeout_seconds:g} seconds") from exc
     if completed.returncode != 0:
         raise _bounded_process_error("git diff", completed.stderr, completed.returncode)
     if len(completed.stdout.encode("utf-8", errors="replace")) > MAX_REPO_DIFF_BYTES:

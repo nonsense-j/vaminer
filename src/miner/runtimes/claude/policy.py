@@ -150,7 +150,11 @@ class PolicyCompiler:
         elif task.phase is AgentPhase.RULE_GENERATION:
             detail = "Read only Case Artifacts and submit complete plans through `mcp__vaminer__synthesize_anchor_plan`."
         else:
-            detail = "Use scoped source/case/skill reads and execute queries only through `mcp__vaminer__run_ast_grep_query`."
+            detail = (
+                "Use scoped source/case/skill reads, execute queries through "
+                "`mcp__vaminer__run_ast_grep_query`, and inspect raw patterns through "
+                "`mcp__vaminer__debug_ast_grep_pattern`."
+            )
         return f"""# Runtime Binding
 
 ## {self.config.display_name}

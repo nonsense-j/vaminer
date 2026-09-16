@@ -7,7 +7,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .errors import ToolInputError, validate_text_argument
+from .errors import ToolExecutionError, ToolInputError, validate_text_argument
 from .text import format_file_read, truncation_footer
 
 MAX_SRC_READ_BYTES = 512 * 1024
@@ -69,11 +69,11 @@ def _src_scope_path(
     return root, target
 
 
-def _bounded_process_error(label: str, stderr: str, returncode: int) -> RuntimeError | ToolInputError:
+def _bounded_process_error(label: str, stderr: str, returncode: int) -> ToolExecutionError | ToolInputError:
     detail = stderr.strip()[:MAX_SRC_ERROR_CHARS]
     if "regex parse error:" in stderr or "error parsing glob" in stderr:
         return ToolInputError(detail)
-    return RuntimeError(detail or f"{label} exited with {returncode}")
+    return ToolExecutionError(detail or f"{label} exited with {returncode}")
 
 
 def _bounded_complete_output(value: str) -> tuple[str, bool]:
@@ -96,6 +96,12 @@ def list_src_files(
     max_results: int = MAX_SRC_LIST_RESULTS,
 ) -> str:
     """List Src-Root-relative files under one directory.
+
+    Args:
+        src_root: Bound source root.
+        path: Optional directory relative to ``src_root``; omit it for the root.
+        glob: Optional ripgrep glob expression.
+        max_results: Maximum number of paths to return.
 
     The tool is already rooted at the analyzed Src Root. ``path`` must be an
     existing directory relative to that root; do not include its workspace
@@ -138,7 +144,8 @@ def list_src_files(
     except FileNotFoundError as exc:
         raise RuntimeError("src file listing requires rg on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("src file listing timed out after 20 seconds") from exc
+        detail = _stream_text(exc.stderr) or "src file listing timed out after 20 seconds"
+        raise ToolExecutionError(detail) from exc
     if completed.returncode not in (0, 1):
         raise _bounded_process_error("rg --files", completed.stderr, completed.returncode)
     bounded_stdout, output_truncated = _bounded_complete_output(completed.stdout)
@@ -175,6 +182,14 @@ def read_src_file(
     full_file: bool = False,
 ) -> str:
     """Read a bounded line range or one complete Src-Root-relative file.
+
+    Args:
+        src_root: Bound source root.
+        path: Source file path relative to ``src_root``.
+        start_line: One-based first line to return.
+        end_line: Optional inclusive last line to return.
+        max_lines: Maximum number of lines in a bounded read.
+        full_file: Return the complete file instead of a bounded line range.
 
     The tool is already rooted at the analyzed Src Root, so ``path`` must be
     relative to that root and must not include its workspace prefix. Line
@@ -246,6 +261,14 @@ def search_src_files(
 ) -> str:
     """Search one Src-Root-relative file or directory.
 
+    Args:
+        src_root: Bound source root.
+        pattern: Single-line literal text or regular expression to search.
+        path: Optional file or directory relative to ``src_root``; omit it for the root.
+        mode: ``literal`` for exact text or ``regex`` for a regular expression.
+        glob: Optional ripgrep glob expression.
+        max_results: Maximum number of matching lines to return.
+
     The tool is already rooted at the analyzed Src Root. ``path`` may be an
     existing file or directory relative to that root; do not include its
     workspace prefix. Omit it to search from the root. Literal mode preserves
@@ -304,7 +327,8 @@ def search_src_files(
     except FileNotFoundError as exc:
         raise RuntimeError("src search requires rg on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("src search timed out after 20 seconds") from exc
+        detail = _stream_text(exc.stderr) or "src search timed out after 20 seconds"
+        raise ToolExecutionError(detail) from exc
     if completed.returncode not in (0, 1):
         raise _bounded_process_error("rg search", completed.stderr, completed.returncode)
     bounded_stdout, output_truncated = _bounded_complete_output(completed.stdout)
@@ -315,18 +339,18 @@ def search_src_files(
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"rg returned invalid JSON: {exc}") from exc
+            raise ToolExecutionError(f"rg returned invalid JSON: {exc}") from exc
         if not isinstance(event, dict):
-            raise RuntimeError("rg returned an unexpected JSON shape")
+            raise ToolExecutionError("rg returned an unexpected JSON shape")
         event_type = event.get("type")
         if event_type not in {"match", "context"}:
             continue
         data = event.get("data")
         if not isinstance(data, dict):
-            raise RuntimeError("rg returned a malformed match")
+            raise ToolExecutionError("rg returned a malformed match")
         line_number = data.get("line_number")
         if type(line_number) is not int or line_number < 1:
-            raise RuntimeError("rg returned a malformed line number")
+            raise ToolExecutionError("rg returned a malformed line number")
         absolute = _rg_text(data.get("path"), errors="surrogateescape")
         text = _rg_text(data.get("lines"), errors="replace")
         try:
@@ -384,8 +408,14 @@ def _rg_text(value: object, *, errors: str) -> str:
             try:
                 return base64.b64decode(value["bytes"], validate=True).decode("utf-8", errors=errors)
             except ValueError as exc:
-                raise RuntimeError("rg returned invalid base64 text") from exc
-    raise RuntimeError("rg returned malformed text")
+                raise ToolExecutionError("rg returned invalid base64 text") from exc
+    raise ToolExecutionError("rg returned malformed text")
+
+
+def _stream_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else value.decode("utf-8", errors="replace")
 
 
 __all__ = [

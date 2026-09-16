@@ -48,8 +48,8 @@ from src.miner.runtimes.claude.policy import PolicyCompiler, cleanup_session_tra
 from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
 from src.miner.runtimes.claude.protocol import ClaudeStreamDecoder, decode_claude_stream
 from src.miner.runtimes.claude.runtime import ClaudeCodeRuntime, _relay_synthesis_log
-from src.miner.tools.errors import ToolInputError
-from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
+from src.miner.tools.ast_grep import AstGrepUnavailableError
+from src.miner.tools.errors import ToolExecutionError, ToolInputError
 from src.miner.utils.log import RuntimeLog
 
 PYTHON_EXECUTABLE = str(Path(sys.executable).resolve())
@@ -345,7 +345,7 @@ async def test_mcp_tool_bodies_reject_null_strings_without_nonetype_errors(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_mcp_ast_grep_tool_forwards_query_debug_controls(
+async def test_mcp_ast_grep_tools_forward_query_and_debug_separately(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -360,14 +360,21 @@ async def test_mcp_ast_grep_tool_forwards_query_debug_controls(
         ),
         fast_mcp_factory=FakeServer,
     )
-    captured: dict[str, object] = {}
+    query_call: dict[str, object] = {}
+    debug_call: dict[str, object] = {}
 
     def run(target_dir, **kwargs):
-        captured["target_dir"] = target_dir
-        captured.update(kwargs)
-        return "report\n\nast-grep stderr (verbatim):\nDebug CST:\n(tree)\n"
+        query_call["target_dir"] = target_dir
+        query_call.update(kwargs)
+        return "report"
 
-    monkeypatch.setattr(mcp_module, "run_ast_grep", run)
+    def debug(target_dir, **kwargs):
+        debug_call["target_dir"] = target_dir
+        debug_call.update(kwargs)
+        return "Debug CST:\n(tree)\n"
+
+    monkeypatch.setattr(mcp_module, "run_query", run)
+    monkeypatch.setattr(mcp_module, "debug_pattern", debug)
     result = await server.tools["run_ast_grep_query"](
         "cases",
         "c",
@@ -375,22 +382,36 @@ async def test_mcp_ast_grep_tool_forwards_query_debug_controls(
         "copy($A);",
         output="full",
         sample_size=7,
+    )
+
+    assert query_call["target_dir"] == cases
+    assert query_call["query_type"] == "pattern"
+    assert query_call["query"] == "copy($A);"
+    assert query_call["output"] == "full"
+    assert query_call["sample_size"] == 7
+    assert "debug_query" not in query_call
+
+    result = await server.tools["debug_ast_grep_pattern"](
+        "cases",
+        "c",
+        "copy($A);",
         debug_query="cst",
     )
 
-    assert captured["target_dir"] == cases
-    assert captured["output"] == "full"
-    assert captured["sample_size"] == 7
-    assert captured["debug_query"] == "cst"
+    assert debug_call["target_dir"] == cases
+    assert debug_call["pattern"] == "copy($A);"
+    assert debug_call["debug_query"] == "cst"
+    assert "query_type" not in debug_call
+    assert "output" not in debug_call
     assert result.endswith("Debug CST:\n(tree)\n")
 
     raw_stderr = "Error: Cannot parse rule\nRule must specify `kind`.\n"
 
     def reject(*_args, **_kwargs):
-        raise AstGrepQueryError(raw_stderr, stderr=raw_stderr, returncode=8)
+        raise ToolExecutionError(raw_stderr)
 
-    monkeypatch.setattr(mcp_module, "run_ast_grep", reject)
-    with pytest.raises(ToolInputError) as raised:
+    monkeypatch.setattr(mcp_module, "run_query", reject)
+    with pytest.raises(ToolExecutionError) as raised:
         await server.tools["run_ast_grep_query"]("cases", "c", "rule", "regex: danger")
     assert raw_stderr in str(raised.value)
 
@@ -530,7 +551,10 @@ def test_runtime_propagates_child_synthesis_failure_receipt(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_mcp_records_fatal_ast_grep_tool_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+async def test_mcp_returns_ast_grep_execution_failure_without_fatal_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
     workspace, source, cases = _workspace(tmp_path)
     failure_path = tmp_path / "tool-failure.json"
     server = build_server(
@@ -546,16 +570,13 @@ async def test_mcp_records_fatal_ast_grep_tool_failure(tmp_path: Path, monkeypat
     )
 
     def fail(*_args, **_kwargs):
-        raise AstGrepRunnerError("ast-grep timed out")
+        raise ToolExecutionError("ast-grep timed out")
 
-    monkeypatch.setattr(mcp_module, "run_ast_grep", fail)
-    with pytest.raises(AstGrepRunnerError, match="timed out"):
+    monkeypatch.setattr(mcp_module, "run_query", fail)
+    with pytest.raises(ToolExecutionError, match="timed out"):
         await server.tools["run_ast_grep_query"]("src", "c", "pattern", "copy($A)")
 
-    assert json.loads(failure_path.read_text(encoding="utf-8")) == {
-        "type": "AstGrepRunnerError",
-        "message": "run_ast_grep_query: ast-grep timed out",
-    }
+    assert not failure_path.exists()
 
 
 def test_protocol_bounds_stdout_without_creating_trace_events():
@@ -1056,7 +1077,7 @@ async def test_runtime_propagates_fatal_tool_failure_before_accepting_empty_quer
             mcp_config = json.loads(mcp_path.read_text(encoding="utf-8"))
             failure_path = Path(mcp_config["mcpServers"]["vaminer"]["env"][TOOL_FAILURE_ENV])
             failure_path.write_text(
-                json.dumps({"type": "AstGrepRunnerError", "message": "binary missing"}),
+                json.dumps({"type": "AstGrepUnavailableError", "message": "binary missing"}),
                 encoding="utf-8",
             )
             payload = {

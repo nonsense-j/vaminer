@@ -15,7 +15,14 @@ def clone_repo(
     buggy_sha: str,
     fixed_sha: str | None = None,
 ) -> RepoCheckout:
-    """Clone selected revisions into the active task workspace."""
+    """Clone selected revisions into the active task workspace.
+
+    Args:
+        context: Active Miner task context that owns the workspace.
+        repo_url: Repository URL (for example, ``https://github.com/owner/repo``).
+        buggy_sha: Commit SHA to check out on the ``buggy`` branch.
+        fixed_sha: Optional commit SHA to check out on the ``fixed`` branch.
+    """
 
     return clone_repository(
         context.deps.workspace_root,

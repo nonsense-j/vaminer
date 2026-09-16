@@ -98,7 +98,13 @@ def list_skill_resources(
     *,
     max_files: int = MAX_SKILL_RESOURCE_FILES,
 ) -> str:
-    """List regular non-symlink files under one task-declared skill root."""
+    """List regular non-symlink files under one task-declared skill root.
+
+    Args:
+        skill_roots: Mapping of task skill names to their bound directories.
+        skill_name: Declared skill whose resources should be listed.
+        max_files: Maximum number of resource paths to return.
+    """
     if max_files < 1 or max_files > MAX_SKILL_RESOURCE_FILES:
         raise ToolInputError(f"max_files must be between 1 and {MAX_SKILL_RESOURCE_FILES}")
     root = _skill_root(skill_roots, skill_name)
@@ -133,7 +139,16 @@ def read_skill_resource(
     end_line: int | None = None,
     max_lines: int = MAX_SKILL_RESOURCE_LINES,
 ) -> str:
-    """Read one bounded line range from a task-declared skill resource."""
+    """Read one bounded line range from a task-declared skill resource.
+
+    Args:
+        skill_roots: Mapping of task skill names to their bound directories.
+        skill_name: Declared skill containing the resource.
+        resource: Relative resource path within the skill root.
+        start_line: One-based first line to return.
+        end_line: Optional inclusive last line to return.
+        max_lines: Maximum number of lines to return.
+    """
     if start_line < 1 or max_lines < 1 or max_lines > MAX_SKILL_RESOURCE_LINES:
         raise ToolInputError(
             f"start_line must be positive and max_lines must be between 1 and {MAX_SKILL_RESOURCE_LINES}"

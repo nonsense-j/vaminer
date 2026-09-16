@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..agent.contracts import AgentRuntime
-from ..anchors.review import review_anchors
+from ..anchors.review import check_anchor_coverage
+from ..tools.ast_grep import _resolve_executable
 from ..models.analysis import RootCauseAnalysis
 from ..models.issue import IssueCollectionInfo
 from ..models.vas import ExampleSuiteVASSource, IssueVASSource, VASCoreInfo, VASFull
@@ -131,21 +132,22 @@ class VAMiner:
             run.cache(rule_task).set(core)
         assert isinstance(core, VASCoreInfo)
 
-        review_anchors(
-            workspace.vas_id,
+        for warning in check_anchor_coverage(
             core,
             prepared.source_root,
             workspace.cases_dir,
-            output_path=workspace.anchor_review_path,
-            source_label=prepared.source_label,
             root_cause=root_cause,
             grounding_policy=prepared.grounding_policy,
-        )
+        ):
+            logger.warning("Degraded VAS: %s", warning)
         vas = _assemble_vas(workspace.vas_id, prepared, core)
         logger.info("VAS saved: %s", workspace.save_rule(vas))
         return vas
 
     async def mine(self, value: MiningInput) -> VASFull:
+        # Enforce the native ast-grep requirement before preparing inputs,
+        # creating workspaces, or invoking the selected Agent Runtime.
+        _resolve_executable()
         output_dir = self.options.output_dir.expanduser().resolve()
         with trace_pipeline(
             mining_input=value,

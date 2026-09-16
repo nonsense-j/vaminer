@@ -14,12 +14,12 @@ from src.miner.agent import (
     RunLimits,
     RuntimeIdentity,
     RuntimeUsage,
+    TurnBudgetExceeded,
 )
 from src.miner.anchors.scanner import AnchorExecutionError, AnchorQueryError
 from src.miner.mining import synthesis as synthesis_module
 from src.miner.mining.synthesis import (
     AnchorPlanError,
-    AnchorSynthesisError,
     AnchorSynthesisSession,
     deduplicate_query_anchors,
 )
@@ -55,7 +55,7 @@ class ScriptedRuntime:
         class Session:
             turns = 0
 
-            async def send(self, prompt):
+            async def send(self, prompt, *, request_limit_extension=0):
                 result = await respond(replace(task, prompt=prompt))
                 if result.usage is not None and result.usage.turns is not None:
                     self.turns += result.usage.turns
@@ -548,6 +548,56 @@ def test_query_grounding_accepts_a_match_elsewhere_in_an_rca_component_file(
 
 
 @pytest.mark.asyncio
+async def test_turn_budget_exception_resumes_once_with_exhaustion_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = tmp_path / "src"
+    cases = tmp_path / "cases"
+    source.mkdir()
+    cases.mkdir()
+    authority = RuleGenerationAuthority(
+        source,
+        cases,
+        GroundingPolicy.REPOSITORY_EVIDENCE,
+        _rca(),
+    )
+    monkeypatch.setattr(synthesis_module, "make_ast_grep_synthesis_task", partial(
+        make_ast_grep_synthesis_task,
+        limits=RunLimits(request_limit=5),
+    ))
+    prompts: list[str] = []
+
+    async def execute(task):
+        prompts.append(task.prompt)
+        if len(prompts) == 1:
+            raise TurnBudgetExceeded(5)
+        return AgentRunResult(
+            output=AnchorSynthesisDelta(
+                anchor_id=task.authority.anchor_id,
+                type="pattern",
+                query="",
+                query_weight=1,
+                adjustments=[],
+                plan_suggestion="Revise the intent after query synthesis exhausted its turns.",
+            ),
+            identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
+        )
+
+    result = await AnchorSynthesisSession(
+        authority,
+        workspace_root=tmp_path,
+        runtime=ScriptedRuntime(execute),
+    ).synthesize(_plan())
+
+    assert len(prompts) == 2
+    assert prompts[0].startswith("Generate and validate only the ast-grep query")
+    assert prompts[1].startswith("The query-writing budget of 5 model turns is exhausted")
+    assert result[0].anchor.query == ""
+    assert result[0].plan_suggestion.startswith("Revise the intent")
+
+
+@pytest.mark.asyncio
 async def test_query_repairs_use_turn_budget_but_execution_failures_propagate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -569,14 +619,19 @@ async def test_query_repairs_use_turn_budget_but_execution_failures_propagate(
         calls += 1
         task_labels.append((task.task_id, task.agent_name))
         prompts.append(task.prompt)
+        exhausted = task.prompt.startswith("The query-writing budget")
         return AgentRunResult(
             output=AnchorSynthesisDelta(
                 anchor_id=task.authority.anchor_id,
                 type="pattern",
-                query="broken(",
+                query="" if exhausted else "broken(",
                 query_weight=1,
                 adjustments=[],
-                plan_suggestion="",
+                plan_suggestion=(
+                    "Split the intent because every attempted query missed its required evidence."
+                    if exhausted
+                    else ""
+                ),
             ),
             identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
         )
@@ -587,19 +642,24 @@ async def test_query_repairs_use_turn_budget_but_execution_failures_propagate(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AnchorQueryError("invalid pattern")),
     )
     session = AnchorSynthesisSession(authority, workspace_root=tmp_path, runtime=ScriptedRuntime(execute))
-    with pytest.raises(AnchorSynthesisError, match="model request limit of 5"):
-        await session.synthesize(_plan())
-    assert calls == 5
+    result = await session.synthesize(_plan())
+    assert calls == 6
     assert task_labels == [
         ("ast-grep-synthesis:1:copy-site", "AST-Grep Synthesizer [1.1/1]"),
-    ] * 5
+    ] * 6
     assert prompts[0].startswith("Generate and validate only the ast-grep query")
     assert prompts[1] == prompts[2]
     assert prompts[1].startswith("The previous query failed deterministic validation:")
     assert "ast-grep validation failed: invalid pattern" in prompts[1]
     assert "Revise only the query fields for this target anchor." in prompts[1]
     assert prompts[0] not in prompts[1]
-    assert session.receipt is None
+    assert "query-writing budget of 5 model turns is exhausted" in prompts[-1]
+    assert "query set to an empty string" in prompts[-1]
+    assert result[0].anchor.query == ""
+    assert result[0].plan_suggestion == (
+        "Split the intent because every attempted query missed its required evidence."
+    )
+    assert session.receipt is not None
 
     calls = 0
     task_labels.clear()
@@ -814,16 +874,21 @@ async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, 
             self.prompts: list[str] = []
             self.closed = False
 
-        async def send(self, prompt: str):
+        async def send(self, prompt: str, *, request_limit_extension: int = 0):
             self.prompts.append(prompt)
+            exhausted = prompt.startswith("The query-writing budget")
             return AgentRunResult(
                 output=AnchorSynthesisDelta(
                     anchor_id="copy-site",
                     type="pattern",
-                    query="copy($A)",
+                    query="" if exhausted else "copy($A)",
                     query_weight=1,
                     adjustments=[],
-                    plan_suggestion="",
+                    plan_suggestion=(
+                        "Revise the intent because the attempted queries missed case1.c."
+                        if exhausted
+                        else ""
+                    ),
                 ),
                 identity=RuntimeIdentity(runtime_id="fake", model_id="fake"),
             )
@@ -852,16 +917,24 @@ async def test_deterministic_repairs_resume_one_runtime_session(tmp_path: Path, 
         result = await session.synthesize(_plan())
         assert result[0].anchor.query == "copy($A)"
     else:
-        with pytest.raises(AnchorSynthesisError, match="model request limit of 5"):
-            await session.synthesize(_plan())
-        assert session.receipt is None
+        result = await session.synthesize(_plan())
+        assert result[0].anchor.query == ""
+        assert result[0].plan_suggestion == (
+            "Revise the intent because the attempted queries missed case1.c."
+        )
+        assert session.receipt is not None
     assert len(runtime.sessions) == 1
     conversation = runtime.sessions[0]
     assert conversation.closed
-    assert len(conversation.prompts) == 5
+    assert len(conversation.prompts) == (5 if recovers else 6)
     assert conversation.prompts[0].startswith("Generate and validate only the ast-grep query")
     assert all("query misses case1.c" in prompt for prompt in conversation.prompts[1:])
-    assert all("Revise only the query fields for this target anchor." in prompt for prompt in conversation.prompts[1:])
+    assert all(
+        "Revise only the query fields for this target anchor." in prompt
+        for prompt in conversation.prompts[1:5]
+    )
+    if not recovers:
+        assert "query-writing budget of 5 model turns is exhausted" in conversation.prompts[-1]
 
 
 def test_query_dedup_keeps_weighted_representatives_and_disabled_anchors():

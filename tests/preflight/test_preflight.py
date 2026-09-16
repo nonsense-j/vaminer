@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,6 +19,7 @@ from src.miner.preflight.models import CheckResult, CheckStatus, PreflightReport
 from src.miner.preflight.progress import start_heartbeat, stop_heartbeat
 from src.miner.runtimes.claude.config import ClaudeCodeConfig
 from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
+from src.miner.tools import ast_grep as ast_grep_module
 
 
 def test_report_fails_only_when_a_required_check_fails():
@@ -56,6 +58,44 @@ def test_rg_preflight_requires_ripgrep_on_path(monkeypatch: pytest.MonkeyPatch):
     available = common.check_rg()
     assert available.status is CheckStatus.PASS
     assert fake_rg in available.summary
+
+
+def test_ast_grep_preflight_rejects_cmd_shim(monkeypatch: pytest.MonkeyPatch):
+    cmd_shim = r"C:\Users\test\AppData\Roaming\npm\ast-grep.CMD"
+    monkeypatch.setattr(ast_grep_module.shutil, "which", lambda name: cmd_shim if name == "ast-grep" else None)
+
+    result = common.check_ast_grep(timeout_seconds=5)
+
+    assert result.status is CheckStatus.FAIL
+    assert ".cmd shim" in result.summary
+    assert cmd_shim in (result.detail or "")
+    assert "cargo install ast-grep" in (result.detail or "")
+    assert "scoop install ast-grep" in (result.detail or "")
+
+
+def test_ast_grep_preflight_uses_resolved_native_executable(monkeypatch: pytest.MonkeyPatch):
+    executable = str(Path("tools") / "ast-grep.exe")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(ast_grep_module.shutil, "which", lambda name: executable if name == "ast-grep" else None)
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        match = [{
+            "file": "probe.c",
+            "text": "return 0;",
+            "range": {
+                "start": {"line": 0, "column": 28},
+                "end": {"line": 0, "column": 37},
+            },
+        }]
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(match), stderr="")
+
+    monkeypatch.setattr(ast_grep_module.subprocess, "run", fake_run)
+
+    result = common.check_ast_grep(timeout_seconds=5)
+
+    assert result.status is CheckStatus.PASS
+    assert commands[0][0] == executable
 
 
 def test_windows_long_paths_check_is_platform_specific(monkeypatch: pytest.MonkeyPatch):

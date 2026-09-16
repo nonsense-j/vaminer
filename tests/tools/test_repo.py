@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from src.miner.tools import repo as repo_module
+from src.miner.tools.errors import ToolExecutionError
 from src.miner.tools.repo import read_patch_diff_from_repo
 
 
@@ -57,3 +58,16 @@ def test_patch_diff_output_is_bounded(tmp_path: Path, monkeypatch: pytest.Monkey
 
     with pytest.raises(ValueError, match="use a narrower path"):
         read_patch_diff_from_repo(tmp_path, "src/large.c")
+
+
+def test_patch_diff_native_failure_is_agent_feedback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        repo_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 128, stdout="", stderr="bad revision\n"),
+    )
+
+    with pytest.raises(ToolExecutionError) as raised:
+        read_patch_diff_from_repo(tmp_path, "src/example.py")
+
+    assert str(raised.value) == "bad revision"

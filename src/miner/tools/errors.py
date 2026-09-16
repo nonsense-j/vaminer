@@ -11,12 +11,20 @@ import errno
 import httpx
 
 
-class ToolInputError(ValueError):
+class ToolFeedbackError:
+    """Marker for failures that an Agent must receive as tool feedback."""
+
+
+class ToolInputError(ValueError, ToolFeedbackError):
     """The caller can correct an argument or choose a permitted operation."""
 
 
-class ToolUnavailableError(RuntimeError):
+class ToolUnavailableError(RuntimeError, ToolFeedbackError):
     """An external evidence source is unavailable; the agent can use a fallback."""
+
+
+class ToolExecutionError(RuntimeError, ToolFeedbackError):
+    """A tool ran but failed in a way the Agent may address or work around."""
 
 
 def validate_text_argument(value: str, name: str) -> None:
@@ -40,4 +48,6 @@ def tool_error_feedback(error: Exception) -> str | None:
         return None
     if isinstance(error, (ToolUnavailableError, httpx.HTTPError)):
         return f"Evidence source unavailable: {error}\nTry another source or retry within the remaining turn budget."
+    if isinstance(error, ToolFeedbackError):
+        return str(error)
     return None

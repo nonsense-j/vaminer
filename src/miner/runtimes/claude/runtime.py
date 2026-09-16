@@ -22,6 +22,7 @@ from ...agent.contracts import (
     RuleGenerationAuthority,
     RuntimeIdentity,
     RuntimeUsage,
+    TurnBudgetExceeded,
 )
 from ...mining.validation.analysis import finalize_root_cause_cases
 from ...models.analysis import RootCauseAnalysis
@@ -160,13 +161,21 @@ class _ClaudeAgentSession:
         finished.set()
         await task
 
-    async def _send_once(self, prompt: str) -> tuple[AgentRunResult[Any] | None, list[str]]:
-        remaining = self._task.limits.request_limit
+    async def _send_once(
+        self,
+        prompt: str,
+        *,
+        request_limit_extension: int = 0,
+    ) -> tuple[AgentRunResult[Any] | None, list[str]]:
+        request_limit = self._task.limits.request_limit
+        if request_limit is not None:
+            request_limit += request_limit_extension
+        remaining = request_limit
         if remaining is not None:
             remaining -= self._observed_turns
             if remaining < 1:
                 raise ClaudeCodeRequestLimitError(
-                    self._task.limits.request_limit, observed=self._observed_turns + 1,
+                    request_limit, observed=self._observed_turns + 1,
                     cli_name=self._runtime.config.display_name,
                 )
         attempt_task = self._task
@@ -237,7 +246,11 @@ class _ClaudeAgentSession:
                 decoder.feed_line(raw)
         self._runtime._raise_synthesis_failure(self._files.synthesis_failure)
         self._runtime._raise_tool_failure(self._files.tool_failure)
-        decoded = decoder.finish(process)
+        try:
+            decoded = decoder.finish(process)
+        except ClaudeCodeRequestLimitError as exc:
+            self._observed_turns += max(1, exc.observed)
+            raise
         self._usage = _merge_usage(self._usage, decoded.usage)
         self._observed_turns += max(1, decoded.usage.turns or 0)
         if decoded.validation_errors:
@@ -260,7 +273,12 @@ class _ClaudeAgentSession:
             [],
         )
 
-    async def _send_with_repairs(self, prompt: str) -> AgentRunResult[Any]:
+    async def _send_with_repairs(
+        self,
+        prompt: str,
+        *,
+        request_limit_extension: int = 0,
+    ) -> AgentRunResult[Any]:
         errors: list[str] = []
         attempts = 0
         while True:
@@ -274,7 +292,10 @@ class _ClaudeAgentSession:
                     "that evidence. Return one corrected complete typed output:\n- "
                     + clip(redact("\n- ".join(errors)), self._runtime.config.max_repair_payload_chars)
                 )
-            result, errors = await self._send_once(current_prompt)
+            result, errors = await self._send_once(
+                current_prompt,
+                request_limit_extension=request_limit_extension,
+            )
             if result is not None:
                 return replace(result, attempts=attempts)
 
@@ -287,7 +308,12 @@ class _ClaudeAgentSession:
             + "\n\nReturn one complete typed output for the most recent request."
         )
 
-    async def send(self, prompt: str) -> AgentRunResult[Any]:
+    async def send(
+        self,
+        prompt: str,
+        *,
+        request_limit_extension: int = 0,
+    ) -> AgentRunResult[Any]:
         if self._closed:
             raise ClaudeCodeError("Claude session is already closed")
         max_process_retries = (
@@ -295,25 +321,34 @@ class _ClaudeAgentSession:
             if self._task.phase is AgentPhase.AST_GREP_SYNTHESIS else 0
         )
         current_prompt = prompt
-        for process_attempt in range(max_process_retries + 1):
-            try:
-                result = await self._send_with_repairs(current_prompt)
-                return replace(result, attempts=result.attempts + process_attempt)
-            except (ClaudeCodeProcessError, ClaudeCodeTimeoutError, ClaudeCodeOutputLimitError) as exc:
-                if process_attempt >= max_process_retries:
-                    raise
-                logger.warning(
-                    "%s process failed for %s; resuming session %s: %s",
-                    self._runtime.config.display_name,
-                    self._task.task_id,
-                    self._files.session_id,
-                    redact(clip(str(exc), 2_000)),
-                )
-                current_prompt = (
-                    self._resume_after_process_failure(exc)
-                    + "\n\nMost recent request:\n"
-                    + current_prompt
-                )
+        try:
+            for process_attempt in range(max_process_retries + 1):
+                try:
+                    result = await self._send_with_repairs(
+                        current_prompt,
+                        request_limit_extension=request_limit_extension,
+                    )
+                    return replace(result, attempts=result.attempts + process_attempt)
+                except (ClaudeCodeProcessError, ClaudeCodeTimeoutError, ClaudeCodeOutputLimitError) as exc:
+                    if process_attempt >= max_process_retries:
+                        raise
+                    logger.warning(
+                        "%s process failed for %s; resuming session %s: %s",
+                        self._runtime.config.display_name,
+                        self._task.task_id,
+                        self._files.session_id,
+                        redact(clip(str(exc), 2_000)),
+                    )
+                    current_prompt = (
+                        self._resume_after_process_failure(exc)
+                        + "\n\nMost recent request:\n"
+                        + current_prompt
+                    )
+        except ClaudeCodeRequestLimitError as exc:
+            limit = self._task.limits.request_limit
+            if limit is not None:
+                limit += request_limit_extension
+            raise TurnBudgetExceeded(limit) from exc
         raise AssertionError("unreachable")
 
     async def close(self) -> None:

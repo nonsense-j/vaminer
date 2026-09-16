@@ -8,6 +8,7 @@ from git import Actor, Repo
 
 from src.miner.agent import AgentPhase, AgentRunResult, RuntimeIdentity
 from src.miner.mining.inputs import ExampleSuiteInput, IssueInput
+from src.miner.mining import workflow as workflow_module
 from src.miner.mining.workflow import VAMiner, WorkflowOptions
 from src.miner.models import (
     Anchor,
@@ -20,6 +21,7 @@ from src.miner.models import (
     VASCoreInfo,
 )
 from src.miner.utils.workspace import compute_source_sha
+from src.miner.tools.ast_grep import AstGrepUnavailableError
 
 
 class ScriptedRuntime:
@@ -98,6 +100,27 @@ def _options(tmp_path: Path, *, cache: bool = False) -> WorkflowOptions:
         output_dir=tmp_path / "output",
         rules_dir=tmp_path / "rules",
     )
+
+
+@pytest.mark.asyncio
+async def test_mine_rejects_invalid_ast_grep_before_runtime_or_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime = ScriptedRuntime()
+
+    def reject_ast_grep() -> str:
+        raise AstGrepUnavailableError("ast-grep resolved to a .cmd shim")
+
+    monkeypatch.setattr(workflow_module, "_resolve_executable", reject_ast_grep)
+
+    with pytest.raises(AstGrepUnavailableError, match=r"\.cmd shim"):
+        await VAMiner(runtime, options=_options(tmp_path)).mine(
+            ExampleSuiteInput(path=tmp_path / "missing-suite")
+        )
+
+    assert runtime.phases == []
+    assert not (tmp_path / "workspaces").exists()
 
 
 @pytest.mark.asyncio

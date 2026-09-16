@@ -5,6 +5,7 @@ description = "VAMINER: Issue‑Directed Variant Analysis Framework"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "ast-grep-py>=0.40,<1",
     "gitpython>=3.1.57",
     "httpx>=0.28.1",
     "langfuse>=4.14.1,<5",
@@ -14,6 +15,7 @@ dependencies = [
     "pydantic-ai-harness>=0.11.0",
     "pydantic-ai-slim[duckduckgo,openai]>=2.18.0",
     "python-dotenv>=1.2.2",
+    "pyyaml>=6",
     "rich>=15.0.0",
     "trafilatura>=2.1.0",
 ]

@@ -175,6 +175,7 @@ AST_GREP_SYNTHESIS = PhaseDefinition(
         "list_skill_resources",
         "read_skill_resource",
         "run_ast_grep_query",
+        "debug_ast_grep_pattern",
     ),
     limits=RunLimits(request_limit=MINER_MAX_TURNS_PER_ANCHOR),
     validator=_validate_anchor_synthesis,

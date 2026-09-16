@@ -1,7 +1,13 @@
-"""Configuration for the VAS scanner workflow."""
+"""Small, user-editable configuration for the standalone VAS scanner."""
 
+# A file needs at least one Anchor at this weight to become a task.
 ADMISSION_QUERY_WEIGHT = 2
-DEFAULT_MAX_CANDIDATES = 20
-CANDIDATE_BATCH_SIZE = 3
-MAX_CANDIDATE_ATTEMPTS = 2
+
+# The main Agent schedules at most this many candidate tasks in one run.
+MAX_CANDIDATES = 20
+
+# The main Agent may run this many task subagents concurrently.
+CONCURRENCY = 3
+
+# None writes runs under <repository>/.vas. Set a path to keep scanner runs elsewhere.
 WORKSPACE_DIR = None

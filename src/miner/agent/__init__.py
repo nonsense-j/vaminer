@@ -16,6 +16,7 @@ from .contracts import (
     RuntimeIdentity,
     RuntimeLogEvent,
     RuntimeUsage,
+    TurnBudgetExceeded,
 )
 from .schema import descriptive_json_schema
 
@@ -35,5 +36,6 @@ __all__ = [
     "RuntimeIdentity",
     "RuntimeLogEvent",
     "RuntimeUsage",
+    "TurnBudgetExceeded",
     "descriptive_json_schema",
 ]

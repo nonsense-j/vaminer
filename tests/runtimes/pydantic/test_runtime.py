@@ -1,5 +1,6 @@
 """Behavior tests for the Pydantic AI runtime."""
 
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,8 @@ from pydantic_ai.messages import ModelResponse, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
+from src.miner.agent import RuleGenerationAuthority, RunLimits
+from src.miner.mining import synthesis as synthesis_module
 from src.miner.mining.examples import ExampleSuiteIntake, inspect_example_suite
 from src.miner.mining.synthesis import (
     AnchorPlanError,
@@ -29,8 +32,7 @@ from src.miner.models import (
 from src.miner.runtimes.pydantic import runtime as pydantic_runtime
 from src.miner.runtimes.pydantic import telemetry as pydantic_telemetry
 from src.miner.runtimes.pydantic.runtime import PydanticAIRuntime
-from src.miner.tools.errors import ToolInputError
-from src.miner.tools.ast_grep import AstGrepQueryError, AstGrepRunnerError
+from src.miner.tools.errors import ToolExecutionError, ToolInputError
 
 
 @pytest.mark.asyncio
@@ -129,6 +131,72 @@ def _root_cause() -> RootCauseAnalysis:
         fixing_pattern="bound the length",
         extracted_case_files=["case1.c"],
     )
+
+
+@pytest.mark.asyncio
+async def test_synthesizer_resumes_after_pydantic_turn_budget_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workspace = tmp_path / "workspace"
+    source = workspace / "src"
+    cases = workspace / "cases"
+    source.mkdir(parents=True)
+    cases.mkdir()
+    (source / "bug.c").write_text("copy();\n", encoding="utf-8")
+    (cases / "case1.c").write_text("copy();\n", encoding="utf-8")
+    root_cause = _root_cause()
+    authority = RuleGenerationAuthority(
+        source,
+        cases,
+        GroundingPolicy.REPOSITORY_EVIDENCE,
+        root_cause,
+    )
+    intent = AnchorIntent(
+        id="copy-site",
+        behavior_weight=4,
+        behavior="copy",
+        inspect_hint="bound",
+        required_cases=["case1.c"],
+    )
+    plan = AnchorPlan(summary="copy", intents=[intent])
+    monkeypatch.setattr(synthesis_module, "make_ast_grep_synthesis_task", partial(
+        make_ast_grep_synthesis_task,
+        limits=RunLimits(request_limit=2),
+    ))
+    calls = 0
+
+    def respond(messages, agent_info):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return ModelResponse(parts=[ToolCallPart("read_src_file", {"path": "bug.c"})])
+        history = "\n".join(
+            str(part.content)
+            for message in messages
+            for part in message.parts
+            if hasattr(part, "content")
+        )
+        assert "query-writing budget of 2 model turns is exhausted" in history
+        assert "copy();" in history
+        return ModelResponse(parts=[ToolCallPart(agent_info.output_tools[0].name, {
+            "anchor_id": "copy-site",
+            "type": "pattern",
+            "query": "",
+            "query_weight": 1,
+            "adjustments": [],
+            "plan_suggestion": "Revise the intent after the query attempts exhausted their turns.",
+        })])
+
+    result = await AnchorSynthesisSession(
+        authority,
+        workspace_root=workspace,
+        runtime=PydanticAIRuntime(model=FunctionModel(respond)),
+    ).synthesize(plan)
+
+    assert calls == 3
+    assert result[0].anchor.query == ""
+    assert result[0].plan_suggestion.startswith("Revise the intent")
 
 
 def test_pydantic_tracing_uses_native_instrumentation_once(monkeypatch: pytest.MonkeyPatch):
@@ -419,12 +487,12 @@ async def test_pydantic_plan_tool_translates_only_correctable_failures(
 @pytest.mark.parametrize(
     ("failure", "expected"),
     [
-        (AstGrepQueryError("invalid pattern"), ToolInputError),
-        (AstGrepRunnerError("ast-grep returned invalid JSON: decoder failed"), AstGrepRunnerError),
-        (AstGrepRunnerError("ast-grep timed out"), AstGrepRunnerError),
+        (ToolInputError("invalid pattern"), ToolInputError),
+        (ToolExecutionError("ast-grep returned invalid JSON: decoder failed"), ToolExecutionError),
+        (ToolExecutionError("ast-grep timed out"), ToolExecutionError),
     ],
 )
-async def test_pydantic_ast_grep_tool_repairs_only_query_failures(
+async def test_pydantic_ast_grep_tool_preserves_failures_for_the_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
@@ -461,7 +529,7 @@ async def test_pydantic_ast_grep_tool_repairs_only_query_failures(
         captured.update(kwargs)
         raise failure
 
-    monkeypatch.setattr(pydantic_runtime, "run_ast_grep", fail)
+    monkeypatch.setattr(pydantic_runtime, "run_query", fail)
     agent = PydanticAIRuntime(model=TestModel()).build_agent(
         task,
         model=TestModel(),
@@ -477,14 +545,13 @@ async def test_pydantic_ast_grep_tool_repairs_only_query_failures(
             "copy($A)",
             output="full",
             sample_size=7,
-            debug_query="sexp",
         )
 
     assert str(raised.value) == str(failure)
     assert captured["target_dir"] == source
     assert captured["output"] == "full"
     assert captured["sample_size"] == 7
-    assert captured["debug_query"] == "sexp"
+    assert "debug_query" not in captured
 
 
 @pytest.mark.asyncio
@@ -517,25 +584,38 @@ async def test_pydantic_runtime_does_not_accept_empty_query_after_tool_execution
     )
 
     def fail(*_args, **_kwargs):
-        raise AstGrepRunnerError("ast-grep timed out")
+        raise ToolExecutionError("ast-grep timed out")
 
-    def respond(_messages, _agent_info):
-        return ModelResponse(
-            parts=[
-                ToolCallPart(
-                    "run_ast_grep_query",
-                    {
-                        "target": "src",
-                        "language": "c",
-                        "query_type": "pattern",
-                        "query": "copy($A)",
-                    },
-                )
-            ]
-        )
+    calls = 0
 
-    monkeypatch.setattr(pydantic_runtime, "run_ast_grep", fail)
+    def respond(messages, agent_info):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ModelResponse(parts=[ToolCallPart(
+                "run_ast_grep_query",
+                {
+                    "target": "src",
+                    "language": "c",
+                    "query_type": "pattern",
+                    "query": "copy($A)",
+                },
+            )])
+        assert messages[-1].parts[0].outcome == "failed"
+        assert messages[-1].parts[0].content == "ast-grep timed out"
+        return ModelResponse(parts=[ToolCallPart(agent_info.output_tools[0].name, {
+            "anchor_id": "copy-site",
+            "type": "pattern",
+            "query": "",
+            "query_weight": 1,
+            "adjustments": ["ast-grep remained unavailable"],
+            "plan_suggestion": "",
+        })])
+
+    monkeypatch.setattr(pydantic_runtime, "run_query", fail)
     runtime = PydanticAIRuntime(model=FunctionModel(respond))
 
-    with pytest.raises(AstGrepRunnerError, match="timed out"):
-        await runtime.run(task)
+    result = await runtime.run(task)
+
+    assert calls == 2
+    assert result.output.query == ""
