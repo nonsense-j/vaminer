@@ -462,7 +462,6 @@ async def test_mcp_ast_grep_tools_forward_query_and_debug_separately(
         debug_query="cst",
     )
 
-    assert debug_call["working_dir"] == cases
     assert debug_call["pattern"] == "copy($A);"
     assert debug_call["debug_query"] == "cst"
     assert "query_type" not in debug_call

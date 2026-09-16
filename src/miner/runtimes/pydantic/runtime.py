@@ -468,7 +468,6 @@ class PydanticAIRuntime:
                     pattern=pattern,
                     debug_query=debug_query,
                     timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
-                    working_dir=authority.cases_dir,
                 )
 
             tools.extend((list_skill_resources, read_skill_resource, run_ast_grep_query, debug_ast_grep_pattern))

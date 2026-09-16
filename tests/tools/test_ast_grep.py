@@ -63,26 +63,20 @@ def test_run_query_normalizes_results(tmp_path: Path):
     assert "capture single.ARG: 2" in full
 
 
-def test_debug_pattern_is_independent_from_query_execution(tmp_path: Path):
+def test_debug_pattern_is_independent_from_query_execution():
     executable = _native_ast_grep()
-    (tmp_path / "a.c").write_text(
-        "void f(char *d, char *s, int n) { memcpy(d, s, n); }\n",
-        encoding="utf-8",
-    )
 
     bare = debug_pattern(
         language="c",
         pattern="memcpy($$$ARGS)",
         debug_query="pattern",
         executable=executable,
-        working_dir=tmp_path,
     )
     statement = debug_pattern(
         language="c",
         pattern="memcpy($$$ARGS);",
         debug_query="pattern",
         executable=executable,
-        working_dir=tmp_path,
     )
 
     assert "Debug Pattern:\nmacro_type_specifier" in bare
@@ -150,14 +144,12 @@ def test_agent_correctable_arguments_are_tool_feedback(
         if function is run_query:
             function(tmp_path, executable=_native_ast_grep(), **arguments)
         else:
-            function(executable=_native_ast_grep(), working_dir=tmp_path, **arguments)
+            function(executable=_native_ast_grep(), **arguments)
 
 
-def test_debug_pattern_uses_empty_temporary_directory_when_cases_are_missing(
-    tmp_path: Path,
+def test_debug_pattern_uses_empty_temporary_directory(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    preferred = tmp_path / "missing-cases"
     observed_roots: list[Path] = []
     monkeypatch.setattr(ast_grep.shutil, "which", lambda _name: "/tools/ast-grep")
 
@@ -174,11 +166,9 @@ def test_debug_pattern_uses_empty_temporary_directory_when_cases_are_missing(
         language="c",
         pattern="$A",
         executable="ast-grep",
-        working_dir=preferred,
     )
 
     assert result == "Debug Pattern:\n(identifier)\n"
-    assert preferred.exists() is False
     assert len(observed_roots) == 1
     assert observed_roots[0].exists() is False
 
@@ -303,7 +293,6 @@ def test_pattern_warning_is_feedback_but_debug_tree_text_is_not_false_positive(
         language="c",
         pattern='puts("invalid pattern");',
         executable="ast-grep",
-        working_dir=tmp_path,
     )
     assert result == "Debug Pattern:\nstring_literal\n  string_content invalid pattern\n"
 
@@ -333,7 +322,6 @@ def test_run_query_and_debug_pattern_build_separate_commands(
         pattern="copy($A);",
         debug_query="cst",
         executable="ast-grep",
-        working_dir=tmp_path,
     ) == "Debug CST:\n(tree)\n"
 
     assert all(not argument.startswith("--debug-query") for argument in commands[0])

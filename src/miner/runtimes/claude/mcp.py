@@ -542,7 +542,6 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
             pattern=pattern,
             debug_query=debug_query,
             timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
-            working_dir=settings.cases_dir,
         )
 
     _register(server, "list_skill_resources", list_skill_resources)
