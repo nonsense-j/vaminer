@@ -27,6 +27,7 @@ wheels/
 
 # data
 /data
+/eval
 
 # Generated VAS scanner rules
 **/.vaminer/skills/*scanner/rules/*.json

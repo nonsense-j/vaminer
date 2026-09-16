@@ -1,6 +1,7 @@
 """Behavior tests for the Claude runtime and its local protocol boundary."""
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -59,7 +60,7 @@ class FakeServer:
     def __init__(self, _name: str) -> None:
         self.tools = {}
 
-    def tool(self, *, name: str):
+    def tool(self, *, name: str, description: str | None = None):
         def register(function):
             self.tools[name] = function
             return function
@@ -285,10 +286,6 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
         "read_case_artifact",
         "write_case_artifact",
     }
-    assert "already rooted at the analyzed Src Root" in root.tools["list_src_files"].__doc__
-    assert source.as_posix() in root.tools["list_src_files"].__doc__
-    assert "file or directory" in root.tools["search_src_files"].__doc__
-    assert "one-based" in root.tools["read_src_file"].__doc__
     (source / "long.c").write_text("line\n" * 250, encoding="utf-8")
     complete = root.tools["read_src_file"]("long.c", full_file=True)
     assert complete.startswith("==> long.c | lines 1-250 of 250 <==\n")
@@ -306,7 +303,6 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
     assert root.tools["write_case_artifact"]("case2.c", "sample();\n") == (
         "wrote case2.c (10 bytes)"
     )
-    assert "caseN.<ext>" in root.tools["write_case_artifact"].__doc__
     with pytest.raises(ValueError, match="caseN"):
         root.tools["write_case_artifact"]("not-a-case.c", "sample();\n")
     assert not (cases / "not-a-case.c").exists()
@@ -322,6 +318,75 @@ def test_mcp_profiles_register_exact_typed_tools(tmp_path: Path):
     )
     assert "write_case_artifact" not in synthesis.tools
     assert {"list_skill_resources", "read_skill_resource", "run_ast_grep_query"} <= set(synthesis.tools)
+
+
+@pytest.mark.asyncio
+async def test_mcp_wire_schemas_split_tool_and_parameter_semantics(tmp_path: Path):
+    from mcp.server import MCPServer
+
+    workspace, source, cases = _workspace(tmp_path)
+    repo = workspace / "repo"
+    repo.mkdir()
+
+    async def synthesize(_plan):
+        return []
+
+    configurations = (
+        (MCPServerSettings(profile=MCPProfile.ISSUE, workspace_root=workspace), None),
+        (
+            MCPServerSettings(
+                profile=MCPProfile.ROOT_CAUSE,
+                workspace_root=workspace,
+                source_root=source,
+                cases_dir=cases,
+                repo_path=repo,
+                fixed_diff=True,
+            ),
+            None,
+        ),
+        (
+            MCPServerSettings(
+                profile=MCPProfile.RULE_GENERATION,
+                workspace_root=workspace,
+                cases_dir=cases,
+            ),
+            synthesize,
+        ),
+        (
+            MCPServerSettings(
+                profile=MCPProfile.AST_GREP_SYNTHESIS,
+                workspace_root=workspace,
+                source_root=source,
+                cases_dir=cases,
+                skill_root=Path("src/miner/skills/ast-grep").resolve(),
+            ),
+            None,
+        ),
+    )
+
+    tools = {}
+    for settings, handler in configurations:
+        server = build_server(
+            settings=settings,
+            fast_mcp_factory=MCPServer,
+            rule_synthesis_handler=handler,
+        )
+        for tool in await server.list_tools():
+            assert "Args:" not in tool.description, tool.name
+            for parameter, schema in tool.input_schema.get("properties", {}).items():
+                assert schema.get("description"), f"{tool.name}.{parameter}"
+            tools[tool.name] = tool
+
+    assert source.as_posix() in tools["list_src_files"].description
+    assert repo.as_posix() in tools["read_patch_diff"].description
+    output = tools["run_ast_grep_query"].input_schema["properties"]["output"]
+    assert output["enum"] == ["count", "sample", "full"]
+    assert output["default"] == "sample"
+    assert "metavariable captures" in output["description"]
+    sample_size = tools["run_ast_grep_query"].input_schema["properties"]["sample_size"]
+    assert sample_size["minimum"] == 1
+    assert sample_size["maximum"] == 100
+    assert tools["fetch_cve"].input_schema["properties"]["cve_id"]["pattern"].startswith("^CVE-")
 
 
 @pytest.mark.asyncio
@@ -368,8 +433,7 @@ async def test_mcp_ast_grep_tools_forward_query_and_debug_separately(
         query_call.update(kwargs)
         return "report"
 
-    def debug(target_dir, **kwargs):
-        debug_call["target_dir"] = target_dir
+    def debug(**kwargs):
         debug_call.update(kwargs)
         return "Debug CST:\n(tree)\n"
 
@@ -390,15 +454,15 @@ async def test_mcp_ast_grep_tools_forward_query_and_debug_separately(
     assert query_call["output"] == "full"
     assert query_call["sample_size"] == 7
     assert "debug_query" not in query_call
+    assert "target" not in inspect.signature(server.tools["debug_ast_grep_pattern"]).parameters
 
     result = await server.tools["debug_ast_grep_pattern"](
-        "cases",
         "c",
         "copy($A);",
         debug_query="cst",
     )
 
-    assert debug_call["target_dir"] == cases
+    assert debug_call["working_dir"] == cases
     assert debug_call["pattern"] == "copy($A);"
     assert debug_call["debug_query"] == "cst"
     assert "query_type" not in debug_call

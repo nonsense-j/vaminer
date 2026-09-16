@@ -21,7 +21,7 @@ MAX_SKILL_RESOURCE_BYTES = 256 * 1024
 MAX_SKILL_RESOURCE_LINES = 200
 AST_GREP_EXPERIENCES_RESOURCE = "references/experiences.md"
 _EXPERIENCE_LINE = re.compile(
-    r"^- \[(?P<lesson_id>[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*)\] (?P<lesson>.+)$"
+    r"^- \[(?P<lesson_id>(?:C\+\+|[A-Za-z][A-Za-z0-9]*)-[1-9][0-9]*)\] (?P<lesson>.+)$"
 )
 _EXPERIENCE_HEADER = """# AST-Grep Query-Writing Experiences
 
@@ -187,7 +187,7 @@ def _read_ast_grep_experiences(path: Path) -> list[AstGrepExperience]:
         experiences.append(
             AstGrepExperience(
                 mode=AstGrepExperienceMode.ADD,
-                lesson_id=match.group("lesson_id"),
+                lesson_id=match.group("lesson_id").replace("C++", "CPP"),
                 lesson=match.group("lesson"),
             )
         )

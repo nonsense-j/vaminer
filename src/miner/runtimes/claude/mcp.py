@@ -10,9 +10,43 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import wraps
 from pathlib import Path
-from typing import Any, Literal, NoReturn, get_type_hints
+from typing import Any, NoReturn, get_type_hints
 
 from ...models.anchors import AnchorPlanRequest, AnchorSynthesisResult
+from ...models.tool import (
+    AnchorPlanInput,
+    AstGrepDebugQuery,
+    AstGrepLanguage,
+    AstGrepOutput,
+    AstGrepPattern,
+    AstGrepQuery,
+    AstGrepQueryType,
+    AstGrepSampleSize,
+    AstGrepTarget,
+    BuggyCommitSha,
+    CVEId,
+    CaseArtifactContent,
+    CaseArtifactPath,
+    FetchExtraNotes,
+    FixedCommitSha,
+    GitHubCommitUrl,
+    GitHubIssueUrl,
+    PatchPath,
+    ReadEndLine,
+    ReadFullFile,
+    ReadStartLine,
+    RepositoryUrl,
+    SkillResourceLimit,
+    SkillResourcePath,
+    SourceFilePath,
+    SourceGlob,
+    SourceListLimit,
+    SourceListPath,
+    SourceSearchLimit,
+    SourceSearchMode,
+    SourceSearchPath,
+    SourceSearchPattern,
+)
 from ...tools.ast_grep import debug_pattern, run_query
 from ...tools.errors import ToolFeedbackError, ToolInputError, ToolUnavailableError, tool_error_feedback
 from ...tools.cases import list_case_artifacts as list_cases_impl
@@ -214,7 +248,7 @@ class _ToolRegistrar:
             })
         raise error
 
-    def tool(self, *, name: str) -> Callable[[Callable[..., Any]], Any]:
+    def tool(self, *, name: str, description: str | None = None) -> Callable[[Callable[..., Any]], Any]:
         def register(function: Callable[..., Any]) -> Any:
             if inspect.iscoroutinefunction(function):
                 @wraps(function)
@@ -231,12 +265,14 @@ class _ToolRegistrar:
                     except Exception as error:
                         self._failed(name, error)
             wrapped.__annotations__ = get_type_hints(function, include_extras=True)
-            return self.server.tool(name=name)(wrapped)
+            return self.server.tool(name=name, description=description)(wrapped)
         return register
 
 
 def _register(server: Any, name: str, function: Callable[..., Any]) -> None:
-    server.tool(name=name)(function)
+    if function.__doc__ is not None:
+        function.__doc__ = inspect.cleandoc(function.__doc__)
+    server.tool(name=name, description=inspect.getdoc(function) or "")(function)
 
 
 def _register_src_tools(server: Any, root: Path) -> None:
@@ -246,30 +282,21 @@ def _register_src_tools(server: Any, root: Path) -> None:
     )
 
     def list_src_files(
-        path: str | None = None,
-        glob: str | None = None,
-        max_results: int = 500,
+        path: SourceListPath = None,
+        glob: SourceGlob = None,
+        max_results: SourceListLimit = 500,
     ) -> str:
+        """List source files under the bound source root."""
         return list_src_impl(root, path=path, glob=glob, max_results=max_results)
 
-    list_src_files.__doc__ = (
-        """List source files under the bound Src Root.
-
-        Args:
-            path: Optional directory relative to the bound source root.
-            glob: Optional ripgrep glob expression.
-            max_results: Maximum number of paths to return.
-        """
-        + root_note
-    )
-
     def search_src_files(
-        pattern: str,
-        path: str | None = None,
-        mode: Literal["literal", "regex"] = "literal",
-        glob: str | None = None,
-        max_results: int = 100,
+        pattern: SourceSearchPattern,
+        path: SourceSearchPath = None,
+        mode: SourceSearchMode = "literal",
+        glob: SourceGlob = None,
+        max_results: SourceSearchLimit = 100,
     ) -> str:
+        """Search files under the bound source root."""
         return search_src_impl(
             root,
             pattern,
@@ -279,25 +306,13 @@ def _register_src_tools(server: Any, root: Path) -> None:
             max_results=max_results,
         )
 
-    search_src_files.__doc__ = (
-        """Search files under the bound Src Root.
-
-        Args:
-            pattern: Single-line literal text or regular expression to search.
-            path: Optional file or directory relative to the bound source root.
-            mode: ``literal`` for exact text or ``regex`` for a regular expression.
-            glob: Optional ripgrep glob expression.
-            max_results: Maximum number of matching lines to return.
-        """
-        + root_note
-    )
-
     def read_src_file(
-        path: str,
-        start_line: int = 1,
-        end_line: int | None = None,
-        full_file: bool = False,
+        path: SourceFilePath,
+        start_line: ReadStartLine = 1,
+        end_line: ReadEndLine = None,
+        full_file: ReadFullFile = False,
     ) -> str:
+        """Read a bounded line range or one complete source file."""
         return read_src_impl(
             root,
             path,
@@ -306,17 +321,8 @@ def _register_src_tools(server: Any, root: Path) -> None:
             full_file=full_file,
         )
 
-    read_src_file.__doc__ = (
-        """Read a bounded line range or one complete source file.
-
-        Args:
-            path: Source file path relative to the bound source root.
-            start_line: First line to return; line numbers are one-based and ``end_line`` is inclusive.
-            end_line: Optional inclusive last line to return.
-            full_file: Return the complete file instead of a bounded line range.
-        """
-        + root_note
-    )
+    for function in (list_src_files, search_src_files, read_src_file):
+        function.__doc__ = (function.__doc__ or "") + root_note
 
     _register(server, "list_src_files", list_src_files)
     _register(server, "search_src_files", search_src_files)
@@ -329,29 +335,23 @@ def _register_case_tools(server: Any, cases_dir: Path, *, writable: bool) -> Non
 
         return list_cases_impl(cases_dir)
 
-    def read_case_artifact(path: str, start_line: int = 1, end_line: int | None = None) -> str:
-        """Read a bounded line range from one Case Artifact.
-
-        Args:
-            path: Bare artifact filename matching ``caseN.ext`` or ``caseN_varM.ext``.
-            start_line: One-based first line to return.
-            end_line: Optional inclusive last line to return.
-        """
+    def read_case_artifact(
+        path: CaseArtifactPath,
+        start_line: ReadStartLine = 1,
+        end_line: ReadEndLine = None,
+    ) -> str:
+        """Read a bounded line range from one Case Artifact."""
 
         return read_case_impl(cases_dir, path, start_line=start_line, end_line=end_line)
 
     _register(server, "list_case_artifacts", list_case_artifacts)
     _register(server, "read_case_artifact", read_case_artifact)
     if writable:
-        def write_case_artifact(path: str, content: str) -> str:
-            """Write a Case Artifact named ``caseN.<ext>`` or ``caseN_varM.<ext>``.
-
-            Args:
-                path: Bare artifact filename matching ``caseN.ext`` or ``caseN_varM.ext``.
-                content: Non-empty artifact content.
-
-            Invalid filenames are rejected before writing. Correct the filename and retry.
-            """
+        def write_case_artifact(
+            path: CaseArtifactPath,
+            content: CaseArtifactContent,
+        ) -> str:
+            """Write one Case Artifact."""
 
             return write_case_impl(cases_dir, path, content)
 
@@ -359,42 +359,34 @@ def _register_case_tools(server: Any, cases_dir: Path, *, writable: bool) -> Non
 
 
 def _register_issue_tools(server: Any, settings: MCPServerSettings) -> None:
-    def fetch_cve(cve_id: str) -> dict[str, Any]:
-        """Fetch CVE details from NVD and GitHub Advisory.
-
-        Args:
-            cve_id: CVE identifier such as ``CVE-2018-9159``.
-        """
+    def fetch_cve(
+        cve_id: CVEId,
+    ) -> dict[str, Any]:
+        """Fetch a CVE description, references, repository, and linked commits."""
 
         return _json_value(fetch_cve_plain(cve_id))
 
-    def fetch_github_issue(issue_url: str, fetch_extra_notes: bool = False) -> dict[str, Any]:
-        """Fetch a GitHub issue and its linked evidence.
-
-        Args:
-            issue_url: Full GitHub issue URL.
-            fetch_extra_notes: Whether to fetch issue comments as extra notes.
-        """
+    def fetch_github_issue(
+        issue_url: GitHubIssueUrl,
+        fetch_extra_notes: FetchExtraNotes = False,
+    ) -> dict[str, Any]:
+        """Fetch a GitHub issue and its linked evidence."""
 
         return _json_value(fetch_github_issue_plain(issue_url, fetch_extra_notes))
 
-    def parse_commit(commit_url: str) -> dict[str, Any]:
-        """Fetch metadata for one GitHub commit URL.
-
-        Args:
-            commit_url: Full GitHub commit URL.
-        """
+    def parse_commit(
+        commit_url: GitHubCommitUrl,
+    ) -> dict[str, Any]:
+        """Fetch metadata for one GitHub commit."""
 
         return _json_value(parse_commit_plain(commit_url))
 
-    def clone_repo(repo_url: str, buggy_sha: str, fixed_sha: str | None = None) -> dict[str, Any]:
-        """Clone selected revisions into the task workspace.
-
-        Args:
-            repo_url: Repository URL (for example, ``https://github.com/owner/repo``).
-            buggy_sha: Commit SHA to check out on the ``buggy`` branch.
-            fixed_sha: Optional commit SHA to check out on the ``fixed`` branch.
-        """
+    def clone_repo(
+        repo_url: RepositoryUrl,
+        buggy_sha: BuggyCommitSha,
+        fixed_sha: FixedCommitSha = None,
+    ) -> dict[str, Any]:
+        """Clone selected repository revisions into the task workspace."""
         return _json_value(
             clone_repository(
                 settings.workspace_root,
@@ -423,7 +415,10 @@ def _register_root_cause_tools(server: Any, settings: MCPServerSettings) -> None
     if settings.fixed_diff:
         assert settings.repo_path is not None
 
-        def read_patch_diff(path: str | None = None) -> str:
+        def read_patch_diff(
+            path: PatchPath = None,
+        ) -> str:
+            """Read the buggy-to-fixed diffstat or a path-scoped patch."""
             assert settings.repo_path is not None
             return read_patch_diff_from_repo(settings.repo_path, path)
 
@@ -431,14 +426,7 @@ def _register_root_cause_tools(server: Any, settings: MCPServerSettings) -> None
             f"\n\nBound repository root: `{settings.repo_path.as_posix()}`. "
             "The `path` argument is relative to this root."
         )
-        read_patch_diff.__doc__ = (
-            """Read the diff between the bound ``buggy`` and ``fixed`` revisions.
-
-            Args:
-                path: Optional file or directory relative to the bound repository root.
-            """
-            + root_note
-        )
+        read_patch_diff.__doc__ = (read_patch_diff.__doc__ or "") + root_note
 
         _register(server, "read_patch_diff", read_patch_diff)
 
@@ -473,12 +461,10 @@ def _register_rule_tools(
     _register_case_tools(server, settings.cases_dir, writable=False)
     synthesize = handler or _default_synthesis_handler(settings)
 
-    async def synthesize_anchor_plan(plan: AnchorPlanRequest) -> list[AnchorSynthesisResult]:
-        """Submit the complete Anchor Plan for synthesis.
-
-        Args:
-            plan: Complete plan whose intents should be synthesized; reuse entries preserve prior results.
-        """
+    async def synthesize_anchor_plan(
+        plan: AnchorPlanInput,
+    ) -> list[AnchorSynthesisResult]:
+        """Submit the complete Anchor Plan for synthesis."""
 
         return await synthesize(plan)
 
@@ -490,23 +476,19 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
     _register_src_tools(server, settings.source_root)
     _register_case_tools(server, settings.cases_dir, writable=False)
 
-    def list_skill_resources(max_files: int = 100) -> str:
-        """List resources available in the bound ``ast-grep`` skill.
-
-        Args:
-            max_files: Maximum number of resource paths to return.
-        """
+    def list_skill_resources(
+        max_files: SkillResourceLimit = 100,
+    ) -> str:
+        """List resources available in the bound ast-grep skill."""
 
         return list_skills_impl({"ast-grep": settings.skill_root}, "ast-grep", max_files=max_files)
 
-    def read_skill_resource(resource: str, start_line: int = 1, end_line: int | None = None) -> str:
-        """Read a bounded line range from the bound ``ast-grep`` skill resource.
-
-        Args:
-            resource: Relative resource path within the bound skill.
-            start_line: One-based first line to return.
-            end_line: Optional inclusive last line to return.
-        """
+    def read_skill_resource(
+        resource: SkillResourcePath,
+        start_line: ReadStartLine = 1,
+        end_line: ReadEndLine = None,
+    ) -> str:
+        """Read a bounded line range from an ast-grep skill resource."""
 
         return read_skill_impl(
             {"ast-grep": settings.skill_root},
@@ -517,25 +499,14 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
         )
 
     async def run_ast_grep_query(
-        target: Literal["src", "cases"],
-        language: str,
-        query_type: Literal["pattern", "rule"],
-        query: str,
-        output: Literal["count", "sample", "full"] = "sample",
-        sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
+        target: AstGrepTarget,
+        language: AstGrepLanguage,
+        query_type: AstGrepQueryType,
+        query: AstGrepQuery,
+        output: AstGrepOutput = "sample",
+        sample_size: AstGrepSampleSize = MINER_AST_GREP_SAMPLE_SIZE,
     ) -> str:
-        """Run one raw pattern or YAML rule against a bound target.
-
-        Args:
-            target: Bound search target: ``src`` or ``cases``.
-            language: ast-grep language identifier.
-            query_type: ``pattern`` for a raw pattern or ``rule`` for a YAML rule body.
-            query: Raw pattern text or YAML rule body to execute.
-            output: Match output mode: ``count``, ``sample``, or ``full``.
-            sample_size: Maximum number of matches shown in ``sample`` mode.
-
-        Full output includes metavariable captures.
-        """
+        """Run one raw pattern or YAML rule against a bound target."""
 
         if target not in {"src", "cases"}:
             raise ToolInputError("target must be 'src' or 'cases'")
@@ -559,30 +530,19 @@ def _register_synthesis_tools(server: Any, settings: MCPServerSettings) -> None:
         )
 
     async def debug_ast_grep_pattern(
-        target: Literal["src", "cases"],
-        language: str,
-        pattern: str,
-        debug_query: Literal["pattern", "ast", "cst", "sexp"] = "pattern",
+        language: AstGrepLanguage,
+        pattern: AstGrepPattern,
+        debug_query: AstGrepDebugQuery = "pattern",
     ) -> str:
-        """Inspect ast-grep's native tree for one raw pattern.
+        """Inspect ast-grep's native tree for one raw pattern."""
 
-        Args:
-            target: Bound search target: ``src`` or ``cases``.
-            language: ast-grep language identifier.
-            pattern: Raw ast-grep pattern to inspect.
-            debug_query: Tree representation: ``pattern``, ``ast``, ``cst``, or ``sexp``.
-        """
-
-        if target not in {"src", "cases"}:
-            raise ToolInputError("target must be 'src' or 'cases'")
-        root = settings.source_root if target == "src" else settings.cases_dir
         return await asyncio.to_thread(
             debug_pattern,
-            root,
             language=language,
             pattern=pattern,
             debug_query=debug_query,
             timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+            working_dir=settings.cases_dir,
         )
 
     _register(server, "list_skill_resources", list_skill_resources)

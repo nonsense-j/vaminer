@@ -1,106 +1,67 @@
 ---
 name: vas-scanner
-description: Run a bundled VAS rule against a repository with ast-grep discovery and parallel Agent task analysis.
+description: Scan a repository for defects defined by a bundled VAS rule. Use when asked to run a VAS-<digits> rule against a repository.
 ---
 
 # VAS Scanner
 
-Use this skill to scan one repository with one bundled `VAS-<digits>` rule. The
-Python CLI performs four mechanical actions: preflight, Anchor discovery and
-task preparation, result recording, and final report aggregation. The main
-Agent owns overview creation, task scheduling, retries, and subagent analysis.
+Scan one repository with one bundled VAS rule. The required inputs are a `VAS-<digits>` rule ID and the target repository path. Use the current repository when the target is unambiguous; ask for the missing rule ID or repository only when it cannot be inferred.
 
-## Requirements
+The bundled scanner command is `python3 <skill-dir>/scripts/scan.py`. It validates the environment, creates candidate-analysis tasks, validates task results, and assembles the final report. The coordinating agent owns the general workflow management and task delegation. Each analysis subagent owns one generated task; the task Markdown is its complete contract.
 
-- Python 3.12 or newer with its standard library.
-- Native `ast-grep` or `sg` available on `PATH`.
-- The complete skill directory, including `scripts/`, `rules/`, and this file.
-- A readable target repository with a writable `.vas` directory.
+## Scan Workflow
 
-The scanner does not require VAMiner, `portalocker`, `ast-grep-py`, or any
-other Python package.
-
-## Run protocol
-
-1. Run preflight before doing repository work:
+1. Run the scanner preflight:
 
    ```bash
    python3 <skill-dir>/scripts/scan.py preflight <VAS-ID> <repo-path>
    ```
 
-   Stop on failure and tell the user which dependency or path must be fixed.
+   Continue only when preflight reports `ready`. On failure, report the feedback to user.
 
-2. Ensure `<repo>/.vas/repository_overview.md` exists. Reuse it by default. If
-   the user requests refresh, inspect the README first, then the directory
-   layout and representative source files, and write a concise overview with
-   `Code Layout`, `Module Relations`, and `Key Interfaces`.
+2. Check the repository overview:
 
-3. Prepare the run:
+   Ensure `<repo-path>/.vas/repository_overview.md` exists. Reuse an existing overview unless the user requests a refresh. If the overview is missing or needs to be refreshed, create it with an **explore subagent** to *inspect the repository README, source layout, and representative entry points, then summarize `Code Layout`, `Module Relations`, and `Key Interfaces`*. Keep the overview general and free of rule-specific conclusions.
+
+3. Prepare the scan:
 
    ```bash
    python3 <skill-dir>/scripts/scan.py prepare <VAS-ID> <repo-path>
    ```
 
-   Read the returned configuration and task list. Preparation creates an
-   immutable `manifest.json`, a run-local overview snapshot, one Markdown task
-   per admitted candidate, and empty `shared_checks/` and `results/`
-   directories. The manifest reports the configured concurrency and task count.
+   Keep the returned `run_dir`, `tasks`, and `concurrency`. This will create tasks under `<run-dir>/tasks`, each targets a candidate file, ordered by their analysis priority. A task count of zero is valid and proceeds directly to finalization.
 
-4. Schedule tasks in task ID order with at most the manifest concurrency. Start
-   one fresh subagent per task. Give each subagent only its task Markdown path.
-   When a subagent fails, times out, or leaves no result, retry that task before
-   finalization. A task is complete when `results/TASK-xxxx.json` exists.
+4. Delegate analysis tasks to subagents:
 
-5. After every task has recorded successfully, finalize once:
+   Every created task should be delegated to a fresh analysis subagent, processed in the task ID order. You should maintain a maximum of `concurrency` (from the prepare output or `manifest.json`) subagents running in parallel. The task Markdown is the **complete contract for each subagent**. Invoke and delegate the next task to a new subagent when a task completes.
+
+   Track each delegation by task ID. After a subagent finishes, confirm that `<run-dir>/results/<task-id>.json` exists. If the subagent fails, times out, or returns without that result file, delegate the same task to a fresh subagent before moving to the next task. Continue until every prepared task has a result file.
+
+5. Finalize the scan:
 
    ```bash
    python3 <skill-dir>/scripts/scan.py finalize <run-dir>
    ```
 
-   A nonzero result identifies missing, extra, or invalid task results. Retry
-   the named tasks and call finalize again. A successful call writes the final
-   `report.json` and returns its path and report count.
+   If finalization identifies missing or invalid task results, retry only those tasks and finalize again. The scan is complete when finalization reports `complete` and writes `report.json`.
 
-## Run layout
+## Run Directory
+
+Each scan stores its artifacts under `<repo-path>/.vas/<VAS-ID>/run_<timestamp>/`:
 
 ```text
-<repo>/.vas/<VAS-ID>/run_<timestamp>/
-├── manifest.json
-├── repository_overview.md
-├── tasks/TASK-0001.md
-├── shared_checks/<repository-relative-file>.md
-├── results/TASK-0001.json
-└── report.json
+<run-dir>/
+├── manifest.json                              # Task list and scan configuration (concurrency, etc.)
+├── repository_overview.md                     # Snapshot of the repository overview
+├── tasks/
+│   └── TASK-0001.md                           # Complete contract (subagent instruction) for one analysis task
+├── shared_checks/
+│   └── <repository-relative-file>.md           # Reusable facts recorded during analysis (mirrorred file path from the repository)
+├── results/
+│   └── TASK-0001.json                         # Reports produced by one completed task
+└── report.json                                # Final deduplicated report created by finalize
 ```
 
-`manifest.json` is the immutable task identity and configuration map. It has
-the rule ID, repository, overview snapshot name, concurrency settings, task
-count, and `task_id` to candidate-file mappings. It has no subagent status.
+## Output
 
-`results/TASK-xxxx.json` contains that task's `reports` array. A task with no
-defect writes `[]`. `shared_checks/` contains the task's Anchor Facts as
-navigation context for other agents; missing shared context calls for fresh
-source inspection.
-
-## Subagent contract
-
-The task Markdown is the complete analysis handoff. Read the overview first,
-inspect every listed Anchor location in the primary candidate, and trace related
-files when needed. Before reading a related file, read its mirrored Markdown in
-`shared_checks/` when present and decide whether the Fact applies.
-
-Return exactly one object with `anchorFacts` and `reports`, then call:
-
-```bash
-python3 <skill-dir>/scripts/scan.py record <run-dir> <task-id> <<'JSON'
-<the JSON object>
-JSON
-```
-
-`record` checks only the JSON shape and basic field types. It writes Facts to
-the candidate's shared-check Markdown and writes reports to the task result
-file. If it reports a schema error, correct the object and retry. End only
-after record succeeds.
-
-The task template is defined in `scripts/prompt.py`; update that template when
-the subagent contract changes.
+Return the report path and report count to the user. If execution cannot complete, identify the failed phase and preserve the run directory so the scan can be resumed.

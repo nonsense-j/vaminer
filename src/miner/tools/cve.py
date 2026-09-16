@@ -7,16 +7,13 @@ from urllib.parse import urlparse
 import httpx
 
 from ..models.issue import CommitRawInfo, IssueRawInfo
+from ..models.tool import CVEId
 from .errors import ToolInputError, ToolUnavailableError
 from .github import _fetch_commit_info, _headers
 
 
-def fetch_cve(cve_id: str) -> IssueRawInfo:
-    """Fetch CVE details from NVD and GitHub Advisory (fallback: cve-search). Result includes description, repo URL, references URLs, and any linked commits.
-
-    Args:
-        cve_id: CVE identifier (e.g., CVE-2018-9159)
-    """
+def fetch_cve(cve_id: CVEId) -> IssueRawInfo:
+    """Fetch a CVE description, references, repository, and linked commits."""
     if re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,}", cve_id) is None:
         raise ToolInputError("cve_id must match CVE-YYYY-NNNN (at least four digits after the year)")
     failures: list[str] = []

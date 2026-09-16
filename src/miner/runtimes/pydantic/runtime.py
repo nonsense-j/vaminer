@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from pydantic import BaseModel
 from pydantic_ai import (
@@ -38,7 +38,34 @@ from ...mining.synthesis import (
     AnchorSynthesisSession,
 )
 from ...mining.validation.analysis import finalize_root_cause_cases
-from ...models.anchors import AnchorPlanRequest, AnchorSynthesisResult
+from ...models.anchors import AnchorSynthesisResult
+from ...models.tool import (
+    AnchorPlanInput,
+    AstGrepDebugQuery,
+    AstGrepLanguage,
+    AstGrepOutput,
+    AstGrepPattern,
+    AstGrepQuery,
+    AstGrepQueryType,
+    AstGrepSampleSize,
+    AstGrepTarget,
+    CaseArtifactContent,
+    CaseArtifactPath,
+    PatchPath,
+    ReadEndLine,
+    ReadFullFile,
+    ReadStartLine,
+    SkillResourceLimit,
+    SkillResourcePath,
+    SourceFilePath,
+    SourceGlob,
+    SourceListLimit,
+    SourceListPath,
+    SourceSearchLimit,
+    SourceSearchMode,
+    SourceSearchPath,
+    SourceSearchPattern,
+)
 from ...models.vas import RuleGenerationDraft
 from ...tools.ast_grep import debug_pattern, run_query
 from ...tools.errors import ToolInputError
@@ -240,10 +267,11 @@ class PydanticAIRuntime:
         )
 
         async def list_src_files(
-            path: str | None = None,
-            glob: str | None = None,
-            max_results: int = 500,
+            path: SourceListPath = None,
+            glob: SourceGlob = None,
+            max_results: SourceListLimit = 500,
         ) -> str:
+            """List source files under the bound source root."""
             return await asyncio.to_thread(
                 list_src_impl,
                 root,
@@ -252,24 +280,14 @@ class PydanticAIRuntime:
                 max_results=max_results,
             )
 
-        list_src_files.__doc__ = (
-            """List source files under the bound Src Root.
-
-            Args:
-                path: Optional directory relative to the bound source root.
-                glob: Optional ripgrep glob expression.
-                max_results: Maximum number of paths to return.
-            """
-            + root_note
-        )
-
         async def search_src_files(
-            pattern: str,
-            path: str | None = None,
-            mode: Literal["literal", "regex"] = "literal",
-            glob: str | None = None,
-            max_results: int = 100,
+            pattern: SourceSearchPattern,
+            path: SourceSearchPath = None,
+            mode: SourceSearchMode = "literal",
+            glob: SourceGlob = None,
+            max_results: SourceSearchLimit = 100,
         ) -> str:
+            """Search files under the bound source root."""
             return await asyncio.to_thread(
                 search_src_impl,
                 root,
@@ -280,25 +298,13 @@ class PydanticAIRuntime:
                 max_results=max_results,
             )
 
-        search_src_files.__doc__ = (
-            """Search files under the bound Src Root.
-
-            Args:
-                pattern: Single-line literal text or regular expression to search.
-                path: Optional file or directory relative to the bound source root.
-                mode: ``literal`` for exact text or ``regex`` for a regular expression.
-                glob: Optional ripgrep glob expression.
-                max_results: Maximum number of matching lines to return.
-            """
-            + root_note
-        )
-
         def read_src_file(
-            path: str,
-            start_line: int = 1,
-            end_line: int | None = None,
-            full_file: bool = False,
+            path: SourceFilePath,
+            start_line: ReadStartLine = 1,
+            end_line: ReadEndLine = None,
+            full_file: ReadFullFile = False,
         ) -> str:
+            """Read a bounded line range or one complete source file."""
             return read_src_impl(
                 root,
                 path,
@@ -307,17 +313,8 @@ class PydanticAIRuntime:
                 full_file=full_file,
             )
 
-        read_src_file.__doc__ = (
-            """Read a bounded line range or one complete source file.
-
-            Args:
-                path: Source file path relative to the bound source root.
-                start_line: First line to return; line numbers are one-based and ``end_line`` is inclusive.
-                end_line: Optional inclusive last line to return.
-                full_file: Return the complete file instead of a bounded line range.
-            """
-            + root_note
-        )
+        for function in (list_src_files, search_src_files, read_src_file):
+            function.__doc__ = (function.__doc__ or "") + root_note
 
         return [list_src_files, search_src_files, read_src_file]
 
@@ -329,31 +326,18 @@ class PydanticAIRuntime:
             return list_cases_impl(cases_dir)
 
         def read_case_artifact(
-            path: str,
-            start_line: int = 1,
-            end_line: int | None = None,
+            path: CaseArtifactPath,
+            start_line: ReadStartLine = 1,
+            end_line: ReadEndLine = None,
         ) -> str:
-            """Read a bounded line range from one Case Artifact.
-
-            Args:
-                path: Bare artifact filename matching ``caseN.ext`` or ``caseN_varM.ext``.
-                start_line: One-based first line to return.
-                end_line: Optional inclusive last line to return.
-            """
+            """Read a bounded line range from one Case Artifact."""
 
             return read_case_impl(cases_dir, path, start_line=start_line, end_line=end_line)
 
         tools: list[Any] = [list_case_artifacts, read_case_artifact]
         if writable:
-            def write_case_artifact(path: str, content: str) -> str:
-                """Write a Case Artifact named ``caseN.<ext>`` or ``caseN_varM.<ext>``.
-
-                Args:
-                    path: Bare artifact filename matching ``caseN.ext`` or ``caseN_varM.ext``.
-                    content: Non-empty artifact content.
-
-                Invalid filenames are rejected before writing. Correct the filename and retry.
-                """
+            def write_case_artifact(path: CaseArtifactPath, content: CaseArtifactContent) -> str:
+                """Write one Case Artifact."""
 
                 return write_case_impl(cases_dir, path, content)
 
@@ -386,7 +370,8 @@ class PydanticAIRuntime:
                 if authority.repo_path is None:
                     raise PydanticAIRuntimeConfigurationError("fixed diff requires repo_path")
 
-                def read_patch_diff(path: str | None = None) -> str:
+                def read_patch_diff(path: PatchPath = None) -> str:
+                    """Read the buggy-to-fixed diffstat or a path-scoped patch."""
                     assert authority.repo_path is not None
                     return read_patch_diff_from_repo(authority.repo_path, path)
 
@@ -394,14 +379,7 @@ class PydanticAIRuntime:
                     f"\n\nBound repository root: `{authority.repo_path.as_posix()}`. "
                     "The `path` argument is relative to this root."
                 )
-                read_patch_diff.__doc__ = (
-                    """Read the diff between the bound ``buggy`` and ``fixed`` revisions.
-
-                    Args:
-                        path: Optional file or directory relative to the bound repository root.
-                    """
-                    + root_note
-                )
+                read_patch_diff.__doc__ = (read_patch_diff.__doc__ or "") + root_note
 
                 tools.append(read_patch_diff)
             capabilities.extend((compaction_capability(), cache_stability_capability()))
@@ -409,12 +387,8 @@ class PydanticAIRuntime:
             authority = cast(RuleGenerationAuthority, task.authority)
             session = AnchorSynthesisSession(authority, workspace_root=task.workspace_root, runtime=self)
 
-            async def synthesize_anchor_plan(plan: AnchorPlanRequest) -> list[AnchorSynthesisResult]:
-                """Submit the complete Anchor Plan for synthesis.
-
-                Args:
-                    plan: Complete plan whose intents should be synthesized; reuse entries preserve prior results.
-                """
+            async def synthesize_anchor_plan(plan: AnchorPlanInput) -> list[AnchorSynthesisResult]:
+                """Submit the complete Anchor Plan for synthesis."""
                 assert session is not None
                 return await session.synthesize(plan)
 
@@ -426,12 +400,8 @@ class PydanticAIRuntime:
             tools.extend(self._src_tools(authority.source_root))
             tools.extend(self._case_tools(authority.cases_dir, writable=False))
 
-            def list_skill_resources(max_files: int = 100) -> str:
-                """List resources available in the bound ``ast-grep`` skill.
-
-                Args:
-                    max_files: Maximum number of resource paths to return.
-                """
+            def list_skill_resources(max_files: SkillResourceLimit = 100) -> str:
+                """List resources available in the bound ast-grep skill."""
 
                 return list_skills_impl(
                     {"ast-grep": authority.skill_root},
@@ -440,17 +410,11 @@ class PydanticAIRuntime:
                 )
 
             def read_skill_resource(
-                resource: str,
-                start_line: int = 1,
-                end_line: int | None = None,
+                resource: SkillResourcePath,
+                start_line: ReadStartLine = 1,
+                end_line: ReadEndLine = None,
             ) -> str:
-                """Read a bounded line range from the bound ``ast-grep`` skill resource.
-
-                Args:
-                    resource: Relative resource path within the bound skill.
-                    start_line: One-based first line to return.
-                    end_line: Optional inclusive last line to return.
-                """
+                """Read a bounded line range from an ast-grep skill resource."""
 
                 return read_skill_impl(
                     {"ast-grep": authority.skill_root},
@@ -461,25 +425,14 @@ class PydanticAIRuntime:
                 )
 
             async def run_ast_grep_query(
-                target: Literal["src", "cases"],
-                language: str,
-                query_type: Literal["pattern", "rule"],
-                query: str,
-                output: Literal["count", "sample", "full"] = "sample",
-                sample_size: int = MINER_AST_GREP_SAMPLE_SIZE,
+                target: AstGrepTarget,
+                language: AstGrepLanguage,
+                query_type: AstGrepQueryType,
+                query: AstGrepQuery,
+                output: AstGrepOutput = "sample",
+                sample_size: AstGrepSampleSize = MINER_AST_GREP_SAMPLE_SIZE,
             ) -> str:
-                """Run one raw pattern or YAML rule against a bound target.
-
-                Args:
-                    target: Bound search target: ``src`` or ``cases``.
-                    language: ast-grep language identifier.
-                    query_type: ``pattern`` for a raw pattern or ``rule`` for a YAML rule body.
-                    query: Raw pattern text or YAML rule body to execute.
-                    output: Match output mode: ``count``, ``sample``, or ``full``.
-                    sample_size: Maximum number of matches shown in ``sample`` mode.
-
-                Full output includes metavariable captures.
-                """
+                """Run one raw pattern or YAML rule against a bound target."""
 
                 if target not in {"src", "cases"}:
                     raise ToolInputError("target must be 'src' or 'cases'")
@@ -503,30 +456,19 @@ class PydanticAIRuntime:
                 )
 
             async def debug_ast_grep_pattern(
-                target: Literal["src", "cases"],
-                language: str,
-                pattern: str,
-                debug_query: Literal["pattern", "ast", "cst", "sexp"] = "pattern",
+                language: AstGrepLanguage,
+                pattern: AstGrepPattern,
+                debug_query: AstGrepDebugQuery = "pattern",
             ) -> str:
-                """Inspect ast-grep's native tree for one raw pattern.
+                """Inspect ast-grep's native tree for one raw pattern."""
 
-                Args:
-                    target: Bound search target: ``src`` or ``cases``.
-                    language: ast-grep language identifier.
-                    pattern: Raw ast-grep pattern to inspect.
-                    debug_query: Tree representation: ``pattern``, ``ast``, ``cst``, or ``sexp``.
-                """
-
-                if target not in {"src", "cases"}:
-                    raise ToolInputError("target must be 'src' or 'cases'")
-                root = authority.source_root if target == "src" else authority.cases_dir
                 return await asyncio.to_thread(
                     debug_pattern,
-                    root,
                     language=language,
                     pattern=pattern,
                     debug_query=debug_query,
                     timeout_seconds=MINER_AST_GREP_TIMEOUT_SECONDS,
+                    working_dir=authority.cases_dir,
                 )
 
             tools.extend((list_skill_resources, read_skill_resource, run_ast_grep_query, debug_ast_grep_pattern))

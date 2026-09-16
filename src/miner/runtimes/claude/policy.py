@@ -130,7 +130,7 @@ class PolicyCompiler:
 
     def resolve_executable(self, environment: dict[str, str]) -> str:
         configured = os.path.expanduser(os.fspath(self.config.executable))
-        resolved = shutil.which(configured, path=environment.get("PATH"))
+        resolved = self.config.resolve_executable(path=environment.get("PATH"))
         if resolved is None:
             if os.path.dirname(configured):
                 path = Path(configured).absolute()

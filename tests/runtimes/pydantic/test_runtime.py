@@ -1,5 +1,6 @@
 """Behavior tests for the Pydantic AI runtime."""
 
+import inspect
 from functools import partial
 from pathlib import Path
 
@@ -231,10 +232,6 @@ def test_pydantic_phase_tools_match_closed_authority(tmp_path: Path):
     root_cause = _root_cause()
     runtime = PydanticAIRuntime(model=TestModel())
     src_tools = {tool.__name__: tool for tool in runtime._src_tools(source)}
-    assert "already rooted at the analyzed Src Root" in src_tools["list_src_files"].__doc__
-    assert source.as_posix() in src_tools["list_src_files"].__doc__
-    assert "file or directory" in src_tools["search_src_files"].__doc__
-    assert "one-based" in src_tools["read_src_file"].__doc__
 
     root_task = make_root_cause_task(
         IssueCollectionInfo(
@@ -251,6 +248,10 @@ def test_pydantic_phase_tools_match_closed_authority(tmp_path: Path):
         grounding_policy=GroundingPolicy.REPOSITORY_EVIDENCE,
     )
     assert _tool_names(runtime, root_task) == set(root_task.tools)
+    root_agent = runtime.build_agent(root_task, model=TestModel(), final_state=[])
+    list_src = root_agent._function_toolset.tools["list_src_files"].tool_def
+    assert "Args:" not in list_src.description
+    assert source.as_posix() in list_src.description
 
     inspection = inspect_example_suite(source)
     suite_task = make_root_cause_task(
@@ -304,6 +305,22 @@ def test_pydantic_phase_tools_match_closed_authority(tmp_path: Path):
         root_cause=root_cause,
     )
     assert _tool_names(runtime, synthesis_task) == set(synthesis_task.tools)
+    synthesis_agent = runtime.build_agent(synthesis_task, model=TestModel(), final_state=[])
+    query_tool = synthesis_agent._function_toolset.tools["run_ast_grep_query"]
+    debug_tool = synthesis_agent._function_toolset.tools["debug_ast_grep_pattern"]
+    assert "target" not in inspect.signature(debug_tool.function).parameters
+    for name, registered_tool in synthesis_agent._function_toolset.tools.items():
+        tool_definition = registered_tool.tool_def
+        assert "Args:" not in tool_definition.description, name
+        for parameter, schema in tool_definition.parameters_json_schema.get("properties", {}).items():
+            assert schema.get("description"), f"{name}.{parameter}"
+    output_schema = query_tool.tool_def.parameters_json_schema["properties"]["output"]
+    assert output_schema["enum"] == ["count", "sample", "full"]
+    assert output_schema["default"] == "sample"
+    assert "metavariable captures" in output_schema["description"]
+    sample_size_schema = query_tool.tool_def.parameters_json_schema["properties"]["sample_size"]
+    assert sample_size_schema["minimum"] == 1
+    assert sample_size_schema["maximum"] == 100
     assert not {"write_file", "write_case_artifact", "bash", "delegate"} & _tool_names(
         runtime, synthesis_task
     )
@@ -336,7 +353,6 @@ def test_pydantic_case_writer_rejects_bad_names_as_retryable_feedback(tmp_path: 
         "write_case_artifact"
     ]
 
-    assert "caseN.<ext>" in writer.__doc__
     with pytest.raises(ToolInputError, match="caseN"):
         writer("not-a-case.c", "content\n")
     assert not (cases / "not-a-case.c").exists()

@@ -6,6 +6,8 @@ import json
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -57,6 +59,21 @@ def _validate_language(language: str) -> None:
 def _validate_timeout(timeout_seconds: int) -> None:
     if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or timeout_seconds < 1:
         raise ToolInputError("timeout_seconds must be a positive integer")
+
+
+@contextmanager
+def _debug_working_root(preferred_dir: str | Path | None) -> Iterator[Path]:
+    if preferred_dir is not None:
+        root = Path(preferred_dir).resolve()
+        if root.is_dir():
+            yield root
+            return
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="vaminer-ast-grep-debug-") as temp_dir:
+            yield Path(temp_dir)
+    except OSError as exc:
+        raise ToolExecutionError(str(exc)) from exc
 
 
 def _stream_text(value: str | bytes | None) -> str:
@@ -303,17 +320,16 @@ def run_query(
 
 
 def debug_pattern(
-    target_dir: str | Path,
     *,
     language: str,
     pattern: str,
     debug_query: DebugQuery = "pattern",
     timeout_seconds: int = 60,
     executable: str | None = None,
+    working_dir: str | Path | None = None,
 ) -> str:
     """Return ast-grep's native debug tree for one raw pattern."""
 
-    root = _validate_root(target_dir)
     _validate_language(language)
     if not isinstance(pattern, str) or not pattern.strip():
         raise ToolInputError("pattern must be a non-empty string")
@@ -322,19 +338,20 @@ def debug_pattern(
         raise ToolInputError(f"unsupported debug-query format: {debug_query!r}")
     _validate_timeout(timeout_seconds)
     binary = _resolve_executable(executable)
-    completed = _run(
-        [
-            binary,
-            "run",
-            f"--pattern={pattern}",
-            f"--lang={language}",
-            "--json=compact",
-            f"--debug-query={debug_query}",
-            ".",
-        ],
-        root=root,
-        timeout_seconds=timeout_seconds,
-    )
+    with _debug_working_root(working_dir) as root:
+        completed = _run(
+            [
+                binary,
+                "run",
+                f"--pattern={pattern}",
+                f"--lang={language}",
+                "--json=compact",
+                f"--debug-query={debug_query}",
+                ".",
+            ],
+            root=root,
+            timeout_seconds=timeout_seconds,
+        )
     stdout, stderr = _raise_for_execution_error(completed)
     return stderr or stdout
 

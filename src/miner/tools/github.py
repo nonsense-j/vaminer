@@ -8,6 +8,16 @@ import httpx
 
 from ..utils.config import GITHUB_TOKEN
 from ..models.issue import CommitRawInfo, IssueRawInfo
+from ..models.tool import (
+    CommitRangeEnd,
+    CommitRangeStart,
+    FetchExtraNotes,
+    GitHubCommitUrl,
+    GitHubIssueUrl,
+    GitHubOwner,
+    GitHubRepository,
+    GitTagPrefix,
+)
 from .errors import ToolInputError, validate_text_argument
 
 
@@ -62,13 +72,11 @@ def _fetch_commit_info(
             client.close()
 
 
-def fetch_github_issue(issue_url: str, fetch_extra_notes: bool = False) -> IssueRawInfo:
-    """Fetch a GitHub issue details. Result includes issue title, body, linked commits, and reference URLs.
-
-    Args:
-        issue_url: GitHub issue URL (e.g., https://github.com/owner/repo/issues/123)
-        fetch_extra_notes: Whether to fetch issue comments as extra notes.
-    """
+def fetch_github_issue(
+    issue_url: GitHubIssueUrl,
+    fetch_extra_notes: FetchExtraNotes = False,
+) -> IssueRawInfo:
+    """Fetch a GitHub issue and its linked evidence."""
     validate_text_argument(issue_url, "issue_url")
     m = re.fullmatch(r"https?://github\.com/([^/]+)/([^/]+)/issues/([0-9]+)(?:[?#].*)?", issue_url)
     if not m:
@@ -129,12 +137,8 @@ def fetch_github_issue(issue_url: str, fetch_extra_notes: bool = False) -> Issue
     )
 
 
-def parse_commit(commit_url: str) -> CommitRawInfo:
-    """Parse a GitHub commit URL and fetch commit metadata (SHA, parent, timestamp, message).
-
-    Args:
-        commit_url: Full GitHub commit URL (e.g., https://github.com/owner/repo/commit/abc123)
-    """
+def parse_commit(commit_url: GitHubCommitUrl) -> CommitRawInfo:
+    """Fetch metadata for one GitHub commit."""
     validate_text_argument(commit_url, "commit_url")
     parsed = _parse_commit_url(commit_url)
     if not parsed:
@@ -143,14 +147,12 @@ def parse_commit(commit_url: str) -> CommitRawInfo:
     return _fetch_commit_info(*parsed)
 
 
-def search_commit_by_tag(owner: str, repo: str, tag_prefix: str) -> list[CommitRawInfo] | str:
-    """Last-resort search for commits by a non-empty tag prefix.
-
-    Args:
-        owner: Repository owner
-        repo: Repository name
-        tag_prefix: Tag prefix to search (e.g., 'v2.7')
-    """
+def search_commit_by_tag(
+    owner: GitHubOwner,
+    repo: GitHubRepository,
+    tag_prefix: GitTagPrefix,
+) -> list[CommitRawInfo] | str:
+    """Search repository commits by tag prefix."""
     validate_text_argument(tag_prefix, "tag_prefix")
     tag_prefix = tag_prefix.strip()
     if not tag_prefix:
@@ -183,15 +185,13 @@ def search_commit_by_tag(owner: str, repo: str, tag_prefix: str) -> list[CommitR
     return commits
 
 
-def search_commit_by_time(owner: str, repo: str, since: str, until: str) -> list[CommitRawInfo] | str:
-    """Last-resort search for commits within a narrow time range.
-
-    Args:
-        owner: Repository owner
-        repo: Repository name
-        since: Start time (ISO format: YYYY-MM-DDTHH:MM:SSZ)
-        until: End time (ISO format: YYYY-MM-DDTHH:MM:SSZ)
-    """
+def search_commit_by_time(
+    owner: GitHubOwner,
+    repo: GitHubRepository,
+    since: CommitRangeStart,
+    until: CommitRangeEnd,
+) -> list[CommitRawInfo] | str:
+    """Search repository commits within a time range."""
     _validate_repository(owner, repo)
     try:
         start, end = datetime.fromisoformat(since), datetime.fromisoformat(until)

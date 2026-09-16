@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -49,6 +50,14 @@ class ClaudeCodeConfig:
     @property
     def config_dir_name(self) -> str:
         return default_config_dir_name(self.executable)
+
+    def resolve_executable(self, *, path: str | None = None) -> str | None:
+        configured = os.path.expanduser(os.fspath(self.executable))
+        resolved = shutil.which(configured, path=path)
+        if resolved is not None or not os.path.dirname(configured):
+            return resolved
+        configured_path = Path(configured).resolve()
+        return str(configured_path) if configured_path.is_file() else None
 
     def __post_init__(self) -> None:
         if self.default_timeout_seconds <= 0:
