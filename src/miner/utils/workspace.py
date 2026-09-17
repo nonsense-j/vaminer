@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
 from ..models.vas import VASFull
@@ -77,6 +77,12 @@ class SourceRegistry:
     def _source_field(source_type: SourceType) -> str:
         return {"issue": "issue_id", "example_suite": "exp_id"}[source_type]
 
+    @staticmethod
+    def _normalize_source_id(source_type: SourceType, source_id: str) -> str:
+        if source_type == "example_suite":
+            return PureWindowsPath(source_id).as_posix()
+        return source_id
+
     def _find(
         self,
         data: dict[str, list[dict[str, str]]],
@@ -84,9 +90,15 @@ class SourceRegistry:
         source_id: str,
     ) -> tuple[str, dict[str, str]] | None:
         field = self._source_field(source_type)
+        source_id = self._normalize_source_id(source_type, source_id)
         for vas_id, sources in data.items():
             for source in sources:
-                if source.get("type") == source_type and source.get(field) == source_id:
+                registered_source_id = source.get(field)
+                if (
+                    source.get("type") == source_type
+                    and registered_source_id is not None
+                    and self._normalize_source_id(source_type, registered_source_id) == source_id
+                ):
                     return vas_id, source
         return None
 
@@ -117,6 +129,7 @@ class SourceRegistry:
         content_digest: str | None = None,
     ) -> None:
         field = self._source_field(source_type)
+        source_id = self._normalize_source_id(source_type, source_id)
         if source_type == "example_suite" and content_digest is None:
             raise ValueError("Example Suite sources require a content digest")
 
@@ -132,6 +145,9 @@ class SourceRegistry:
                 raise ValueError(
                     f"{source_type} source {source_id!r} is already registered as {registered_vas_id}"
                 )
+            if source.get(field) != source_id:
+                source[field] = source_id
+                self._save(data)
             return
 
         entry = {"type": source_type, field: source_id}

@@ -38,8 +38,7 @@ class AstGrepExperience(BaseModel):
         ...,
         min_length=8,
         description=(
-            "A concise, generic, project-independent ast-grep query-writing "
-            "lesson expressed in 1-2 sentences"
+            "A concise, generic, project-independent ast-grep query-writing " "lesson expressed in 1-2 sentences"
         ),
     )
 
@@ -103,7 +102,7 @@ class Anchor(BaseModel):
         ...,
         ge=1,
         le=5,
-        description="Rule importance of the immutable inspection behavior",
+        description="Importance of this site behavior on the defect's trigger chain",
     )
     query_weight: int = Field(
         ...,
@@ -151,7 +150,9 @@ class AnchorIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(..., pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
-    behavior_weight: int = Field(..., ge=1, le=5)
+    behavior_weight: int = Field(
+        ..., ge=1, le=5, description="Importance of this site behavior on the defect's trigger chain"
+    )
     behavior: str = Field(
         ...,
         description=(
@@ -170,11 +171,7 @@ class AnchorIntent(BaseModel):
     required_cases: list[str] = Field(
         ...,
         min_length=1,
-        description=(
-            "Generated case files that contain this local behavior at a structurally "
-            "matchable site; every declared case must be assigned to at least one "
-            "intent, but not every case must be assigned to every intent"
-        ),
+        description=("Case artifacts this intent's query is expected to match; coverage may overlap across intents"),
     )
     draft_query: str | None = Field(
         default=None,
@@ -275,8 +272,7 @@ class AnchorSynthesisDelta(InlineJsonSchemaModel):
     plan_suggestion: str = Field(
         ...,
         description=(
-            "Conservative advisory note about deleting, merging, or revising plan "
-            "intents; normally an empty string"
+            "Conservative advisory note about deleting, merging, or revising plan " "intents; normally an empty string"
         ),
     )
 

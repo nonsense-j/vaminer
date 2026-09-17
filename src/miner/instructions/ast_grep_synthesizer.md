@@ -27,10 +27,13 @@ Read the target intent, `SKILL.md`, `references/experiences.md`, every required 
 - Use a YAML `rule` for multiple shapes, structural relations, or contextual parsing.
 - YAML `rule` can encode fine-grained constraints. When it needs parsing context or must match a specific node, use an object-form `pattern` with the parseable snippet in `context` and the target node in `selector`. When additional structural constraints are required, add relations such as `inside` or `has` at the Rule Object level.
 
-**Coverage**
+**Coverage and generalization**
 
 - Keep the query within the target behavior and make each match a signal of that behavior.
-- Match every required case, also including equivalent APIs and code structures for generalization.
+- Match every required case. When the required cases exercise different surface forms, generalize the query rather than narrowing to one form.
+- **API families**: when a case reference a specific API, identify the semantic family and enumerate project-realistic members. Encode the family as an ast-grep `regex` on the corresponding node (e.g., `identifier` of the call expression), such as `regex: '^(free|.*free.*|SAFE_FREE|omcc_free_.*)$'` instead of the literal `free`. Try to avoid overfitting to the provided cases.
+- **Equivalent syntax forms**: when cases express the same behavior through different syntax (e.g., `$P = $Q` and `*$P = $Q`; `*p`, `p[i]`, and `p->m`), enumerate the equivalent forms with `any:` in the rule body.
+- ALWAYS prefer a broader faithful query that match every required case and realistic family variants over a narrower query that matches only the literal case forms.
 
 ## Step 3: Validate the query
 

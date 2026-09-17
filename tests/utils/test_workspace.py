@@ -88,3 +88,64 @@ def test_source_registry_keeps_issue_and_example_ids_typed(tmp_path: Path):
             "CVE-2099-0001",
             content_digest="b" * 64,
         )
+
+
+def test_example_suite_exp_id_uses_one_path_form_for_vas_mapping(tmp_path: Path):
+    registry = SourceRegistry(tmp_path)
+    digest = "a" * 64
+    registry.register(
+        "VAS-0001",
+        "example_suite",
+        r"group\CWE-2099",
+        content_digest=digest,
+    )
+
+    assert Workspace.prepare_example_suite_vas_id(
+        "group/CWE-2099",
+        content_digest=digest,
+        base_dir=tmp_path,
+    ) == "VAS-0001"
+    assert json.loads((tmp_path / "source_registry.json").read_text(encoding="utf-8")) == {
+        "VAS-0001": [
+            {
+                "type": "example_suite",
+                "exp_id": "group/CWE-2099",
+                "content_digest": digest,
+            }
+        ]
+    }
+
+
+def test_register_example_suite_migrates_a_legacy_windows_exp_id(tmp_path: Path):
+    digest = "a" * 64
+    registry_path = tmp_path / "source_registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "VAS-0001": [
+                    {
+                        "type": "example_suite",
+                        "exp_id": r"group\CWE-2099",
+                        "content_digest": digest,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = SourceRegistry(tmp_path)
+
+    assert registry.lookup(
+        "example_suite",
+        "group/CWE-2099",
+        content_digest=digest,
+    ) == "VAS-0001"
+    registry.register(
+        "VAS-0001",
+        "example_suite",
+        "group/CWE-2099",
+        content_digest=digest,
+    )
+
+    stored = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert stored["VAS-0001"][0]["exp_id"] == "group/CWE-2099"

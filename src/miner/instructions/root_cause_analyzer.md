@@ -23,7 +23,13 @@ Trace one coherent chain from the trigger through the defective state or operati
 
 Record the defective source spans required by the input and causal chain. Each `buggy_components` item must contain a source-relative path, exact line range, concise role, and exact source snippet.
 
-Create one minimal, syntactically useful `caseN.<ext>` artifact for each materially distinct defect shape. Add 0-2 practical `caseN_varM.<ext>` variants for each artifact when they preserve the same defect with different non-causal details. Every filename passed to `write_case_artifact` must be a bare top-level `caseN.<ext>` or `caseN_varM.<ext>` name; the tool rejects other names before writing. If it reports a filename error, correct the name and retry. The cases are responsible for reproducing the defect and covering the general detecting goals. Keep cases sufficient and syntactically valid. Declare the exact written filenames in the complete `extracted_case_files` manifest.
+Create one minimal, syntactically useful `caseN.<ext>` artifact for each materially distinct defect shape, then add 1-3 `caseN_varM.<ext>` variants per artifact. Each variant must preserve the same defect pattern (the same general rule summary) while exercising a different surface form. Useful variant directions (follow practical variants instead of exhaustive enumeration):
+
+- **API variants**: replace a key defect-related API with a different member of the same semantic family (e.g., `free` ↔ `omcc_free_doc` ↔ `SAFE_FREE`; `malloc` ↔ `calloc` ↔ `GNS_VOS_ALLOC_MEM_ZERO`).
+- **Equivalent syntax forms**: re-express the same operation with structurally different syntax (e.g., `$P = $Q` ↔ `*$P = $Q`; `*p` ↔ `p[i]` ↔ `p->m`). 
+- **same-function structural variants**: change the control-flow or structural shape of the same functional behavior (e.g., null-assignment vs pointer-overwrite as two ways of losing ownership; add simple cross-function wrapper).
+
+Every filename passed to `write_case_artifact` must be a bare top-level `caseN.<ext>` or `caseN_varM.<ext>` name; the tool rejects other names before writing. If it reports a filename error, correct the name and retry. The cases are responsible for reproducing the defect and covering the general detecting goals. Keep cases sufficient and syntactically valid. Declare the exact written filenames in the complete `extracted_case_files` manifest.
 
 ## Step 4: Return the analysis
 
