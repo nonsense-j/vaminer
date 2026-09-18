@@ -3,23 +3,18 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
+from ..utils.executables import ManagedExecutableError, managed_executable
 from .errors import ToolExecutionError, ToolInputError, validate_text_argument
 
 QueryType = Literal["pattern", "rule"]
 OutputMode = Literal["count", "sample", "full"]
 DebugQuery = Literal["pattern", "ast", "cst", "sexp"]
 
-_AST_GREP_INSTALL_HINT = (
-    "Uninstall the .cmd shim, then reinstall the native ast-grep .exe with "
-    "Scoop (`scoop uninstall ast-grep`, then `scoop install ast-grep`) or "
-    "Cargo (`cargo uninstall ast-grep`, then `cargo install ast-grep --locked`)."
-)
 _ERROR_NODE_WARNING = "warning: pattern contains an error node"
 
 
@@ -27,18 +22,11 @@ class AstGrepUnavailableError(RuntimeError):
     """The ast-grep CLI cannot be used by the host."""
 
 
-def _resolve_executable(executable: str | None = None) -> str:
-    candidates = (executable,) if executable else ("ast-grep", "sg")
-    resolved = next((path for name in candidates if (path := shutil.which(name))), None)
-    if resolved is None:
-        label = f"configured ast-grep executable {executable!r}" if executable else "ast-grep"
-        raise AstGrepUnavailableError(f"{label} was not found on PATH")
-    if resolved.casefold().endswith(".cmd"):
-        raise AstGrepUnavailableError(
-            f"ast-grep resolved to a .cmd shim instead of a native .exe binary: {resolved}. "
-            f"{_AST_GREP_INSTALL_HINT}"
-        )
-    return resolved
+def _resolve_executable() -> str:
+    try:
+        return managed_executable("ast-grep")
+    except ManagedExecutableError as exc:
+        raise AstGrepUnavailableError(str(exc)) from exc
 
 
 def _validate_root(target_dir: str | Path) -> Path:
@@ -261,7 +249,6 @@ def run_query(
     output: OutputMode = "sample",
     sample_size: int = 20,
     timeout_seconds: int = 60,
-    executable: str | None = None,
 ) -> str:
     """Run one raw pattern or YAML rule and return normalized matches."""
 
@@ -277,7 +264,7 @@ def run_query(
     if not isinstance(sample_size, int) or isinstance(sample_size, bool) or sample_size < 1:
         raise ToolInputError("sample_size must be a positive integer")
     _validate_timeout(timeout_seconds)
-    binary = _resolve_executable(executable)
+    binary = _resolve_executable()
 
     if query_type == "pattern":
         completed = _run(
@@ -308,7 +295,6 @@ def debug_pattern(
     pattern: str,
     debug_query: DebugQuery = "pattern",
     timeout_seconds: int = 60,
-    executable: str | None = None,
 ) -> str:
     """Return ast-grep's native debug tree for one raw pattern."""
 
@@ -319,7 +305,7 @@ def debug_pattern(
     if not isinstance(debug_query, str) or debug_query not in {"pattern", "ast", "cst", "sexp"}:
         raise ToolInputError(f"unsupported debug-query format: {debug_query!r}")
     _validate_timeout(timeout_seconds)
-    binary = _resolve_executable(executable)
+    binary = _resolve_executable()
     try:
         with tempfile.TemporaryDirectory(prefix="vaminer-ast-grep-debug-") as temp_dir:
             completed = _run(

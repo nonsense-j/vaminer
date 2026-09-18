@@ -11,6 +11,7 @@ from pathlib import Path
 from ..mining.tasks import AST_GREP_SKILL_ROOT
 from ..tools.ast_grep import AstGrepUnavailableError, run_query
 from ..utils.config import PROJECT_ROOT
+from ..utils.executables import ManagedExecutableError, managed_executable
 from .models import CheckResult
 
 _WINDOWS_FILESYSTEM_REGISTRY_KEY = r"SYSTEM\CurrentControlSet\Control\FileSystem"
@@ -90,7 +91,7 @@ def check_project_assets() -> CheckResult:
         PROJECT_ROOT / "src" / "miner" / "instructions" / "root_cause_analyzer.md",
         PROJECT_ROOT / "src" / "miner" / "instructions" / "rule_generator.md",
         AST_GREP_SKILL_ROOT / "SKILL.md",
-        AST_GREP_SKILL_ROOT / "references" / "experiences.md",
+        AST_GREP_SKILL_ROOT / "references" / "experiences" / "all.md",
         PROJECT_ROOT / "src" / ".vaminer" / "skills" / "vas-scanner" / "scripts" / "engine.py",
     )
     missing = [path.relative_to(PROJECT_ROOT).as_posix() for path in required if not path.is_file()]
@@ -107,10 +108,11 @@ def check_git() -> CheckResult:
 
 
 def check_rg() -> CheckResult:
-    executable = shutil.which("rg")
-    if executable is None:
-        return CheckResult.failed("rg", "ripgrep (rg) was not found on PATH")
-    return CheckResult.passed("rg", f"ripgrep executable found at {executable}")
+    try:
+        executable = managed_executable("rg")
+    except ManagedExecutableError as exc:
+        return CheckResult.failed("rg", "ripgrep is missing from the Miner environment", detail=str(exc))
+    return CheckResult.passed("rg", f"managed ripgrep executable found at {executable}")
 
 
 def check_ast_grep(*, timeout_seconds: float) -> CheckResult:

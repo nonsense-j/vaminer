@@ -1,6 +1,6 @@
 ---
 name: vas-scanner
-description: Scan a repository for defects defined by a bundled VAS rule. Use when asked to run a VAS-<digits> rule against a repository.
+description: Scan a repository for defects defined by a bundled VAS rule. Use when asked to run a VAS-NNNN rule against a repository.
 ---
 
 # VAS Scanner
@@ -17,7 +17,7 @@ The bundled scanner command is `python3 <skill-dir>/scripts/scan.py`. It validat
    python3 <skill-dir>/scripts/scan.py preflight <VAS-ID> <repo-path>
    ```
 
-   Continue only when preflight reports `ready`. On failure, report the feedback to user.
+   Continue only when preflight reports `ready`. On failure, report the feedback to user. The scanner uses `AST_GREP_CLI_PATH` from `scripts/config.py`; when it is `None`, preflight automatically installs a private CLI under `<skill-dir>/.tool/ast_grep`.
 
 2. Check the repository overview:
 

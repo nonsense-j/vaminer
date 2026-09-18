@@ -324,7 +324,7 @@ def _render_issue_evidence(source: IssueCollectionInfo) -> str:
 def _render_target_intent(intent: AnchorIntent) -> str:
     sections = [
         f"ID: {intent.id}",
-        f"Behavior weight: {intent.behavior_weight}",
+        f"Intent weight (behavior_weight, defect relevance): {intent.behavior_weight}",
         _render_block("Behavior", intent.behavior),
         _render_block("Inspect hint", intent.inspect_hint),
         "Required Case Artifacts:\n" + "\n".join(f"- {name}" for name in intent.required_cases),

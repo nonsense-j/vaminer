@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+from ..utils.executables import ManagedExecutableError, managed_executable
+
 ENGINE_PATH = Path(__file__).resolve().parents[2] / ".vaminer" / "skills" / "vas-scanner" / "scripts" / "engine.py"
 _ENGINE_MODULE_NAME = "_vaminer_bundled_scanner_engine"
 
@@ -40,7 +42,21 @@ AnchorQueryError = _engine.AnchorQueryError
 AnchorRunResult = _engine.AnchorRunResult
 AnchorScanError = _engine.AnchorScanError
 AnchorScanResult = _engine.AnchorScanResult
-scan_anchors = _engine.scan_anchors
+
+
+def scan_anchors(anchors, root, language):
+    """Run the bundled scanner engine with uv-managed ast-grep."""
+
+    try:
+        ast_grep = managed_executable("ast-grep")
+    except ManagedExecutableError as exc:
+        raise AnchorExecutionError(str(exc)) from exc
+    return _engine.scan_anchors(
+        anchors,
+        root,
+        language,
+        ast_grep=ast_grep,
+    )
 
 __all__ = [
     "ENGINE_PATH",

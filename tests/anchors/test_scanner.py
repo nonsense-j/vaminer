@@ -16,13 +16,98 @@ import sys
 
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import config as scanner_config  # noqa: E402
+import engine as scanner_engine  # noqa: E402
 from core import finalize_scan, prepare_scan, record_analysis  # noqa: E402
 from prompt import TASK_TEMPLATE  # noqa: E402
 
 
 def require_ast_grep() -> None:
-    if shutil.which("ast-grep") is None and shutil.which("sg") is None:
+    if shutil.which("ast-grep") is None:
         pytest.skip("ast-grep is required")
+
+
+def test_scanner_defaults_to_strict_ast_grep_path():
+    assert scanner_config.AST_GREP_CLI_PATH == "ast-grep"
+
+
+def test_configured_ast_grep_missing_does_not_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(scanner_engine.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        scanner_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("configured paths must not trigger installation"),
+    )
+
+    with pytest.raises(scanner_engine.AnchorExecutionError, match="was not found"):
+        scanner_engine.resolve_ast_grep("missing-ast-grep", tmp_path / "tools", install=True)
+
+
+def test_ast_grep_resolution_never_falls_back_to_sg(monkeypatch: pytest.MonkeyPatch):
+    resolved: list[str] = []
+
+    def missing(name: str) -> None:
+        resolved.append(name)
+        return None
+
+    monkeypatch.setattr(scanner_engine.shutil, "which", missing)
+
+    with pytest.raises(scanner_engine.AnchorExecutionError, match="was not found"):
+        scanner_engine.find_ast_grep()
+
+    assert resolved == ["ast-grep"]
+
+
+def test_windows_ast_grep_shims_are_rejected(monkeypatch: pytest.MonkeyPatch):
+    cmd_shim = r"C:\Users\test\bin\ast-grep.cmd"
+    monkeypatch.setattr(scanner_engine.sys, "platform", "win32")
+    monkeypatch.setattr(scanner_engine.shutil, "which", lambda _name: cmd_shim)
+
+    with pytest.raises(scanner_engine.AnchorExecutionError, match="native .exe"):
+        scanner_engine.find_ast_grep()
+
+
+def test_none_installs_and_reuses_private_ast_grep(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    install_dir = tmp_path / ".tool" / "ast_grep"
+    commands: list[list[str]] = []
+
+    def which(name: str) -> str | None:
+        candidate = Path(name)
+        return str(candidate) if candidate.is_file() else None
+
+    def run(command: list[str], **_kwargs):
+        commands.append(command)
+        if command[-1] == "--version":
+            return subprocess.CompletedProcess(command, 0, stdout="ast-grep 0.45.3\n", stderr="")
+        binary = install_dir / "bin" / "ast-grep"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text("binary", encoding="utf-8")
+        binary.chmod(0o755)
+        return subprocess.CompletedProcess(command, 0, stdout="installed", stderr="")
+
+    monkeypatch.setattr(scanner_engine.shutil, "which", which)
+    monkeypatch.setattr(scanner_engine.subprocess, "run", run)
+
+    installed = scanner_engine.resolve_ast_grep(None, install_dir, install=True)
+    reused = scanner_engine.resolve_ast_grep(None, install_dir, install=False)
+
+    assert installed == reused == str(install_dir / "bin" / "ast-grep")
+    install_commands = [command for command in commands if command[-1] != "--version"]
+    assert len(install_commands) == 1
+    assert install_commands[0][:3] == [sys.executable, "-m", "pip"]
+    assert install_commands[0][-1] == scanner_engine.AST_GREP_CLI_REQUIREMENT
+    assert install_commands[0][install_commands[0].index("--target") + 1] == str(install_dir)
+
+
+def test_none_requires_preflight_before_prepare(tmp_path: Path):
+    with pytest.raises(scanner_engine.AnchorExecutionError, match="run scanner preflight first"):
+        scanner_engine.resolve_ast_grep(None, tmp_path / "missing", install=False)
 
 
 def make_rule(path: Path, vas_id: str = "VAS-9001") -> None:

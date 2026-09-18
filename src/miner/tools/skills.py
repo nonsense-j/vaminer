@@ -19,17 +19,10 @@ from .text import format_file_read, truncation_footer
 MAX_SKILL_RESOURCE_FILES = 100
 MAX_SKILL_RESOURCE_BYTES = 256 * 1024
 MAX_SKILL_RESOURCE_LINES = 200
-AST_GREP_EXPERIENCES_RESOURCE = "references/experiences.md"
+AST_GREP_EXPERIENCES_DIR = "references/experiences"
 _EXPERIENCE_LINE = re.compile(
     r"^- \[(?P<lesson_id>(?:C\+\+|[A-Za-z][A-Za-z0-9]*)-[1-9][0-9]*)\] (?P<lesson>.+)$"
 )
-_EXPERIENCE_HEADER = """# AST-Grep Query-Writing Experiences
-
-Read these compact, non-redundant query-writing lessons before constructing a
-query. Treat them as heuristics and validate them against the current language
-and ast-grep version. Add a lesson only when existing guidance cannot be
-materially extended instead.
-"""
 
 
 def _skill_root(skill_roots: Mapping[str, Path], skill_name: str) -> Path:
@@ -174,7 +167,11 @@ def read_skill_resource(
     )
 
 
-def _read_ast_grep_experiences(path: Path) -> list[AstGrepExperience]:
+def _experience_path(root: Path, scope: str) -> Path:
+    return root / AST_GREP_EXPERIENCES_DIR / f"{scope.casefold()}.md"
+
+
+def _read_ast_grep_experiences(path: Path, scope: str) -> list[AstGrepExperience]:
     if not path.exists():
         return []
     experiences: list[AstGrepExperience] = []
@@ -184,13 +181,16 @@ def _read_ast_grep_experiences(path: Path) -> list[AstGrepExperience]:
         match = _EXPERIENCE_LINE.fullmatch(line)
         if match is None:
             raise ValueError(f"malformed ast-grep experience at line {line_number}")
-        experiences.append(
-            AstGrepExperience(
-                mode=AstGrepExperienceMode.ADD,
-                lesson_id=match.group("lesson_id").replace("C++", "CPP"),
-                lesson=match.group("lesson"),
-            )
+        experience = AstGrepExperience(
+            mode=AstGrepExperienceMode.ADD,
+            lesson_id=match.group("lesson_id").replace("C++", "CPP"),
+            lesson=match.group("lesson"),
         )
+        if experience.scope != scope:
+            raise ValueError(
+                f"ast-grep experience {experience.lesson_id} does not belong in {path.name}"
+            )
+        experiences.append(experience)
     return experiences
 
 
@@ -220,23 +220,17 @@ def _next_lesson_id(scope: str, experiences: Sequence[AstGrepExperience]) -> str
     return f"{scope}-{number}"
 
 
-def _render_ast_grep_experiences(experiences: Sequence[AstGrepExperience]) -> str:
-    grouped: dict[str, list[AstGrepExperience]] = {}
-    scopes: list[str] = []
-    for experience in experiences:
-        scope = experience.scope
-        if scope not in grouped:
-            grouped[scope] = []
-            scopes.append(scope)
-        grouped[scope].append(experience)
-
-    ordered_scopes = (["ALL"] if "ALL" in grouped else []) + [
-        scope for scope in scopes if scope != "ALL"
-    ]
-    lines = [_EXPERIENCE_HEADER.rstrip()]
-    for scope in ordered_scopes:
-        lines.extend(("", f"## {'Language-Agnostic Lessons' if scope == 'ALL' else f'{scope} Query Lessons'}", ""))
-        lines.extend(f"- [{item.lesson_id}] {item.lesson}" for item in grouped[scope])
+def _render_ast_grep_experiences(
+    scope: str,
+    experiences: Sequence[AstGrepExperience],
+) -> str:
+    title = (
+        "Language-Agnostic AST-Grep Query-Writing Experiences"
+        if scope == "ALL"
+        else f"{scope} AST-Grep Query-Writing Experiences"
+    )
+    lines = [f"# {title}", ""]
+    lines.extend(f"- [{item.lesson_id}] {item.lesson}" for item in experiences)
     return "\n".join(lines) + "\n"
 
 
@@ -250,13 +244,16 @@ def record_ast_grep_experiences(
     if not incoming:
         return 0
     root = _skill_root({"ast-grep": Path(skill_root)}, "ast-grep")
-    path = root / AST_GREP_EXPERIENCES_RESOURCE
     with _skill_resource_lock(root, exclusive=True):
-        current = _read_ast_grep_experiences(path)
-        merged = list(current)
-        changed = False
+        scopes = list(dict.fromkeys(item.scope for item in incoming))
+        merged_by_scope = {
+            scope: _read_ast_grep_experiences(_experience_path(root, scope), scope)
+            for scope in scopes
+        }
+        changed_scopes: set[str] = set()
         updates = 0
         for item in incoming:
+            merged = merged_by_scope[item.scope]
             index = next(
                 (index for index, current_item in enumerate(merged) if current_item.identity == item.identity),
                 None,
@@ -267,7 +264,7 @@ def record_ast_grep_experiences(
                         continue
                     item = item.model_copy(update={"lesson_id": _next_lesson_id(item.scope, merged)})
                 merged.append(item)
-                changed = True
+                changed_scopes.add(item.scope)
                 updates += 1
                 continue
             if index is None:
@@ -275,16 +272,21 @@ def record_ast_grep_experiences(
             if merged[index].lesson == item.lesson:
                 continue
             merged[index] = item
-            changed = True
+            changed_scopes.add(item.scope)
             updates += 1
-        if not changed:
+        if not changed_scopes:
             return 0
-        _atomic_write_text(path, _render_ast_grep_experiences(merged))
+        for scope in scopes:
+            if scope in changed_scopes:
+                _atomic_write_text(
+                    _experience_path(root, scope),
+                    _render_ast_grep_experiences(scope, merged_by_scope[scope]),
+                )
         return updates
 
 
 __all__ = [
-    "AST_GREP_EXPERIENCES_RESOURCE",
+    "AST_GREP_EXPERIENCES_DIR",
     "MAX_SKILL_RESOURCE_BYTES",
     "MAX_SKILL_RESOURCE_FILES",
     "MAX_SKILL_RESOURCE_LINES",

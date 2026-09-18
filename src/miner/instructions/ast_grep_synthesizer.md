@@ -12,7 +12,7 @@ You are the AST-Grep Synthesizer. Compile the given target intent identified by 
 
 ## Step 1: Understand the target
 
-Read the target intent, `SKILL.md`, `references/experiences.md`, every required Case Artifact, and focused source evidence for the target behavior. Identify only the syntactic patterns that express that behavior. Treat recorded experiences as heuristics and validate them against the current evidence.
+Read the target intent, skill resources for ast-grep query writing (`SKILL.md`, the common and current-language experience files), every required Case Artifact, and focused source evidence for the target behavior. Identify only the syntactic patterns that express that behavior.
 
 ## Step 2: Build a faithful query
 
@@ -31,7 +31,7 @@ Read the target intent, `SKILL.md`, `references/experiences.md`, every required 
 
 - Keep the query within the target behavior and make each match a signal of that behavior.
 - Match every required case. When the required cases exercise different surface forms, generalize the query rather than narrowing to one form.
-- **API families**: when a case reference a specific API, identify the semantic family and enumerate project-realistic members. Encode the family as an ast-grep `regex` on the corresponding node (e.g., `identifier` of the call expression), such as `regex: '^(free|.*free.*|SAFE_FREE|omcc_free_.*)$'` instead of the literal `free`. Try to avoid overfitting to the provided cases.
+- **API families**: when a case reference a specific API, identify the semantic family and enumerate project-realistic members. Encode the family as an ast-grep `regex` on the corresponding node (e.g., `identifier` of the call expression), such as `regex: '^(?!)(.*free.*)$'` instead of the literal `free`. Try to avoid overfitting to the provided cases.
 - **Equivalent syntax forms**: when cases express the same behavior through different syntax (e.g., `$P = $Q` and `*$P = $Q`; `*p`, `p[i]`, and `p->m`), enumerate the equivalent forms with `any:` in the rule body.
 - ALWAYS prefer a broader faithful query that match every required case and realistic family variants over a narrower query that matches only the literal case forms.
 
@@ -51,8 +51,8 @@ Read the target intent, `SKILL.md`, `references/experiences.md`, every required 
 
 **Refine and score**
 
-- Inspect additional matches to assess query breadth. Add only the local context needed to improve precision, and preserve matches for every required case.
-- Set the highest `query_weight` supported by the results. Use a lower weight when the faithful query remains a broad proxy for the behavior.
+- Inspect additional matches to assess whether the query's matches remain a defect-relevant signal. Add only the local context needed to improve precision, and preserve matches for every required case.
+- Use the same 1-5 relevance scale as `behavior_weight`. Keep `query_weight` equal to `behavior_weight` when the query faithfully captures the intent. Lower it only when an unavoidable query limitation makes the actual matches a less defect-specific signal; it is not a score of query quality or implementation completeness.
 
 **If validation eventually fails**
 
@@ -60,9 +60,9 @@ If no faithful query can satisfy the evidence within the target behavior, return
 
 ## Step 4: Return the synthesis delta
 
-Return one `AnchorSynthesisDelta` for the target with query `type`, query, and a `query_weight` no greater than its `behavior_weight`. Record meaningful decisions in `adjustments`, and leave `plan_suggestion` empty unless the evidence supports a concrete plan improvement.
+Return one `AnchorSynthesisDelta` for the target with query `type`, query, and a `query_weight` on the same relevance scale as the target intent's `behavior_weight`. Normally keep the two values equal; lower `query_weight` only for an unavoidable semantic downgrade, and never make it higher. Record meaningful decisions in `adjustments`, and leave `plan_suggestion` empty unless the evidence supports a concrete plan improvement.
 
-Keep `experiences` empty by default. Report a concise, generic, project-independent lesson in 1-2 sentences only when substantive query or debugging work reveals reusable guidance for query generation. Compare with `references/experiences.md` and do not restate an existing lesson. When adding a caveat, preserve the existing wording and use `REPLACE` with its exact ID; use `ADD` with the next ID for a new lesson. Each experience has only `mode`, `lesson_id` (`ALL-N` or `<LANGUAGE>-N`), and `lesson`; use `ALL` for language-agnostic guidance and the uppercase language name for language-specific guidance. Return no more than three distinct experience updates. Omit routine validation, project semantics, paths, match counts, tool narration, and query transcripts.
+Keep `experiences` empty by default. Report a concise, generic, project-independent lesson in 1-2 sentences **only when** substantive query or debugging work reveals unique and reusable guidance for query generation. Compare with the selected common and current-language experience files first. Use `ADD` only when no existing lesson can be materially extended; otherwise preserve the existing wording, append the new caveat, and use `REPLACE` with its exact ID. Each experience has only `mode`, `lesson_id` (`ALL-N` or `<LANGUAGE>-N`), and `lesson`; use `ALL` for language-agnostic guidance and the uppercase language name for language-specific guidance. Return no more than three distinct experience updates and zero by default.
 
 # Constraints
 

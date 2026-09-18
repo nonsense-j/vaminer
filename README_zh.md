@@ -22,8 +22,6 @@ VAMINER 将一个已报告的软件问题转换为变体分析规范（Variant A
 - Python 3.12 或更高版本
 - `uv`
 - Git
-- `PATH` 中可用的 `rg`（ripgrep）命令
-- `PATH` 中可用的 `ast-grep` 或 `sg` 命令
 - 使用 Pydantic AI 时，需要支持的 LLM 服务及对应 API Key
 - 使用 Claude CLI 时，需要已安装 `claude` 命令并完成用户登录
 - Windows 环境需要启用 Win32 长路径支持（`LongPathsEnabled=1`）
@@ -36,6 +34,8 @@ cd vaminer
 uv sync
 cp .env.example .env
 ```
+
+`uv sync` 会把 Miner 管理的 `rg` 和 `ast-grep` 可执行文件安装到项目环境中。请通过 `uv run` 运行 Miner；Miner 不使用系统安装的这两个工具。
 
 示例配置默认使用 DeepSeek。请在仓库根目录的 `.env` 中填写 `DEEPSEEK_API_KEY`；如需使用其他服务，请参考 [LLM 配置](#llm-配置)。
 
@@ -152,7 +152,7 @@ output/
 
    必须复制整个目录，而不只是 `SKILL.md`。该目录包含扫描脚本、分析规范，以及 `rules/` 子目录中的所有已生成规则。如果安装 Skill 后又生成了新规则，请把新的 `VAS-XXXX.json` 复制到已安装 Skill 的 `rules/` 目录，或重新安装整个 Skill。
 
-2. 确认编程 Agent 的 `PATH` 中可以找到 `ast-grep` 或 `sg`。Scanner 只需要 Python 3.12+ 标准库，不依赖 VAMiner 主项目环境或 `portalocker`。
+2. 在 `scripts/config.py` 中配置 ast-grep。`AST_GREP_CLI_PATH = "ast-grep"` 会使用编程 Agent `PATH` 中的该命令，找不到时直接失败；设为 `AST_GREP_CLI_PATH = None` 时，scanner preflight 会把私有的 `ast-grep-cli` 安装到 `<skill-dir>/.tool/ast_grep`。Scanner 与 VAMiner 主项目环境相互独立。
 
 3. 使用 Agent 打开目标项目，并指定要执行的规则：
 
@@ -186,7 +186,7 @@ Rule Generator 不加载 ast-grep Skill，也不验证查询。可选的 `draft_
 
 每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
 
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它允许在父 Agent 的 Turn 预算内重新提交 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。每个 Synthesizer 只贡献其最终完整输出中的 experience：通过多轮质量门槛后按 lesson ID 去重，并且每个 Synthesizer 最多保留 3 条；共享持久化 skill 的 experience 总数没有固定上限。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具、`run_ast_grep_query` 和 `debug_ast_grep_pattern`；query 执行与 pattern 调试由两个独立工具完成，并且都会原样返回 ast-grep stderr。它没有通用文件系统、shell、网络或继续 delegation 权限。每个 child 结束时，host 在共享/独占进程锁保护下更新 `references/experiences.md`：读不会撞上写，写也总会先合并最新内容。
+`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它允许在父 Agent 的 Turn 预算内重新提交 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。每个 Synthesizer 只贡献其最终完整输出中的 experience：通过多轮质量门槛后按 lesson ID 去重，并且每个 Synthesizer 最多保留 3 条；共享持久化 skill 的 experience 总数没有固定上限。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具、`run_ast_grep_query` 和 `debug_ast_grep_pattern`；query 执行与 pattern 调试由两个独立工具完成，并且都会原样返回 ast-grep stderr。它没有通用文件系统、shell、网络或继续 delegation 权限。child 只读取 `references/experiences/all.md` 以及存在的当前语言小写文件。每个 child 结束时，host 在共享/独占进程锁保护下，把验收的经验分别写入 `references/experiences/` 下对应的 scope 文件：读不会撞上写，写也总会先合并最新内容。
 
 ### Miner 模块职责
 
@@ -342,7 +342,7 @@ uv run pytest
 }
 ```
 
-`behavior_weight` 表示目标检查行为在规则中的重要程度。为了保留召回率，实际查询有时只是较弱或更宽泛的近似，此时 `query_weight` 可以更低，并且排序时只使用 `query_weight`。文件优先级是不同已匹配锚点的查询权重之和；同一锚点重复匹配只会增加导航位置，不会重复增加分数。每个意图的 `required_cases` 只存在于合成请求中，不属于合成后的锚点或最终 VAS Schema。
+`behavior_weight` 是 intent 在整个缺陷分析中的重要度：越高表示越与缺陷相关，而不是越容易查询。`query_weight` 对实际 query 的命中使用同一重要度尺度。query 忠实实现 intent 时通常应相等；只有 query 受限、不得不降低语义一致性时才降低它，不能高于 `behavior_weight`。排序时只使用 `query_weight`。文件优先级是不同已匹配锚点的查询权重之和；同一锚点重复匹配只会增加导航位置，不会重复增加分数。每个意图的 `required_cases` 只存在于合成请求中，不属于合成后的锚点或最终 VAS Schema。
 
 空 `query` 是禁用锚点标记。禁用锚点仍保留在 VAS 中，以便展示预期检查行为，但永远不会执行，也不会增加排序权重。非空锚点仍接受严格验证。禁用锚点不会放宽“每个生成 Case Artifact 至少被一个达到 `ADMISSION_QUERY_WEIGHT` 的 Anchor 纳入”的要求；缺失 Case Artifact 召回仍然是验证错误。
 
@@ -360,6 +360,6 @@ uv run pytest
 - 每个查询以目标 `behavior` 为语义核心。为了减少与兄弟锚点的重叠，可以在一次精度优化中加入所有必要用例和 RCA 位置都支持的局部缺陷相关结构，例如要求目标操作位于 `if` 语句内；仍禁止项目特有约束或完整因果链约束。
 - Synthesizer 通常返回空的 `plan_suggestion`。只有在源码语料匹配精度明显过差且能够保留必要用例召回时，才可简短建议删除、合并或调整 intent；是否在剩余 Turn 内继续调整计划由 Rule Generator 决定。此类建议不能以人为设定的 Anchor 数量上限为理由。
 - 除非结构约束或 API 约束使其对规则敏感，否则拒绝使用泛化的调用、赋值、定义和条件作为锚点。
-- 精度优化用于减少兄弟锚点之间的重叠。无关的源码额外匹配不能作为缩窄查询的理由；必要时应保留召回并降低 `query_weight`。
+- 精度优化用于减少兄弟锚点之间的重叠。无关的源码额外匹配不能单独作为缩窄查询的理由；只有当它们使实际 query 的命中信号更不特异于缺陷时，才在保留召回的前提下降低 `query_weight`。
 
 关于 Skill 内部的规则执行和报告流程，请参阅 [`vas-scanner` Skill](src/.vaminer/skills/vas-scanner/SKILL.md)。

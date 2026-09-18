@@ -7,6 +7,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from ..utils.executables import ManagedExecutableError, managed_executable
 from .errors import ToolExecutionError, ToolInputError, validate_text_argument
 from .text import format_file_read, truncation_footer
 
@@ -118,8 +119,12 @@ def list_src_files(
     if glob is not None:
         validate_text_argument(glob, "glob")
     root, target = _src_scope_path(src_root, path)
+    try:
+        executable = managed_executable("rg")
+    except ManagedExecutableError as exc:
+        raise RuntimeError(str(exc)) from exc
     command = [
-        "rg",
+        executable,
         "--files",
         "--hidden",
         "--glob",
@@ -142,7 +147,7 @@ def list_src_files(
             check=False,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError("src file listing requires rg on PATH") from exc
+        raise RuntimeError(f"managed ripgrep executable disappeared: {executable}") from exc
     except subprocess.TimeoutExpired as exc:
         detail = _stream_text(exc.stderr) or "src file listing timed out after 20 seconds"
         raise ToolExecutionError(detail) from exc
@@ -297,8 +302,12 @@ def search_src_files(
         raise ToolInputError(f"max_results must be between 1 and {MAX_SRC_SEARCH_RESULTS}")
     root, target = _src_scope_path(src_root, path, allow_file=True)
 
+    try:
+        executable = managed_executable("rg")
+    except ManagedExecutableError as exc:
+        raise RuntimeError(str(exc)) from exc
     command = [
-        "rg",
+        executable,
         "--json",
         "--hidden",
         "--glob",
@@ -325,7 +334,7 @@ def search_src_files(
             check=False,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError("src search requires rg on PATH") from exc
+        raise RuntimeError(f"managed ripgrep executable disappeared: {executable}") from exc
     except subprocess.TimeoutExpired as exc:
         detail = _stream_text(exc.stderr) or "src search timed out after 20 seconds"
         raise ToolExecutionError(detail) from exc

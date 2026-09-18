@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,11 +32,9 @@ QUERY_ERROR_MARKERS = (
     "failed to parse pattern",
     "invalid pattern",
 )
-AST_GREP_INSTALL_HINT = (
-    "Uninstall the .cmd shim, then reinstall the native ast-grep .exe with "
-    "Scoop (`scoop uninstall ast-grep`, then `scoop install ast-grep`) or "
-    "Cargo (`cargo uninstall ast-grep`, then `cargo install ast-grep --locked`)."
-)
+AST_GREP_CLI_REQUIREMENT = "ast-grep-cli==0.45.3"
+AST_GREP_INSTALL_TIMEOUT_SECONDS = 300
+AST_GREP_INSTALL_DIAGNOSTIC_CHARS = 4_000
 
 
 @dataclass(frozen=True)
@@ -145,25 +144,114 @@ def sorted_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
-def find_ast_grep(explicit: str | None = None) -> str:
-    if explicit:
-        binary = shutil.which(explicit)
-        if binary is None:
-            raise AnchorExecutionError(f"configured ast-grep executable was not found on PATH: {explicit}")
-    else:
-        binary = None
-        for name in ("ast-grep", "sg"):
-            binary = shutil.which(name)
-            if binary:
-                break
-        if binary is None:
-            raise AnchorExecutionError("ast-grep is required but was not found on PATH")
-    if binary.casefold().endswith(".cmd"):
-        raise AnchorExecutionError(
-            f"ast-grep resolved to a .cmd shim instead of a native .exe binary: {binary}. "
-            f"{AST_GREP_INSTALL_HINT}"
+def _run_version_probe(binary: str) -> None:
+    try:
+        completed = subprocess.run(
+            [binary, "--version"],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=10,
+            check=False,
         )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AnchorExecutionError(f"configured ast-grep executable could not run: {binary}: {exc}") from exc
+    version = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+    if completed.returncode != 0 or not version.casefold().startswith("ast-grep "):
+        detail = version[:AST_GREP_INSTALL_DIAGNOSTIC_CHARS] or f"exit code {completed.returncode}"
+        raise AnchorExecutionError(f"configured executable is not ast-grep: {binary}: {detail}")
+
+
+def find_ast_grep(executable: str = "ast-grep") -> str:
+    binary = shutil.which(executable)
+    if binary is None:
+        raise AnchorExecutionError(f"configured ast-grep executable was not found: {executable}")
+    if sys.platform == "win32" and Path(binary).suffix.casefold() != ".exe":
+        raise AnchorExecutionError(f"configured ast-grep executable is not a native .exe: {binary}")
+    _run_version_probe(binary)
     return binary
+
+
+def _managed_ast_grep_candidates(install_dir: Path) -> tuple[Path, ...]:
+    filename = "ast-grep.exe" if sys.platform == "win32" else "ast-grep"
+    return (
+        install_dir / "bin" / filename,
+        install_dir / "Scripts" / filename,
+        install_dir / filename,
+    )
+
+
+def _installed_ast_grep(install_dir: Path) -> str | None:
+    for candidate in _managed_ast_grep_candidates(install_dir):
+        if candidate.is_file():
+            return find_ast_grep(str(candidate))
+    return None
+
+
+def _pip_install_command(prefix: list[str], install_dir: Path) -> list[str]:
+    return [
+        *prefix,
+        "install",
+        "--disable-pip-version-check",
+        "--only-binary=:all:",
+        "--no-deps",
+        "--upgrade",
+        "--target",
+        str(install_dir),
+        AST_GREP_CLI_REQUIREMENT,
+    ]
+
+
+def install_ast_grep(install_dir: Path) -> str:
+    install_dir.mkdir(parents=True, exist_ok=True)
+    prefixes = [[sys.executable, "-m", "pip"]]
+    if pip := shutil.which("pip"):
+        prefixes.append([pip])
+    diagnostics: list[str] = []
+    for prefix in prefixes:
+        command = _pip_install_command(prefix, install_dir)
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=AST_GREP_INSTALL_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            diagnostics.append(f"{' '.join(prefix)}: {exc}")
+            continue
+        if completed.returncode == 0:
+            binary = _installed_ast_grep(install_dir)
+            if binary is not None:
+                return binary
+        detail = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+        diagnostics.append(f"{' '.join(prefix)}: {detail or f'exit code {completed.returncode}'}")
+    diagnostic = "\n".join(diagnostics)[:AST_GREP_INSTALL_DIAGNOSTIC_CHARS]
+    raise AnchorExecutionError(
+        f"could not install {AST_GREP_CLI_REQUIREMENT} into {install_dir}: {diagnostic}"
+    )
+
+
+def resolve_ast_grep(
+    configured: str | None,
+    install_dir: Path,
+    *,
+    install: bool,
+) -> str:
+    if configured is not None:
+        return find_ast_grep(configured)
+    binary = _installed_ast_grep(install_dir)
+    if binary is not None:
+        return binary
+    if install:
+        return install_ast_grep(install_dir)
+    raise AnchorExecutionError(
+        f"managed ast-grep is not installed under {install_dir}; run scanner preflight first"
+    )
 
 
 def has_top_level_key(query: str, key: str) -> bool:
@@ -268,7 +356,7 @@ def run_anchor(
     if not str(anchor["query"]).strip():
         return AnchorRunResult(anchor=dict(anchor), matches=[])
     if ast_grep is None:
-        raise AnchorExecutionError("ast-grep is required for enabled anchors but was not found on PATH")
+        raise AnchorExecutionError("ast-grep is required for enabled anchors")
 
     query_type = anchor["type"]
     if query_type == "pattern":
@@ -353,7 +441,7 @@ def scan_anchors(
         raise AnchorExecutionError(f"scan root does not exist: {root}")
     ordered = sorted_anchors(anchors)
     binary = (
-        find_ast_grep(ast_grep)
+        find_ast_grep(ast_grep or "ast-grep")
         if any(str(anchor["query"]).strip() for anchor in ordered)
         else None
     )

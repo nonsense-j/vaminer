@@ -18,13 +18,14 @@ import sys
 import tempfile
 from typing import Any
 
-from config import ADMISSION_QUERY_WEIGHT, CONCURRENCY, MAX_CANDIDATES, WORKSPACE_DIR
+from config import AST_GREP_CLI_PATH, ADMISSION_QUERY_WEIGHT, CONCURRENCY, MAX_CANDIDATES, WORKSPACE_DIR
 from engine import AnchorScanError as ScanError
-from engine import find_ast_grep, scan_anchors
+from engine import resolve_ast_grep, scan_anchors
 
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 RULES_DIR = SKILL_DIR / "rules"
+AST_GREP_INSTALL_DIR = SKILL_DIR / ".tool" / "ast_grep"
 VAS_ID_RE = re.compile(r"^VAS-[0-9]+$")
 FACT_FIELDS = {"anchorId", "startLine", "status", "fact"}
 REPORT_FIELDS = {
@@ -252,7 +253,6 @@ def prepare_scan(
     *,
     rules_dir: Path = RULES_DIR,
     workspace_dir: Path | str | None = WORKSPACE_DIR,
-    ast_grep: str | None = None,
 ) -> dict[str, Any]:
     repo_path = repo_path.resolve()
     if not repo_path.is_dir():
@@ -269,6 +269,7 @@ def prepare_scan(
         raise FileNotFoundError(
             f"repository overview is required before prepare: {overview_source}"
         )
+    ast_grep = resolve_ast_grep(AST_GREP_CLI_PATH, AST_GREP_INSTALL_DIR, install=False)
     discovered = scan_anchors(rule["anchors"], repo_path, rule["language"], ast_grep=ast_grep)
     matched = discovered.candidates(min_anchor_weight=1)
     admitted = [item for item in matched if item["max_anchor_weight"] >= ADMISSION_QUERY_WEIGHT]
@@ -480,7 +481,7 @@ def preflight_scan(vas_id: str, repo_path: Path, *, rules_dir: Path = RULES_DIR)
     if sys.version_info < (3, 12):
         raise RuntimeError("Python 3.12 or newer is required")
     checks.append(f"python {sys.version_info.major}.{sys.version_info.minor}")
-    binary = find_ast_grep()
+    binary = resolve_ast_grep(AST_GREP_CLI_PATH, AST_GREP_INSTALL_DIR, install=True)
     checks.append(f"ast-grep {binary}")
     load_rule(vas_id, rules_dir)
     checks.append(f"rule {vas_id}")

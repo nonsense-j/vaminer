@@ -102,13 +102,19 @@ class Anchor(BaseModel):
         ...,
         ge=1,
         le=5,
-        description="Importance of this site behavior on the defect's trigger chain",
+        description=(
+            "Importance of this intent's behavior to the overall defect analysis; "
+            "higher means more defect-relevant, not a queryability or implementation score"
+        ),
     )
     query_weight: int = Field(
         ...,
         ge=1,
         le=5,
-        description="Candidate-ranking strength of one executable query match",
+        description=(
+            "Importance of matches from the implemented query in the overall defect "
+            "analysis, on the same scale as behavior_weight; not a query quality score"
+        ),
     )
     query_type: QueryType = Field(
         ...,
@@ -151,7 +157,13 @@ class AnchorIntent(BaseModel):
 
     id: str = Field(..., pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
     behavior_weight: int = Field(
-        ..., ge=1, le=5, description="Importance of this site behavior on the defect's trigger chain"
+        ...,
+        ge=1,
+        le=5,
+        description=(
+            "Importance of this intent's behavior to the overall defect analysis; "
+            "higher means more defect-relevant, not a queryability or implementation score"
+        ),
     )
     behavior: str = Field(
         ...,
@@ -258,7 +270,16 @@ class AnchorSynthesisDelta(InlineJsonSchemaModel):
     anchor_id: str = Field(..., pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
     query_type: QueryType = Field(..., alias="type")
     query: str
-    query_weight: int = Field(..., ge=1, le=5)
+    query_weight: int = Field(
+        ...,
+        ge=1,
+        le=5,
+        description=(
+            "Importance of matches from the implemented query in the overall defect "
+            "analysis, on the same scale as the target behavior_weight; normally "
+            "equal, but lower when an unavoidable semantic downgrade is required"
+        ),
+    )
     adjustments: list[str]
     experiences: list[AstGrepExperience] = Field(
         default_factory=list,

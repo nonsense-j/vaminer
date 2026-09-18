@@ -1,5 +1,9 @@
 """Small, user-editable configuration for the standalone VAS scanner."""
 
+# Command name on PATH or an executable path. Set to None to let preflight
+# install a private ast-grep CLI under <skill-dir>/.tool/ast_grep.
+AST_GREP_CLI_PATH = "ast-grep"
+
 # A file needs at least one Anchor at this weight to become a task.
 ADMISSION_QUERY_WEIGHT = 2
 

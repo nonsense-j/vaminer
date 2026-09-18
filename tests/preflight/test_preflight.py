@@ -20,6 +20,7 @@ from src.miner.preflight.progress import start_heartbeat, stop_heartbeat
 from src.miner.runtimes.claude.config import ClaudeCodeConfig
 from src.miner.runtimes.claude.process import ProcessResult, ProcessRunner
 from src.miner.tools import ast_grep as ast_grep_module
+from src.miner.utils.executables import ManagedExecutableError
 
 
 def test_report_fails_only_when_a_required_check_fails():
@@ -43,40 +44,39 @@ def test_report_fails_only_when_a_required_check_fails():
     assert blocked.as_dict()["checks"][-1]["status"] == "fail"
 
 
-def test_rg_preflight_requires_ripgrep_on_path(monkeypatch: pytest.MonkeyPatch):
+def test_rg_preflight_requires_managed_ripgrep(monkeypatch: pytest.MonkeyPatch):
     fake_rg = str(Path("tools") / "rg")
-    monkeypatch.setattr(
-        common.shutil,
-        "which",
-        lambda name: None if name == "rg" else str(Path("tools") / name),
-    )
+
+    def missing(_name: str) -> str:
+        raise ManagedExecutableError("rg is missing; run `uv sync`")
+
+    monkeypatch.setattr(common, "managed_executable", missing)
     missing = common.check_rg()
     assert missing.status is CheckStatus.FAIL
     assert "rg" in (missing.detail or missing.summary)
 
-    monkeypatch.setattr(common.shutil, "which", lambda name: fake_rg if name == "rg" else None)
+    monkeypatch.setattr(common, "managed_executable", lambda _name: fake_rg)
     available = common.check_rg()
     assert available.status is CheckStatus.PASS
     assert fake_rg in available.summary
 
 
-def test_ast_grep_preflight_rejects_cmd_shim(monkeypatch: pytest.MonkeyPatch):
-    cmd_shim = r"C:\Users\test\AppData\Roaming\npm\ast-grep.CMD"
-    monkeypatch.setattr(ast_grep_module.shutil, "which", lambda name: cmd_shim if name == "ast-grep" else None)
+def test_ast_grep_preflight_requires_managed_cli(monkeypatch: pytest.MonkeyPatch):
+    def missing(_name: str) -> str:
+        raise ManagedExecutableError("ast-grep is missing; run `uv sync`")
+
+    monkeypatch.setattr(ast_grep_module, "managed_executable", missing)
 
     result = common.check_ast_grep(timeout_seconds=5)
 
     assert result.status is CheckStatus.FAIL
-    assert ".cmd shim" in result.summary
-    assert cmd_shim in (result.detail or "")
-    assert "cargo install ast-grep" in (result.detail or "")
-    assert "scoop install ast-grep" in (result.detail or "")
+    assert "uv sync" in (result.detail or "")
 
 
 def test_ast_grep_preflight_uses_resolved_native_executable(monkeypatch: pytest.MonkeyPatch):
     executable = str(Path("tools") / "ast-grep.exe")
     commands: list[list[str]] = []
-    monkeypatch.setattr(ast_grep_module.shutil, "which", lambda name: executable if name == "ast-grep" else None)
+    monkeypatch.setattr(ast_grep_module, "managed_executable", lambda _name: executable)
 
     def fake_run(command, **_kwargs):
         commands.append(command)

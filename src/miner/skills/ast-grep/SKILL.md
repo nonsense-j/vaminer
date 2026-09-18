@@ -11,7 +11,7 @@ Translate one supplied structural intent into the smallest faithful ast-grep que
 
 ## Step 1: Interpret the structural intent
 
-- Read `references/experiences.md` before constructing the first candidate. Treat its lessons as heuristics and revalidate them for the current language, query, and ast-grep version.
+- Before constructing the first candidate, read `references/experiences/all.md` and, when it exists, `references/experiences/<language>.md`, where `<language>` is the lowercase ast-grep language identifier supplied by the caller. Do not read experience files for other languages. Treat the selected lessons as heuristics and revalidate them for the current language, query, and ast-grep version.
 - Identify the smallest AST node that directly expresses the requested structure.
 - Separate required syntax variants from incidental identifiers, comments, enclosing scopes, and neighboring operations.
 - Treat supplied positive examples and target sites as validation evidence. When the intent is underspecified, prefer the least assumptive recall-preserving interpretation and report the ambiguity to the caller.
@@ -45,10 +45,10 @@ Translate one supplied structural intent into the smallest faithful ast-grep que
 ## Step 5: Report query-writing experience
 
 - Return an empty experience list by default. Report an experience only when substantive query or debugging work reveals concise, reusable guidance. A straightforward successful query should not produce an experience.
-- Compare against `references/experiences.md` first. Do not restate an existing lesson. If a lesson needs a new caveat, use `REPLACE` with its exact `lesson_id` and preserve the existing wording while appending the caveat.
+- Compare against the selected common and language-specific experience files first. Use `ADD` only when no existing lesson can be materially extended. Otherwise use `REPLACE` with the exact `lesson_id`, preserving the existing wording while appending the new caveat.
 - Each experience contains exactly `mode` (`ADD` or `REPLACE`), `lesson_id` (`ALL-N` or `<LANGUAGE>-N`), and a short, self-contained `lesson`. Use `ALL` for language-agnostic guidance and the uppercase ast-grep language name for language-specific guidance.
 - Return no more than three distinct experience updates for one Synthesizer output; the host uses only the final complete output after any repair/resume.
-- `ADD` uses the next unused ID in its section. `REPLACE` updates the existing lesson with that ID. Lessons are stored as `- [lesson_id] lesson` under the matching language section.
+- `ADD` uses the next unused ID for its scope. `REPLACE` updates the existing lesson with that ID. The host stores each lesson as `- [lesson_id] lesson` in the matching lowercase scope file under `references/experiences/`.
 - Keep lessons generic, project-independent, concise, and expressed in 1-2 sentences. Support them with stderr, debug trees, or match results. Exclude repository paths, issue or intent semantics, match counts, routine validation outcomes, tool narration, and query transcripts. State the language or query form when it materially affects the lesson.
 
 # Constraints

@@ -119,7 +119,7 @@ def test_rg_tools_reject_invalid_scope_and_pattern(tmp_path: Path):
 @pytest.mark.parametrize(
     ("failure", "message"),
     [
-        (FileNotFoundError(), "requires rg on PATH"),
+        (FileNotFoundError(), "managed ripgrep executable disappeared"),
         (subprocess.TimeoutExpired(["rg"], 20), "timed out"),
     ],
 )

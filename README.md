@@ -22,8 +22,6 @@ This repository generates VAS rules. It does **not** provide a standalone end-us
 - Python 3.12 or newer
 - `uv`
 - Git
-- The `rg` (ripgrep) executable available on `PATH`
-- The `ast-grep` or `sg` executable available on `PATH`
 - For Pydantic AI, an API key for a supported LLM provider
 - For Claude CLI, an installed `claude` command with an authenticated user session
 - On Windows, Win32 long-path support enabled (`LongPathsEnabled=1`)
@@ -36,6 +34,8 @@ cd vaminer
 uv sync
 cp .env.example .env
 ```
+
+`uv sync` installs the Miner-managed `rg` and `ast-grep` executables into the project environment. Run Miner commands through `uv run`; system installations of these tools are not used.
 
 The example selects DeepSeek. Set `DEEPSEEK_API_KEY` in the repository-root `.env`, or choose one of the other configurations in [LLM configuration](#llm-configuration).
 
@@ -152,7 +152,7 @@ The generated JSON rule is consumed by an agent through the `vas-scanner` skill;
 
    Copy the whole directory, not only `SKILL.md`. It contains the scanner scripts, analysis guidance, and every generated rule in the `rules/` subdirectory. If the skill was installed before a new rule was generated, copy the new `VAS-XXXX.json` into the installed skill's `rules/` directory or reinstall the skill.
 
-2. Ensure `ast-grep` or `sg` is available on the coding agent's `PATH`. The scanner uses only Python 3.12+ standard-library modules and does not require the parent VAMiner environment or `portalocker`.
+2. Configure ast-grep in `scripts/config.py`. `AST_GREP_CLI_PATH = "ast-grep"` uses that command from the coding agent's `PATH` and fails if it is unavailable. Set `AST_GREP_CLI_PATH = None` to let scanner preflight install a private `ast-grep-cli` under `<skill-dir>/.tool/ast_grep`. The scanner is independent from the parent VAMiner environment.
 
 3. Open the target project with the agent and invoke the installed skill with the desired rule:
 
@@ -189,7 +189,7 @@ The Rule Generator does not load the ast-grep skill or validate queries. Its opt
 
 One mining run selects exactly one Runtime Adapter and one configured model. All phases, including child Synthesizers, retain that identity; there is no per-phase routing or runtime fallback. `VAMiner` accepts either an Issue or Example Suite through an Input Adapter, then uses one shared RCA → Rule Generation → persistence workflow.
 
-`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts replans within the parent Agent turn budget, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Each Synthesizer contributes only the experiences from its final complete output: they are ID-deduplicated and capped at three after the multi-round quality gate; the shared persisted skill has no fixed total experience count. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools, `run_ast_grep_query`, and `debug_ast_grep_pattern`; query execution and pattern debugging are separate tools, and both preserve ast-grep stderr verbatim. Generic filesystem, shell, network, and further delegation are unavailable. At child completion, the host updates `references/experiences.md` under a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
+`AnchorSynthesisSession` owns the authoritative RCA and latest successful Anchor Plan. It accepts replans within the parent Agent turn budget, starts one fresh child Agent per intent with concurrency capped at five, restores plan order, validates Case Artifact recall and query grounding, and records only the latest successful batch. There is no fixed limit on the number of independent intents or declared Case Artifacts. Each Synthesizer contributes only the experiences from its final complete output: they are ID-deduplicated and capped at three after the multi-round quality gate; the shared persisted skill has no fixed total experience count. Children cannot return RCA, summary, behavior, inspect hints, or behavior weights. Each Synthesizer receives typed read-only source/case/skill tools, `run_ast_grep_query`, and `debug_ast_grep_pattern`; query execution and pattern debugging are separate tools, and both preserve ast-grep stderr verbatim. Generic filesystem, shell, network, and further delegation are unavailable. A child reads only `references/experiences/all.md` and its current lowercase language file when present. At child completion, the host writes each accepted lesson to the matching scope file under `references/experiences/` using a shared/exclusive process lock, so readers never observe a concurrent write and writers always merge against the latest content.
 
 ### Miner module responsibilities
 
@@ -345,7 +345,7 @@ uv run pytest
 }
 ```
 
-`behavior_weight` records the rule importance of the intended inspection behavior. `query_weight` may be lower when the recall-preserving query is a weaker or broader proxy, and it is the only weight used for ranking. File priority sums the query weights of distinct matched anchors; repeated matches from the same anchor add navigation locations but do not multiply the score. Per-intent `required_cases` exists only in the synthesis request and is not part of synthesized anchors or the final VAS schema.
+`behavior_weight` is the intent's importance to the overall defect analysis: higher means more defect-relevant, not easier to query. `query_weight` uses the same scale for matches from the implemented query. It normally equals `behavior_weight`; lower it only when an unavoidable query limitation causes a semantic downgrade, and never raise it above `behavior_weight`. It is the only weight used for ranking. File priority sums the query weights of distinct matched anchors; repeated matches from the same anchor add navigation locations but do not multiply the score. Per-intent `required_cases` exists only in the synthesis request and is not part of synthesized anchors or the final VAS schema.
 
 An empty `query` is the disabled-anchor sentinel. Disabled anchors remain in the VAS so their intended inspection behavior is visible, but they are never executed and add no ranking weight. Enabled anchors remain strictly validated. Disabled anchors do not relax the requirement that every generated Case Artifact be admitted by at least one Anchor meeting `ADMISSION_QUERY_WEIGHT`; a missing Case Artifact admission remains a validation error.
 
@@ -363,6 +363,6 @@ A complete anchor set is recall-oriented and behavior-distinct:
 - Each per-anchor query is centered on its target `behavior`. To reduce overlap with sibling anchors, one precision pass may add local defect-relevant structure supported by every required case and the RCA site, such as requiring the target operation to appear inside an `if` statement. Project-specific or full-chain constraints remain out of bounds.
 - A Synthesizer normally returns an empty `plan_suggestion`. It may briefly suggest deleting, merging, or revising intents only when observed source-corpus precision is materially poor and required-case recall can be preserved; the Rule Generator decides whether further plan refinement is worthwhile within its remaining turns. Such a suggestion must never be motivated by an artificial Anchor-count limit.
 - Generic calls, assignments, definitions, and conditions are rejected unless structural or API constraints make them rule-sensitive.
-- Precision refinement is for reducing overlap between sibling anchors. Unrelated source matches do not justify narrowing the query; keep recall and lower `query_weight` when needed.
+- Precision refinement is for reducing overlap between sibling anchors. Unrelated source matches do not justify narrowing the query; keep recall and lower `query_weight` only when they make the actual query a less defect-specific signal.
 
 See [the vas-scanner skill](src/.vaminer/skills/vas-scanner/SKILL.md) for its internal rule-execution and reporting workflow.
