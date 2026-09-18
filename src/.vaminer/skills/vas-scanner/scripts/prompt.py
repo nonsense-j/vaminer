@@ -22,7 +22,7 @@ You are assigned to analyze *a candidate file* for a specific defect detection r
 
 ### Scenarios
 
-> Here are some example scenarios that illustrate the defect and its safe handling. Treat them as guidance for your analysis, not as a complete list of all possible cases.
+> Here are some example scenarios that illustrate the defect and its safe handling. Treat them as guidance for your analysis, not as a complete list of all possible cases. Any defects with sufficient evidence that violate the rule summary should be reported, even if they are not listed here.
 
 #### Unsafe Scenarios
 
@@ -44,8 +44,8 @@ You are assigned to analyze *a candidate file* for a specific defect detection r
 
 ### Workflow
 
-1. Read the overview and rule specification.
-2. Inspect the candidate to identify potential rule-violated defects. Pay aettention to every listed anchors.
+1. Read the overview and rule specification. Treat the rule summary as the detection goal, and report any defects that violate it.
+2. Inspect the candidate to identify potential rule-violated defects. Pay attention to the hints provided by each anchor. 
 3. During analysis, before opening a related file, **always first check their mirrored Markdown path** under the Shared Checks Root (e.g., `shared_checks/a/b/c/d.md`) and directly use existing safe or alert facts to reduce redundant analysis.
 4. For each listed anchor, decide whether it is SAFE or ALERT and provide a concrete summarized fact answering the hint. For each defect, verify that each is supported by sufficient evidence and the defect chain is valid.
 5. Record the facts and reports as one JSON object with `anchorFacts` and `reports`. Submit that object using the Bash heredoc below. If record reports a schema error, correct the JSON and retry. Once record succeeds, **end and return the success message with defect counts only**.
