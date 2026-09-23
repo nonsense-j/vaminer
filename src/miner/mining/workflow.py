@@ -169,6 +169,10 @@ class VAMiner:
                     runtime=self.runtime.identity.runtime_id,
                 ) as log_path:
                     logger.info(
+                        "Registered VAS ID: %s",
+                        vas_id,
+                    )
+                    logger.info(
                         "Starting VAMiner source_sha=%s runtime=%s",
                         source_sha,
                         self.runtime.identity.runtime_id,

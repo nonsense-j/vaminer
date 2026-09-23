@@ -116,6 +116,12 @@ The final rule is written to:
 src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 ```
 
+Delete a registered rule and its source registry entry, workspace, rule file, and run output:
+
+```bash
+uv run python -m src.miner.main --delete VAS-0001 VAS-0002
+```
+
 The model workspace contains only source and generated cases:
 
 ```text

@@ -16,6 +16,12 @@ from .config import MINER_OUTPUT_DIR, VAS_RULES_DIR, VAS_WORKSPACE_DIR
 from .log import logger
 
 SourceType = Literal["issue", "example_suite"]
+_VAS_ID_PATTERN = re.compile(r"^VAS-\d+$")
+
+
+def _validate_vas_id(vas_id: str) -> None:
+    if not _VAS_ID_PATTERN.fullmatch(vas_id):
+        raise ValueError(f"invalid VAS ID: {vas_id!r}")
 
 
 def _next_vas_id(registry: SourceRegistry) -> str:
@@ -156,6 +162,16 @@ class SourceRegistry:
             entry["content_digest"] = content_digest
         data.setdefault(vas_id, []).append(entry)
         self._save(data)
+
+    def delete(self, vas_id: str) -> bool:
+        """Remove a VAS and all of its source aliases from the registry."""
+
+        data = self._load()
+        if vas_id not in data:
+            return False
+        del data[vas_id]
+        self._save(data)
+        return True
 
 
 class Workspace:
@@ -304,6 +320,63 @@ class Workspace:
             trace_id=trace_id,
             rules_dir=rules_dir,
         )
+
+    @classmethod
+    def delete_vas(
+        cls,
+        vas_id: str,
+        *,
+        base_dir: Path | None = None,
+        output_root: Path | None = None,
+        rules_dir: Path | None = None,
+    ) -> bool:
+        """Delete one VAS registration and every persisted artifact for it.
+
+        ``from_id`` intentionally creates a workspace, so deletion resolves the
+        three storage locations directly and never materializes a replacement.
+        """
+
+        _validate_vas_id(vas_id)
+        workspace_root = (base_dir or VAS_WORKSPACE_DIR).expanduser().resolve()
+        generated_output_root = (output_root or MINER_OUTPUT_DIR).expanduser().resolve()
+        generated_rules_dir = (rules_dir or VAS_RULES_DIR).expanduser().resolve()
+
+        removed = SourceRegistry(workspace_root).delete(vas_id)
+        for path in (
+            workspace_root / vas_id,
+            generated_output_root / "miner" / vas_id,
+            generated_rules_dir / f"{vas_id}.json",
+        ):
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+                removed = True
+            elif path.is_dir():
+                shutil.rmtree(path)
+                removed = True
+        return removed
+
+    @classmethod
+    def delete_vas_many(
+        cls,
+        vas_ids: list[str],
+        *,
+        base_dir: Path | None = None,
+        output_root: Path | None = None,
+        rules_dir: Path | None = None,
+    ) -> dict[str, bool]:
+        """Delete several VAS records after validating the complete batch."""
+
+        for vas_id in vas_ids:
+            _validate_vas_id(vas_id)
+        return {
+            vas_id: cls.delete_vas(
+                vas_id,
+                base_dir=base_dir,
+                output_root=output_root,
+                rules_dir=rules_dir,
+            )
+            for vas_id in vas_ids
+        }
 
     @property
     def rule_path(self) -> Path:

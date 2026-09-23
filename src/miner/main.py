@@ -36,8 +36,22 @@ from .utils.config import (
 )
 from .utils.log import RuntimeLog
 from .utils.telemetry import flush_tracing
+from .utils.workspace import Workspace
 
 RUNTIME_IDS = ("pydanic-sdk", "claude-cli")
+
+
+def confirm_delete(vas_ids: list[str]) -> bool:
+    """Ask for one explicit confirmation before deleting VAS artifacts."""
+
+    print("The following VAS rules and all associated artifacts will be deleted:")
+    for vas_id in vas_ids:
+        print(f"  - {vas_id}")
+    try:
+        answer = input("Confirm deletion of all listed rules? [y/N]: ")
+    except EOFError:
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -52,6 +66,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="Directory of related good/bad examples. Mutually exclusive with issue inputs.",
+    )
+    parser.add_argument(
+        "--delete",
+        dest="delete_vas_ids",
+        nargs="+",
+        metavar="VAS_ID",
+        help="Delete one or more VAS registrations and their generated artifacts.",
     )
     parser.add_argument("--use-cache", action="store_true", help="Use valid runtime-scoped cached outputs.")
     parser.add_argument(
@@ -92,6 +113,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ]
     if args.example_suite is not None and args.issue_input:
         parser.error("--example-suite is mutually exclusive with positional issue inputs")
+    if args.delete_vas_ids is not None:
+        if args.example_suite is not None or args.issue_input:
+            parser.error("--delete is mutually exclusive with mining inputs")
+        args.delete_vas_ids = list(dict.fromkeys(args.delete_vas_ids))
+        return args
     if args.example_suite is None and not args.issue_input:
         parser.error("provide at least one issue input or --example-suite PATH")
     return args
@@ -118,7 +144,25 @@ def make_runtime(args: argparse.Namespace) -> AgentRuntime:
     )
 
 
-async def main(args: argparse.Namespace) -> VASFull | list[VASFull]:
+async def main(args: argparse.Namespace) -> VASFull | list[VASFull] | None:
+    if args.delete_vas_ids is not None:
+        if not confirm_delete(args.delete_vas_ids):
+            print(f"Deletion cancelled: {', '.join(args.delete_vas_ids)}")
+            return None
+        results = Workspace.delete_vas_many(
+            args.delete_vas_ids,
+            base_dir=args.workspace_dir,
+            output_root=args.output_dir,
+            rules_dir=args.rules_dir,
+        )
+        deleted = [vas_id for vas_id, removed in results.items() if removed]
+        missing = [vas_id for vas_id, removed in results.items() if not removed]
+        if deleted:
+            print(f"Deleted VAS rules: {', '.join(deleted)}")
+        if missing:
+            print(f"VAS rules not found: {', '.join(missing)}")
+        return None
+
     runtime = make_runtime(args)
     miner = VAMiner(
         runtime,

@@ -116,6 +116,12 @@ uv run python -m src.miner.main --use-cache CVE-2024-XXXX
 src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 ```
 
+删除已注册的规则及其 source registry entry、工作区、规则文件和运行输出：
+
+```bash
+uv run python -m src.miner.main --delete VAS-0001 VAS-0002
+```
+
 模型工作区只包含源码和生成用例：
 
 ```text

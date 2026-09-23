@@ -149,3 +149,45 @@ def test_register_example_suite_migrates_a_legacy_windows_exp_id(tmp_path: Path)
 
     stored = json.loads(registry_path.read_text(encoding="utf-8"))
     assert stored["VAS-0001"][0]["exp_id"] == "group/CWE-2099"
+
+
+def test_delete_vas_removes_registry_workspace_rule_and_all_outputs(tmp_path: Path):
+    workspace_dir = tmp_path / "vas_ws"
+    output_dir = tmp_path / "output"
+    rules_dir = tmp_path / "rules"
+    vas_id = "VAS-0001"
+
+    registry = SourceRegistry(workspace_dir)
+    registry.register(vas_id, "issue", "CVE-2099-0001")
+    registry.register(
+        vas_id,
+        "example_suite",
+        "CWE-2099",
+        content_digest="a" * 64,
+    )
+    (workspace_dir / vas_id / "src").mkdir(parents=True)
+    (workspace_dir / vas_id / "src" / "repo.txt").write_text("source\n", encoding="utf-8")
+    for source_sha in ("issue-cache", "example-cache"):
+        run_dir = output_dir / "miner" / vas_id / source_sha
+        run_dir.mkdir(parents=True)
+        (run_dir / "result.json").write_text("{}\n", encoding="utf-8")
+    rules_dir.mkdir()
+    (rules_dir / f"{vas_id}.json").write_text("{}\n", encoding="utf-8")
+
+    assert Workspace.delete_vas(
+        vas_id,
+        base_dir=workspace_dir,
+        output_root=output_dir,
+        rules_dir=rules_dir,
+    )
+
+    assert not (workspace_dir / vas_id).exists()
+    assert not (output_dir / "miner" / vas_id).exists()
+    assert not (rules_dir / f"{vas_id}.json").exists()
+    assert json.loads((workspace_dir / "source_registry.json").read_text(encoding="utf-8")) == {}
+    assert not Workspace.delete_vas(
+        vas_id,
+        base_dir=workspace_dir,
+        output_root=output_dir,
+        rules_dir=rules_dir,
+    )
