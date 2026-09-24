@@ -59,7 +59,7 @@ JSON
 ```
 
 > Record: The command will save the facts to Shared Checks and the reports to `{result_path}` if successful.
-> Note: The analysis must be thorough and results are supported by sufficient evidence.
+> Note: The analysis must be thorough and results are supported by sufficient evidence. Never guess during analysis. Report when you are confident that a defect is presen.
 
 
 ## Output Contract
@@ -99,4 +99,5 @@ JSON
   ]
 }}
 ```
+> all events constitute the complete defect chain, and the main event is the trigger point of the defect.
 """

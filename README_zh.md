@@ -2,31 +2,21 @@
 
 [English](README.md)
 
-VAMINER 将一个已报告的软件问题转换为变体分析规范（Variant Analysis Specification，VAS），并把生成的规则与 Agent Skill 一起打包，用于在较新版本或其他代码仓库中查找相关缺陷。
+VAMINER 会把一个已知的软件缺陷转换成可复用的规则，用于在源码中查找相同或相近的缺陷。
 
-系统采用 **宽召回搜索、精确分析（sound search, precise analysis）** 模式：
+它支持两个步骤：
 
-- 使用确定性的 ast-grep 锚点查找与缺陷相关的代码热点并排序。
-- 由分析 Agent 判断候选代码是否违反规则中的行为场景。
+- **离线生成规则**：输入 CVE、GitHub Issue，或包含相关源码示例的目录。
+- **在线代码扫描**：通过仓库自带的 `vas-scanner` Agent Skill，使用生成的规则扫描代码。
 
-锚点只用于检索和导航，本身不代表代码中一定存在缺陷。
+## 安装
 
-## 项目范围
-
-本仓库负责生成 VAS 规则，**不提供**面向最终用户的独立规则 Runner。如果要在其他项目中扫描潜在的 1-day 缺陷或漏洞，需要把仓库自带的 [`vas-scanner`](src/.vaminer/skills/vas-scanner/) Skill 安装到编程 Agent 中，然后让 Agent 使用生成的规则执行扫描。
-
-## 快速开始
-
-### 环境要求
+环境要求：
 
 - Python 3.12 或更高版本
-- `uv`
+- [`uv`](https://docs.astral.sh/uv/)
 - Git
-- 使用 Pydantic AI 时，需要支持的 LLM 服务及对应 API Key
-- 使用 Claude CLI 时，需要已安装 `claude` 命令并完成用户登录
-- Windows 环境需要启用 Win32 长路径支持（`LongPathsEnabled=1`）
-
-### 安装与配置
+- 支持的 LLM 服务及 API Key，或已完成认证的 Claude CLI
 
 ```bash
 git clone <本仓库地址>
@@ -35,183 +25,7 @@ uv sync
 cp .env.example .env
 ```
 
-`uv sync` 会把 Miner 管理的 `rg` 和 `ast-grep` 可执行文件安装到项目环境中。请通过 `uv run` 运行 Miner；Miner 不使用系统安装的这两个工具。
-
-示例配置默认使用 DeepSeek。请在仓库根目录的 `.env` 中填写 `DEEPSEEK_API_KEY`；如需使用其他服务，请参考 [LLM 配置](#llm-配置)。
-
-#### Windows 长路径
-
-在 Windows 上，请通过管理员 PowerShell 启用 Win32 长路径支持：
-
-```powershell
-New-ItemProperty `
-  -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
-  -Name LongPathsEnabled `
-  -PropertyType DWord `
-  -Value 1 `
-  -Force
-```
-
-对应的组策略位于 **计算机配置 > 管理模板 > 系统 > 文件系统 > 启用 Win32 长路径**。修改后请重启终端和 VAMINER；如果 preflight 仍然提示 warning，请重启 Windows。
-
-当该设置未启用或注册表不可读时，preflight 会把 `windows.long-paths` 报告为 `WARN`。warning 不会导致 preflight 失败，但目录层级很深的 Example Suite 可能无法读取。缩短生成目录也能降低外部工具的路径兼容风险，可以在 `.env` 中配置：
-
-```dotenv
-VAMINER_WORKSPACE_DIR=C:/vm/ws
-VAMINER_OUTPUT_DIR=C:/vm/out
-```
-
-开始生成规则前，先运行环境预检：
-
-```bash
-uv run python -m src.miner.preflight --runtime pydanic-sdk
-uv run python -m src.miner.preflight --runtime claude-cli
-```
-
-交互命令会把每项检查及长任务等待状态实时输出到 stderr，最后再打印汇总报告。默认预检不会调用模型。它会验证 Python、适用时的 Windows 长路径状态、内置资源、输出路径写权限、Git、`rg`、一次真实 ast-grep 查询、已配置时的 Langfuse 鉴权，以及所选 runtime 的配置。对于 Claude，还会检查 CLI 所需参数，在 tracing 启用时加载并执行内置 Langfuse transcript hook，以及运行真实的 MCP handshake、工具列表和只读工具调用。
-
-增加 `--live` 后会发起一次很小的真实模型请求。Agent 必须调用探针工具并返回结构化输出；如果已启用 Langfuse，还必须在同一条 preflight trace 下产生至少一个 runtime observation。该请求可能产生模型费用。使用 `--json` 可在 stdout 输出机器可读报告，进度仍通过 stderr 展示；增加 `--quiet` 可完全关闭进度。任何必需检查失败时命令退出码为 1。Langfuse trace 默认最多等待 120 秒，每 10 秒输出一次 heartbeat。
-
-```bash
-uv run python -m src.miner.preflight --runtime claude-cli --live
-```
-
-### 生成规则
-
-向 Miner 传入 CVE ID 或 GitHub Issue URL：
-
-```bash
-uv run python -m src.miner.main CVE-2024-XXXX
-```
-
-```bash
-uv run python -m src.miner.main https://github.com/owner/repository/issues/123
-```
-
-也可以传入一个 Example Suite 目录。若目录位于 `data/` 下，则相对于 `data/` 的归一化 POSIX 路径就是 Example Suite 的 registry/cache identity（通常类似 CWE 或 CVE ID）；否则使用目录名。目录内部可以平铺或包含任意层级的子目录，所有示例应共同表达同一个缺陷模式：
-
-```bash
-uv run python -m src.miner.main --example-suite /path/to/CVE-2024-XXXX
-```
-
-仓库包含一个受 Juliet 命名与 flow variant 约定启发的合成样例，可直接作为输入：
-
-```bash
-uv run python -m src.miner.main --example-suite data/CWE134_Uncontrolled_Format_String
-```
-
-面向 IDEA 宣传的完整示例见 [CWE-134 Anchor 展示](docs/anchor_showcase_cwe134.md)，其中包含安全规范、互补 Anchor、热点排序和可复现查询。对应的示例规则是 [VAS-0134.json](examples/anchor_showcase/VAS-0134.json)。
-
-在业务输入层，Miner 只要求该路径是非空目录，并且递归后至少包含一个可识别的源码文件。它不限制示例数量、目录布局或源码语言数量，也不要求 manifest。good/bad 信息可以通过文件名、目录名、注释、标签或可选 manifest 表达，并由 RCA 阶段结合源码行为判断。为保证生成的快照不会越过输入目录，符号链接和特殊文件系统条目仍不接收。
-
-如果需要复用上一次执行中仍然有效的结果，可添加 `--use-cache`：
-
-```bash
-uv run python -m src.miner.main --use-cache CVE-2024-XXXX
-```
-
-最终规则会写入：
-
-```text
-src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
-```
-
-删除已注册的规则及其 source registry entry、工作区、规则文件和运行输出：
-
-```bash
-uv run python -m src.miner.main --delete VAS-0001 VAS-0002
-```
-
-模型工作区只包含源码和生成用例：
-
-```text
-../vas_ws/miner/VAS-XXXX/
-├── src/
-└── cases/
-```
-
-缓存和诊断产物位于模型工作区之外：
-
-```text
-output/
-├── miner/VAS-XXXX/<source-sha>/
-│   ├── caches/                         # Issue Collection、RCA、Rule Generation 三种缓存
-│   ├── logs/                           # 每次运行的 workflow 日志
-│   │   └── <trace-id>__<runtime>.log
-```
-
-启用 Langfuse 时，`<trace-id>` 就是整个 workflow 的 Langfuse Trace ID；未启用时，VAMINER 会生成相同格式的本地 ID。可以通过 `VAMINER_OUTPUT_DIR` 或 `--output-dir` 整体调整 `output/` 的位置。
-
-`<source-sha>` 是对 `issue_<issue-reference>` 或 `example_suite_<exp-id>` 计算 SHA-256 后取前 12 位十六进制字符。阶段缓存文件名为 `<agent>__<runtime>.json`，model 名称不参与 cache 标识。
-
-## 在其他项目中运行生成的规则
-
-生成的 JSON 规则需要由 Agent 通过 `vas-scanner` Skill 执行；本仓库中没有需要单独启动的 Runner。
-
-1. 将完整的 Skill 目录复制到目标项目中 Agent 能够识别的 Skill 目录。例如：
-
-   ```bash
-   mkdir -p /path/to/target-project/.agent/skills
-   cp -R src/.vaminer/skills/vas-scanner \
-     /path/to/target-project/.agent/skills/
-   ```
-
-   必须复制整个目录，而不只是 `SKILL.md`。该目录包含扫描脚本、分析规范，以及 `rules/` 子目录中的所有已生成规则。如果安装 Skill 后又生成了新规则，请把新的 `VAS-XXXX.json` 复制到已安装 Skill 的 `rules/` 目录，或重新安装整个 Skill。
-
-2. 在 `scripts/config.py` 中配置 ast-grep。`AST_GREP_CLI_PATH = "ast-grep"` 会使用编程 Agent `PATH` 中的该命令，找不到时直接失败；设为 `AST_GREP_CLI_PATH = None` 时，scanner preflight 会把私有的 `ast-grep-cli` 安装到 `<skill-dir>/.tool/ast_grep`。Scanner 与 VAMiner 主项目环境相互独立。
-
-3. 使用 Agent 打开目标项目，并指定要执行的规则：
-
-   ```text
-   /vas_scanner Run VAS-XXXX rule on this project and find potential defects/vulnerabilities.
-   ```
-
-   将 `VAS-XXXX` 替换为实际生成的规则 ID。如果所使用的 Agent 采用其他 Skill 目录或调用语法，请使用对应方式，但要保持 `vas-scanner` 目录内容完整。
-
-该 Skill 会使用规则中的 ast-grep 锚点确定性地查找并排序候选文件，再让主 Agent 按配置并行调度 subagent 分析 task。每个 subagent 独立记录自己的 Facts 和 reports，`finalize` 会确认所有 task 都完成后生成最终 `report.json`：
-
-```text
-<target-project>/.vas/VAS-XXXX/run_<timestamp>/report.json
-```
-
-主 Agent 依次调用 `preflight`、`prepare` 和 `finalize`，并根据 `prepare`
-返回的并发配置重试失败或缺少结果的 task。
-
-## 规则生成流程
-
-Miner 按照以下确定性顺序执行：
-
-1. **问题收集（Issue Collection）**：收集问题描述、仓库来源以及有缺陷和已修复的 Commit。
-2. **根因分析（Root Cause Analysis）**：确定具体缺陷行为和修复模式，并提取最小原始用例及其变体。
-3. **规则生成（Rule Generation）**：生成规则摘要、相互独立的不安全/安全场景，并为因果链中每个不同、局部且规则敏感的位置生成锚点意图。修订计划时，可以根据上一轮合成结果为意图附带可选查询草稿，包括合并后的意图。
-4. **AST-Grep 合成（AST-Grep Synthesis）**：在隔离且有界的 Synthesizer 上下文中逐个处理 intent。child 返回一个目标 id 的 query 字段与简洁、可复用的 ast-grep 经验，host 与 canonical intent 组装 Anchor，并安全地把新经验合并回 Skill。
-5. **组装与验证（Assembly and Validation）**：使用权威 RCA、最新验收的 Anchor Plan、Rule Generation draft 和已验收 query delta 构建完整 VAS。
-6. **生成后锚点检查（Post-generation Anchor Check）**：独立检查用例覆盖和源码准入，并记录非阻断 warning。
-
-Rule Generator 不加载 ast-grep Skill，也不验证查询。可选的 `draft_query` 是原始 pattern 或 YAML rule 字符串，可在重新规划时复制、调整或组合上一轮查询形成。AST-Grep Synthesizer 从提供的草稿开始，负责完善查询、最终语法、验证以及查询与行为的一致性。如果无法生成可信查询，`query: ""` 会把该锚点标记为禁用；扫描和排序会跳过它，并在运行日志中突出显示。
-
-每次 mining 只选择一个 Runtime Adapter 和一个配置模型。所有 Phase 以及 child Synthesizer 都保持同一 identity，不再存在按 Phase 路由或 Runtime fallback。`VAMiner` 通过 Input Adapter 接受 Issue 或 Example Suite，然后汇合到同一条 RCA → Rule Generation → persistence 流程。
-
-`AnchorSynthesisSession` 持有权威 RCA 和最新成功的 Anchor Plan。它允许在父 Agent 的 Turn 预算内重新提交 plan，为每个 intent 启动 fresh child Agent，并发上限为 5，恢复 plan 顺序，并验收 Case Artifact 召回和 query grounding。Anchor Intent 和 Case Artifact 没有固定数量上限；运行数量由保持独立且整体完整的 Anchor Plan 决定。每个 Synthesizer 只贡献其最终完整输出中的 experience：通过多轮质量门槛后按 lesson ID 去重，并且每个 Synthesizer 最多保留 3 条；共享持久化 skill 的 experience 总数没有固定上限。child 无法返回 RCA、summary、behavior、inspect hint 或 behavior weight。Synthesizer 只获得 typed 只读 source/case/skill 工具、`run_ast_grep_query` 和 `debug_ast_grep_pattern`；query 执行与 pattern 调试由两个独立工具完成，并且都会原样返回 ast-grep stderr。它没有通用文件系统、shell、网络或继续 delegation 权限。child 只读取 `references/experiences/all.md` 以及存在的当前语言小写文件。每个 child 结束时，host 在共享/独占进程锁保护下，把验收的经验分别写入 `references/experiences/` 下对应的 scope 文件：读不会撞上写，写也总会先合并最新内容。
-
-### Miner 模块职责
-
-- `src/miner/agent/`：定义封闭的 Phase Authority 和小型 Runtime Seam。
-- `src/miner/models/`：保存问题、根因、锚点和 VAS 模型。
-- `src/miner/mining/`：负责 Phase Definition、Input Adapter、共享 VAMiner 流程和确定性验收。
-- `src/miner/utils/`：负责通用配置、工作区布局、类型化缓存持久化、日志和遥测。
-- `src/miner/tools/`：提供运行时无关的证据、仓库、用例、Skill 和 ast-grep 操作。
-- `src/miner/runtimes/shared/`：包含 host-owned Anchor Synthesis Session。
-- `src/miner/runtimes/pydantic/`：包含进程内 Pydantic AI Adapter、LLM 构建、Hook 和精确 typed 工具。
-- `src/miner/runtimes/claude/`：包含 Claude CLI Adapter、策略编译、内置 Langfuse transcript hook、有界子进程解码和精确的 Phase-scoped MCP 工具。
-- `src/miner/anchors/`：负责生成规则扫描和生成后覆盖检查。
-- `src/miner/main.py`：作为 CLI 组合入口，负责运行时选择、工作流执行、组装和持久化。
-
-### LLM 配置
-
-Pydantic AI 适配器保留现有的显式 provider 配置，并复用由 `get_llm()` 返回的进程级模型。
-
-原生 DeepSeek：
+在 `.env` 中配置模型服务。例如：
 
 ```dotenv
 LLM_PROVIDER=deepseek
@@ -219,7 +33,7 @@ LLM_MODEL=deepseek-chat
 DEEPSEEK_API_KEY=...
 ```
 
-OpenAI 官方接口：
+也支持 OpenAI 及兼容 OpenAI 接口的服务：
 
 ```dotenv
 LLM_PROVIDER=openai
@@ -227,7 +41,7 @@ LLM_MODEL=gpt-5.2
 OPENAI_API_KEY=...
 ```
 
-兼容 OpenAI Chat Completions 的接口：
+使用 OpenAI 兼容接口时，还需要设置 `OPENAI_BASE_URL`。
 
 ```dotenv
 LLM_PROVIDER=openai-compatible
@@ -236,136 +50,75 @@ OPENAI_API_KEY=...
 OPENAI_BASE_URL=https://your-endpoint/v1
 ```
 
-只有使用兼容接口时才需要 `OPENAI_BASE_URL`。`LLM_PROVIDER` 和 `LLM_MODEL` 是必填项。
-
-Claude CLI 适配器使用一套独立且刻意收窄的配置：
+如需使用已经完成认证的 Claude CLI，可改用以下配置：
 
 ```dotenv
 MINER_AGENT_RUNTIME=claude-cli
-CLAUDE_CODE_NAME=Claude
 CLAUDE_CODE_MODEL=claude-sonnet-4-6
-CLAUDE_CODE_EFFORT=high
 ```
 
-也可以传入 `--claude-model claude-sonnet-4-6` 和 `--claude-effort high`。`CLAUDE_CODE_NAME` 控制 log 和 trace 中显示的 runtime 名称。VAMINER 使用 `user` setting source、严格的临时 MCP 配置和 fresh session id 调用所选 CLI。启用 tracing 时，每个进程返回后，VAMINER 会在删除 session transcript 及 tool-result 目录之前，通过进程内 Python API 调用内置 Langfuse transcript hook。子进程完整继承父进程环境以沿用鉴权和 provider 选择；环境值绝不写入 log 或 trace。checkout 中的 project/local settings、instructions 和 MCP 配置均不加载。
-
-不再需要在 Claude user scope 安装插件。VAMINER 通过 `CC_LANGFUSE_TRACEPARENT` 传递当前 Phase span，使内置 hook 产生的 Conversational Turn、Generation 和 Tool observation 加入同一个 Miner trace。hook 复用 VAMINER 已完成鉴权的 Langfuse client，并把增量 cursor state 放在本次 invocation 的临时目录。每次临时 Claude invocation 都会显式禁用用户已安装的 Langfuse 插件，避免重复上报。
-
-外部证据和可选链路追踪也通过仓库根目录中不会提交到 Git 的 `.env` 配置：
+如果需要提高 GitHub API 的请求限额，可以选填：
 
 ```dotenv
 GITHUB_TOKEN=...
-
-LANGFUSE_PUBLIC_KEY=...
-LANGFUSE_SECRET_KEY=...
-LANGFUSE_BASE_URL=...
 ```
 
-`GITHUB_TOKEN` 是可选项，用于认证 GitHub API 请求并提高请求限额。
+## 生成规则
 
-Issue Collector 的延迟加载 `web-search` 和 `web-fetch` Capability 使用本地后备实现，不需要搜索服务 API Key。专用的 CVE 和 GitHub 工具仍然是首选证据来源。
-
-#### Agent Turn 预算
-
-每个 Phase 拥有独立的模型 Turn 预算。如需调整，请在仓库根目录的 `.env` 中设置：
-
-```dotenv
-MINER_MAX_TURNS_ISSUE_COLLECTION=50
-MINER_MAX_TURNS_ROOT_CAUSE=50
-MINER_MAX_TURNS_RULE_GENERATION=40
-MINER_MAX_TURNS_PER_ANCHOR=40
-```
-
-Issue Collector 和 Root Cause Analyzer 各自默认拥有 50 Turns 的独立预算。Rule Generator 拥有独立的 40 Turns 父级预算，每个逐锚点 Synthesizer 运行也拥有各自独立的 40 Turns 上限。在两个 Runtime 中，委派的 Synthesizer Turns 都不会消耗正在等待的 Rule Generator 预算。最多并行运行 5 个锚点；运行数量由完整、独立的 Anchor Plan 决定，不再受固定 Anchor 数量限制。
-
-两个 Runtime 都将这些模型 Turn 上限作为请求次数限制，不设置美元预算。VAMiner 不计算、收集或报告金额成本估算；Provider 返回的费用字段会被忽略，只保留请求数和 Token 用量。
-
-#### 工具调用与输出校验
-
-可修正的工具错误会携带诊断返回 Agent，由模型在剩余 Turn 内修改参数，不再设置独立的工具修复次数上限。这包括 schema 错误、路径不存在或越界、regex/glob 错误、用例文件名不合法、Anchor Plan 不合法和 ast-grep query 错误。网络证据源不可用时可以重试或换来源。工具内部 bug、必需 CLI 缺失、硬执行超时和损坏的进程结果仍是致命故障。ast-grep 查询错误保留 stderr；没有查询拒绝诊断的 invalid JSON 属于 runner 故障。
-
-两个 Runtime 使用相同的 Pydantic 模型和确定性 Phase Validator。工具修正、最终结构化输出修正和 child query 验收修正统一使用剩余 Turn，不设独立的修复次数上限。query 验收失败会继续反馈，直到模型提交合格 query、主动禁用 query，或 Turn 耗尽。Claude CLI 按生成的 JSON Schema 输出，再由宿主校验；MCP 工具采用共享错误分类，遇到致命故障会记录并由宿主终止 CLI。Claude 原生 WebSearch/WebFetch 仍由 CLI 管理。完整工具清单、保留限制和测试范围见[工具错误审查](docs/tool-error-review.md)。
-
-#### 代理访问
-
-在 DuckDuckGo 无法直接访问的网络环境中（包括中国大陆的部分网络），请在仓库根目录的 `.env` 中配置标准代理变量：
-
-```dotenv
-HTTP_PROXY=http://127.0.0.1:7890
-HTTPS_PROXY=http://127.0.0.1:7890
-NO_PROXY=localhost,127.0.0.1,::1
-```
-
-不需要其他代理配置。VAMINER 会在创建 HTTP Client 前加载这些变量，并把 HTTPS 代理（未设置时回退到 HTTP 代理）传递给本地网页搜索 Client。`NO_PROXY` 使本机回环地址保持直连。这些变量对整个进程生效，因此模型服务、GitHub、网页搜索和网页抓取请求都可能使用所配置的代理。
-
-如需启用可选的 Langfuse 链路追踪，请同时设置 `LANGFUSE_PUBLIC_KEY` 和 `LANGFUSE_SECRET_KEY`。只有使用自定义 Langfuse 服务时才需要设置 `LANGFUSE_BASE_URL`，否则使用 SDK 默认地址。通用 Miner 限制位于 `src/miner/utils/config.py`；Pydantic 专用模型和上下文压缩设置位于 `src/miner/runtimes/pydantic/config.py`。
-
-每个 mining input 只产生一个名为 `VAS-XXXX Miner @<runtime>` 的 trace；根 input 是原始 typed mining input，根 output 是最终保存的 VAS 规则。Pydantic AI 通过原生 OpenTelemetry 产生 `invoke_agent` → `chat`/`execute_tool` spans。内置 Claude transcript hook 在 VAMINER 自有的 Phase span 下产生 Conversational Turn → Generation/Tool observations；跨进程 synthesis orchestration span 仍由应用创建，以便子 Claude run 继承实时 W3C context。Rich Hook/stream event 只用于 console 和 run-file diagnostics，不再创建重复的 Langfuse observation。
-
-两个 Runtime Adapter 执行同一份 Phase Authority。RCA 通过 typed list/search/read 操作读取 source，只能写入合法的顶层 Case Artifact；Rule Generation 只读 Case Artifact 并调用 synthesis；Synthesizer 只读 scoped evidence 并运行 ast-grep，没有 write、network、shell 或 delegation 工具。RCA cleanup 在纯验收前显式执行，cache load 与最终 VAS 验证绝不修改文件系统。
-
-### 测试
-
-运行聚焦的行为测试：
+### 从 CVE 或 GitHub Issue 生成
 
 ```bash
-uv run pytest
+uv run python -m src.miner.main CVE-2024-XXXX
+uv run python -m src.miner.main https://github.com/owner/repository/issues/123
 ```
 
-## 规则语义
+一次命令可以传入多个问题引用。
 
-- `summary` 是一条通用、规范性的软件安全要求。
-- `scenarios.unsafe` 中的每一项都是独立、完整、由原始问题推导出的缺陷场景。
-- `scenarios.safe` 中的每一项都是独立、完整、能够排除该缺陷的场景，并且优先于表面上的不安全匹配。
-- `anchors` 只匹配缺陷行为中对规则敏感的热点操作，修复行为不作为锚点。
+问题输入可以是 CVE ID、GitHub Issue URL，或能够由已配置证据源解析的其他问题/报告引用。
 
-```json
-{
-  "vas_id": "VAS-0007",
-  "category": "SECURITY",
-  "language": "c",
-  "sources": [],
-  "summary": "Security decisions based on hostnames must use their canonicalized representation.",
-  "scenarios": {
-    "unsafe": [
-      "A security policy lookup compares a raw internationalized hostname with canonical stored entries before hostname normalization."
-    ],
-    "safe": [
-      "The hostname is normalized before every security policy lookup, and each lookup receives the canonical value."
-    ]
-  },
-  "anchors": [
-    {
-      "id": "hostname-policy-check",
-      "behavior_weight": 5,
-      "query_weight": 4,
-      "type": "rule",
-      "query": "rule:\n  any:\n    - pattern: policy_check($HOST)\n    - pattern: project_policy_check($HOST)",
-      "behavior": "Performs a security policy decision using a hostname value.",
-      "inspect_hint": "Trace whether the hostname is normalized before this policy decision."
-    }
-  ]
-}
+### 从示例目录生成
+
+提供一个包含同类缺陷源码示例的目录：
+
+```bash
+uv run python -m src.miner.main --example-suite /path/to/examples
 ```
 
-`behavior_weight` 是 intent 在整个缺陷分析中的重要度：越高表示越与缺陷相关，而不是越容易查询。`query_weight` 对实际 query 的命中使用同一重要度尺度。query 忠实实现 intent 时通常应相等；只有 query 受限、不得不降低语义一致性时才降低它，不能高于 `behavior_weight`。排序时只使用 `query_weight`。文件优先级是不同已匹配锚点的查询权重之和；同一锚点重复匹配只会增加导航位置，不会重复增加分数。每个意图的 `required_cases` 只存在于合成请求中，不属于合成后的锚点或最终 VAS Schema。
+目录可以包含多层子目录。源码文件可以通过文件名、注释、标签或 manifest 区分正确和错误示例。
 
-空 `query` 是禁用锚点标记。禁用锚点仍保留在 VAS 中，以便展示预期检查行为，但永远不会执行，也不会增加排序权重。非空锚点仍接受严格验证。禁用锚点不会放宽“每个生成 Case Artifact 至少被一个达到 `ADMISSION_QUERY_WEIGHT` 的 Anchor 纳入”的要求；缺失 Case Artifact 召回仍然是验证错误。
+生成的规则保存在：
 
-`ADMISSION_QUERY_WEIGHT` 默认设为 2，分别位于供最终验收和 Anchor review 使用的 `src/miner/utils/config.py`，以及可独立部署的 scanner 的 `scripts/config.py`。Plan Schema 和 Validation 错误都会作为可修正的工具反馈返回 Rule Generator。最终 Anchor 验收失败会要求它在原对话中重新规划并调用 synthesis；未准入用例只列 case 名称，不附源码片段或行号。
+```text
+src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
+```
 
-## 锚点质量
+添加 `--use-cache` 可以复用之前运行中仍然有效的结果。
 
-完整的锚点集合以召回为目标，并且各锚点行为互不重复：
+## 扫描代码仓库
 
-- 每个非空锚点至少匹配一个生成用例，并至少匹配一个 RCA component 所在的源码文件；不要求与 component 的精确区间重叠。
-- 每个生成用例都必须被至少一个达到 `ADMISSION_QUERY_WEIGHT` 的锚点真正纳入候选集。
-- 在 bad-span grounding 下，所有 Anchor 均启用时，每个 RCA 声明的缺陷示例源码文件也必须被至少一个达到 `ADMISSION_QUERY_WEIGHT` 的锚点纳入候选集。
-- 每个锚点代表因果链中一个不同且可观察的行为，即使不同锚点的用例覆盖发生重叠。
-- `behavior` 只描述该锚点匹配的局部操作；跨位置关系、漏洞触发条件和检查问题属于 `inspect_hint`。
-- 每个查询以目标 `behavior` 为语义核心。为了减少与兄弟锚点的重叠，可以在一次精度优化中加入所有必要用例和 RCA 位置都支持的局部缺陷相关结构，例如要求目标操作位于 `if` 语句内；仍禁止项目特有约束或完整因果链约束。
-- Synthesizer 通常返回空的 `plan_suggestion`。只有在源码语料匹配精度明显过差且能够保留必要用例召回时，才可简短建议删除、合并或调整 intent；是否在剩余 Turn 内继续调整计划由 Rule Generator 决定。此类建议不能以人为设定的 Anchor 数量上限为理由。
-- 除非结构约束或 API 约束使其对规则敏感，否则拒绝使用泛化的调用、赋值、定义和条件作为锚点。
-- 精度优化用于减少兄弟锚点之间的重叠。无关的源码额外匹配不能单独作为缩窄查询的理由；只有当它们使实际 query 的命中信号更不特异于缺陷时，才在保留召回的前提下降低 `query_weight`。
+将完整的 `vas-scanner` 目录复制到编程 Agent 能识别的 Skill 目录中：
 
-关于 Skill 内部的规则执行和报告流程，请参阅 [`vas-scanner` Skill](src/.vaminer/skills/vas-scanner/SKILL.md)。
+```bash
+mkdir -p /path/to/target-project/.agent/skills
+cp -R src/.vaminer/skills/vas-scanner \
+  /path/to/target-project/.agent/skills/
+```
+
+用编程 Agent 打开目标仓库，并使用生成的规则 ID 调用该 Skill：
+
+```text
+/vas_scanner Run VAS-XXXX on this repository and report potential defects.
+```
+
+扫描报告会写入：
+
+```text
+<target-project>/.vas/VAS-XXXX/run_<timestamp>/report.json
+```
+
+复制 Skill 时请保留 `SKILL.md`、`scripts/` 和 `rules/`，不要只复制规则 JSON 文件。
+
+## 更多信息
+
+- [`vas-scanner` Skill](src/.vaminer/skills/vas-scanner/SKILL.md)
+- [English](README.md)
