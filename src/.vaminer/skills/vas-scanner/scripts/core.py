@@ -477,22 +477,31 @@ def finalize_scan(run_dir: Path) -> dict[str, Any]:
 
 
 def preflight_scan(vas_id: str, repo_path: Path, *, rules_dir: Path = RULES_DIR) -> dict[str, Any]:
+    def stage(message: str) -> None:
+        print(f"[preflight] {message}", file=sys.stderr, flush=True)
+
     checks: list[str] = []
-    if sys.version_info < (3, 12):
-        raise RuntimeError("Python 3.12 or newer is required")
+    stage("checking Python")
+    if sys.version_info < (3, 8):
+        raise RuntimeError("Python 3.8 or newer is required")
     checks.append(f"python {sys.version_info.major}.{sys.version_info.minor}")
+    stage("checking ast-grep")
     binary = resolve_ast_grep(AST_GREP_CLI_PATH, AST_GREP_INSTALL_DIR, install=True)
     checks.append(f"ast-grep {binary}")
+    stage(f"checking rule {vas_id}")
     load_rule(vas_id, rules_dir)
     checks.append(f"rule {vas_id}")
+    stage("checking repository")
     repo_path = repo_path.resolve()
     if not repo_path.is_dir():
         raise FileNotFoundError(f"repository does not exist: {repo_path}")
     checks.append(f"repository {repo_path}")
+    stage("checking workspace")
     vas_dir = repo_path / ".vas"
     vas_dir.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".preflight.", dir=vas_dir)
     os.close(descriptor)
     Path(temporary).unlink(missing_ok=True)
     checks.append(f"writable {vas_dir}")
+    stage("ready")
     return {"status": "ready", "checks": checks, "repository": str(repo_path), "rule_id": vas_id}

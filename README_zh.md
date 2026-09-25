@@ -99,9 +99,10 @@ src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 将完整的 `vas-scanner` 目录复制到编程 Agent 能识别的 Skill 目录中：
 
 ```bash
-mkdir -p /path/to/target-project/.agent/skills
+# codex/opencode/... 配置于 ".agents/skills", 而 claude code 配置于 ".claude/skills"
+mkdir -p /path/to/target-project/.agents/skills
 cp -R src/.vaminer/skills/vas-scanner \
-  /path/to/target-project/.agent/skills/
+  /path/to/target-project/.agents/skills/
 ```
 
 用编程 Agent 打开目标仓库，并使用生成的规则 ID 调用该 Skill：

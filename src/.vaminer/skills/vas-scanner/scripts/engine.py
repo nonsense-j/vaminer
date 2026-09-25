@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from config import AST_GREP_INDEX_URL
+
 
 class AnchorScanError(RuntimeError):
     """Raised when deterministic anchor scanning cannot safely continue."""
@@ -173,25 +175,23 @@ def find_ast_grep(executable: str = "ast-grep") -> str:
     return binary
 
 
-def _managed_ast_grep_candidates(install_dir: Path) -> tuple[Path, ...]:
+def _managed_ast_grep_path(install_dir: Path) -> Path:
     filename = "ast-grep.exe" if sys.platform == "win32" else "ast-grep"
-    return (
-        install_dir / "bin" / filename,
-        install_dir / "Scripts" / filename,
-        install_dir / filename,
-    )
+    return install_dir / filename
 
 
 def _installed_ast_grep(install_dir: Path) -> str | None:
-    for candidate in _managed_ast_grep_candidates(install_dir):
-        if candidate.is_file():
-            return find_ast_grep(str(candidate))
+    candidate = _managed_ast_grep_path(install_dir)
+    if candidate.is_file():
+        return find_ast_grep(str(candidate))
     return None
 
 
-def _pip_install_command(prefix: list[str], install_dir: Path) -> list[str]:
-    return [
-        *prefix,
+def _install_command(install_dir: Path) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
         "install",
         "--disable-pip-version-check",
         "--only-binary=:all:",
@@ -201,39 +201,66 @@ def _pip_install_command(prefix: list[str], install_dir: Path) -> list[str]:
         str(install_dir),
         AST_GREP_CLI_REQUIREMENT,
     ]
+    if AST_GREP_INDEX_URL:
+        command.extend(("--index-url", AST_GREP_INDEX_URL))
+    return command
 
 
 def install_ast_grep(install_dir: Path) -> str:
     install_dir.mkdir(parents=True, exist_ok=True)
-    prefixes = [[sys.executable, "-m", "pip"]]
-    if pip := shutil.which("pip"):
-        prefixes.append([pip])
-    diagnostics: list[str] = []
-    for prefix in prefixes:
-        command = _pip_install_command(prefix, install_dir)
-        try:
-            completed = subprocess.run(
-                command,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                timeout=AST_GREP_INSTALL_TIMEOUT_SECONDS,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            diagnostics.append(f"{' '.join(prefix)}: {exc}")
-            continue
+    command = _install_command(install_dir)
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=AST_GREP_INSTALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        diagnostic = str(exc)
+    else:
         if completed.returncode == 0:
-            binary = _installed_ast_grep(install_dir)
+            binary = _extract_ast_grep_binary(install_dir)
             if binary is not None:
                 return binary
-        detail = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
-        diagnostics.append(f"{' '.join(prefix)}: {detail or f'exit code {completed.returncode}'}")
-    diagnostic = "\n".join(diagnostics)[:AST_GREP_INSTALL_DIAGNOSTIC_CHARS]
+        diagnostic = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
+        if not diagnostic:
+            diagnostic = f"exit code {completed.returncode}"
     raise AnchorExecutionError(
-        f"could not install {AST_GREP_CLI_REQUIREMENT} into {install_dir}: {diagnostic}"
+        f"could not install {AST_GREP_CLI_REQUIREMENT} into {install_dir}: "
+        f"{diagnostic[:AST_GREP_INSTALL_DIAGNOSTIC_CHARS]}"
     )
+
+
+def _extract_ast_grep_binary(install_dir: Path) -> str | None:
+    """Move the installed ast-grep binary to install_dir root and remove all other pip artifacts."""
+
+    target = _managed_ast_grep_path(install_dir)
+    for sub in ("bin", "Scripts"):
+        source = install_dir / sub / target.name
+        if source.is_file():
+            shutil.move(str(source), str(target))
+            if sys.platform != "win32":
+                target.chmod(0o755)
+            _cleanup_pip_artifacts(install_dir)
+            return find_ast_grep(str(target))
+    return None
+
+
+def _cleanup_pip_artifacts(install_dir: Path) -> None:
+    """Remove all files and directories except the bare ast-grep binary at the root."""
+
+    keep = _managed_ast_grep_path(install_dir).name
+    for entry in install_dir.iterdir():
+        if entry.name == keep:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
 
 
 def resolve_ast_grep(

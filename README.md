@@ -99,9 +99,10 @@ Add `--use-cache` to reuse valid results from an earlier run.
 Copy the complete `vas-scanner` directory into a skill directory recognized by your coding agent:
 
 ```bash
-mkdir -p /path/to/target-project/.agent/skills
+# codex/opencode/... lookup ".agents/skills", while claude code lookups ".claude/skills"
+mkdir -p /path/to/target-project/.agents/skills
 cp -R src/.vaminer/skills/vas-scanner \
-  /path/to/target-project/.agent/skills/
+  /path/to/target-project/.agents/skills/
 ```
 
 Open the target repository with the coding agent and invoke the skill with the generated rule ID:
