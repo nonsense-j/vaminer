@@ -26,11 +26,14 @@ def _load_engine() -> ModuleType:
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[_ENGINE_MODULE_NAME] = module
+    sys.path.insert(0, str(ENGINE_PATH.parent))
     try:
         spec.loader.exec_module(module)
     except Exception:
         sys.modules.pop(_ENGINE_MODULE_NAME, None)
         raise
+    finally:
+        sys.path.pop(0)
     return module
 
 
@@ -57,6 +60,7 @@ def scan_anchors(anchors, root, language):
         language,
         ast_grep=ast_grep,
     )
+
 
 __all__ = [
     "ENGINE_PATH",

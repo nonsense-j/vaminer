@@ -5,8 +5,7 @@ from __future__ import annotations
 from functools import cache
 
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.profiles.openai import OpenAIModelProfile
-from pydantic_ai.providers.deepseek import DeepSeekProvider
+from pydantic_ai.profiles.openai import OpenAIModelProfile, OpenAIJsonSchemaTransformer
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from .config import (
@@ -26,10 +25,24 @@ def get_llm() -> OpenAIChatModel:
     if not LLM_MODEL:
         raise RuntimeError("LLM_MODEL is required")
 
-    if LLM_PROVIDER == "deepseek":
-        return OpenAIChatModel(LLM_MODEL, provider=DeepSeekProvider(api_key=DEEPSEEK_API_KEY))
     if LLM_PROVIDER == "openai":
         return OpenAIChatModel(LLM_MODEL, provider=OpenAIProvider(api_key=OPENAI_API_KEY))
+    if LLM_PROVIDER == "deepseek":
+        if not DEEPSEEK_API_KEY:
+            raise RuntimeError("DEEPSEEK_API_KEY is required for deepseek")
+        if (not LLM_MODEL.startswith("deepseek-v4")) and LLM_MODEL != "deepseek-flash":
+            raise RuntimeError(f"Use the latest deepseek model: deepseek-flash or deepseek-v4-pro")
+        return OpenAIChatModel(
+            LLM_MODEL,
+            provider=OpenAIProvider(base_url="https://api.deepseek.com", api_key=DEEPSEEK_API_KEY),
+            profile=OpenAIModelProfile(
+                json_schema_transformer=OpenAIJsonSchemaTransformer,
+                supports_json_object_output=True,
+                openai_chat_thinking_field="reasoning_content",
+                openai_chat_send_back_thinking_parts="field",
+                openai_supports_tool_choice_required=False,
+            ),
+        )
     if LLM_PROVIDER == "openai-compatible":
         if not OPENAI_BASE_URL:
             raise RuntimeError("OPENAI_BASE_URL is required for openai-compatible")

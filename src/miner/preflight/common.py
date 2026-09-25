@@ -34,7 +34,7 @@ def _read_windows_long_paths_enabled() -> bool:
 
 def check_windows_long_paths() -> CheckResult:
     if sys.platform != "win32":
-        return CheckResult.skipped("windows.long-paths", "Windows long-path support is not applicable")
+        return CheckResult.skipped("windows.long-paths", "Windows long-path support is not needed in this os")
 
     try:
         enabled = _read_windows_long_paths_enabled()
@@ -48,10 +48,9 @@ def check_windows_long_paths() -> CheckResult:
     if not enabled:
         return CheckResult.warning(
             "windows.long-paths",
-            "Windows long paths are disabled",
+            "Windows long paths are disabled (needed for `INPUT:example-suite`)",
             detail=(
-                r"Set HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled "
-                "to 1, then restart VAMiner."
+                r"Set HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled to 1, then restart VAMiner."
             ),
         )
     return CheckResult.passed("windows.long-paths", "Windows long paths are enabled")
