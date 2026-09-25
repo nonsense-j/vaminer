@@ -72,9 +72,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mining_inputs.add_argument(
         "--example-suite",
         dest="example_suite",
+        action="append",
+        nargs="+",
         type=Path,
         metavar="DIR",
-        help="Directory containing related good/bad source examples.",
+        help="One or more directories containing related good/bad source examples.",
     )
     parser.add_argument("--use-cache", action="store_true", help="Use valid runtime-scoped cached outputs.")
     parser.add_argument(
@@ -92,6 +94,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         for issue in (part.strip() for part in item.split(","))
         if issue
     ]
+    if args.example_suite is not None:
+        args.example_suite = [suite for suite_group in args.example_suite for suite in suite_group]
     if args.delete_vas_ids is not None:
         if args.example_suite is not None or args.issue_input:
             parser.error("--delete is mutually exclusive with mining inputs")
@@ -153,9 +157,12 @@ async def main(args: argparse.Namespace) -> VASFull | list[VASFull] | None:
         ),
     )
     try:
-        if args.example_suite is not None:
-            return await miner.mine(ExampleSuiteInput(path=args.example_suite))
-        results = [await miner.mine(IssueInput(reference=reference)) for reference in args.issue_input]
+        inputs = (
+            [ExampleSuiteInput(path=path) for path in args.example_suite]
+            if args.example_suite
+            else [IssueInput(reference=reference) for reference in args.issue_input]
+        )
+        results = [await miner.mine(value) for value in inputs]
         return results[0] if len(results) == 1 else results
     finally:
         flush_tracing()

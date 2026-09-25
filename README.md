@@ -72,7 +72,7 @@ uv run python -m src.miner.main --issue CVE-2024-XXXX
 uv run python -m src.miner.main --issue https://github.com/owner/repository/issues/123
 ```
 
-You can pass multiple references after `--issue`; VAMiner processes them one by one and generates a separate rule for each issue.
+For batch runs, you can pass multiple references after `--issue`; VAMiner processes them sequentially.
 
 Issue inputs can be CVE IDs, GitHub Issue URLs, or another issue/report reference that the configured evidence sources can resolve.
 
@@ -84,9 +84,9 @@ Use a directory containing source examples that represent the same defect patter
 uv run python -m src.miner.main --example-suite /path/to/examples
 ```
 
-The directory may contain nested subdirectories. Source files can be accompanied by filenames, comments, labels, or a manifest that distinguishes good and bad examples.
+The directory may contain nested subdirectories. Source files can be accompanied by filenames, comments, labels, or a manifest that distinguishes good and bad examples. For batch runs, you can also pass multiple directories after `--example-suite`; VAMiner processes them sequentially.
 
-The generated rule is saved under:
+Generated rules are saved under:
 
 ```text
 src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json

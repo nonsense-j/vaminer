@@ -72,7 +72,7 @@ uv run python -m src.miner.main --issue CVE-2024-XXXX
 uv run python -m src.miner.main --issue https://github.com/owner/repository/issues/123
 ```
 
-一次命令可以在 `--issue` 后传入多个问题引用；VAMiner 会按顺序逐个处理，并为每个问题分别生成一条规则。
+如需批量处理，也可以在 `--issue` 后传入多个问题引用，VAMiner 会按顺序处理。
 
 问题输入可以是 CVE ID、GitHub Issue URL，或能够由已配置证据源解析的其他问题/报告引用。
 
@@ -84,7 +84,7 @@ uv run python -m src.miner.main --issue https://github.com/owner/repository/issu
 uv run python -m src.miner.main --example-suite /path/to/examples
 ```
 
-目录可以包含多层子目录。源码文件可以通过文件名、注释、标签或 manifest 区分正确和错误示例。
+目录可以包含多层子目录。源码文件可以通过文件名、注释、标签或 manifest 区分正确和错误示例。如需批量处理，也可以在 `--example-suite` 后传入多个目录，VAMiner 会按顺序处理。
 
 生成的规则保存在：
 
