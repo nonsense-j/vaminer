@@ -68,11 +68,11 @@ GITHUB_TOKEN=...
 ### 从 CVE 或 GitHub Issue 生成
 
 ```bash
-uv run python -m src.miner.main CVE-2024-XXXX
-uv run python -m src.miner.main https://github.com/owner/repository/issues/123
+uv run python -m src.miner.main --issue CVE-2024-XXXX
+uv run python -m src.miner.main --issue https://github.com/owner/repository/issues/123
 ```
 
-一次命令可以传入多个问题引用。
+一次命令可以在 `--issue` 后传入多个问题引用；VAMiner 会按顺序逐个处理，并为每个问题分别生成一条规则。
 
 问题输入可以是 CVE ID、GitHub Issue URL，或能够由已配置证据源解析的其他问题/报告引用。
 
@@ -93,6 +93,12 @@ src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 ```
 
 添加 `--use-cache` 可以复用之前运行中仍然有效的结果。
+
+删除生成的规则及其关联产物：
+
+```bash
+uv run python -m src.miner.main --delete VAS-XXXX
+```
 
 ## 扫描代码仓库
 

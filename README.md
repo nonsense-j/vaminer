@@ -68,11 +68,11 @@ GITHUB_TOKEN=...
 ### From a CVE or GitHub Issue
 
 ```bash
-uv run python -m src.miner.main CVE-2024-XXXX
-uv run python -m src.miner.main https://github.com/owner/repository/issues/123
+uv run python -m src.miner.main --issue CVE-2024-XXXX
+uv run python -m src.miner.main --issue https://github.com/owner/repository/issues/123
 ```
 
-You can pass multiple issue references in one command.
+You can pass multiple references after `--issue`; VAMiner processes them one by one and generates a separate rule for each issue.
 
 Issue inputs can be CVE IDs, GitHub Issue URLs, or another issue/report reference that the configured evidence sources can resolve.
 
@@ -93,6 +93,12 @@ src/.vaminer/skills/vas-scanner/rules/VAS-XXXX.json
 ```
 
 Add `--use-cache` to reuse valid results from an earlier run.
+
+To remove a generated rule and its associated artifacts, run:
+
+```bash
+uv run python -m src.miner.main --delete VAS-XXXX
+```
 
 ## Scan a Repository
 

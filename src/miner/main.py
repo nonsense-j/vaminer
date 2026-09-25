@@ -38,8 +38,6 @@ from .utils.log import RuntimeLog
 from .utils.telemetry import flush_tracing
 from .utils.workspace import Workspace
 
-RUNTIME_IDS = ("pydanic-sdk", "claude-cli")
-
 
 def confirm_delete(vas_ids: list[str]) -> bool:
     """Ask for one explicit confirmation before deleting VAS artifacts."""
@@ -55,18 +53,30 @@ def confirm_delete(vas_ids: list[str]) -> bool:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "issue_input",
-        nargs="*",
-        help="Issue input(s), e.g. a CVE ID, GitHub issue URL, or report reference.",
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generate reusable VAS rules from 'issue references' or 'source example suites', "
+            "or delete previously generated rules and their artifacts. Multiple inputs "
+            "are processed sequentially, with one rule generated per input."
+        ),
     )
-    parser.add_argument(
+    mining_inputs = parser.add_mutually_exclusive_group()
+    mining_inputs.add_argument(
+        "--issue",
+        dest="issue_input",
+        action="append",
+        nargs="+",
+        metavar="REFERENCE",
+        help="CVE ID, GitHub issue URL, or report URL/reference.",
+    )
+    mining_inputs.add_argument(
         "--example-suite",
+        dest="example_suite",
         type=Path,
-        default=None,
-        help="Directory of related good/bad examples. Mutually exclusive with issue inputs.",
+        metavar="DIR",
+        help="Directory containing related good/bad source examples.",
     )
+    parser.add_argument("--use-cache", action="store_true", help="Use valid runtime-scoped cached outputs.")
     parser.add_argument(
         "--delete",
         dest="delete_vas_ids",
@@ -74,58 +84,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="VAS_ID",
         help="Delete one or more VAS registrations and their generated artifacts.",
     )
-    parser.add_argument("--use-cache", action="store_true", help="Use valid runtime-scoped cached outputs.")
-    parser.add_argument(
-        "--runtime",
-        choices=RUNTIME_IDS,
-        default=MINER_AGENT_RUNTIME,
-        help="Single Agent Runtime used for the complete mining run.",
-    )
-    parser.add_argument("--workspace-dir", type=Path, default=VAS_WORKSPACE_DIR)
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=MINER_OUTPUT_DIR,
-        help="Root for caches, logs, and reviews.",
-    )
-    parser.add_argument("--rules-dir", type=Path, default=VAS_RULES_DIR)
-
-    claude = parser.add_argument_group("Claude CLI Runtime")
-    claude.add_argument("--claude-command", default=CLAUDE_CODE_COMMAND)
-    claude.add_argument(
-        "--claude-model",
-        default=CLAUDE_CODE_MODEL,
-        help="Claude model name; authentication comes from the Claude CLI user session.",
-    )
-    claude.add_argument(
-        "--claude-effort",
-        choices=("low", "medium", "high", "xhigh", "max"),
-        default=CLAUDE_CODE_EFFORT,
-    )
-    claude.add_argument("--claude-timeout-seconds", type=float, default=CLAUDE_CODE_TIMEOUT_SECONDS)
-    claude.add_argument("--claude-max-output-bytes", type=int, default=CLAUDE_CODE_MAX_OUTPUT_BYTES)
     args = parser.parse_args(argv)
     args.issue_input = [
         issue
-        for item in args.issue_input
+        for item_group in (args.issue_input or [])
+        for item in item_group
         for issue in (part.strip() for part in item.split(","))
         if issue
     ]
-    if args.example_suite is not None and args.issue_input:
-        parser.error("--example-suite is mutually exclusive with positional issue inputs")
     if args.delete_vas_ids is not None:
         if args.example_suite is not None or args.issue_input:
             parser.error("--delete is mutually exclusive with mining inputs")
         args.delete_vas_ids = list(dict.fromkeys(args.delete_vas_ids))
         return args
     if args.example_suite is None and not args.issue_input:
-        parser.error("provide at least one issue input or --example-suite PATH")
+        parser.error("provide --issue REFERENCE, --example-suite DIR, or --delete VAS_ID")
     return args
 
 
-def make_runtime(args: argparse.Namespace) -> AgentRuntime:
+def make_runtime() -> AgentRuntime:
     runtime_log = RuntimeLog()
-    if args.runtime == "pydanic-sdk":
+    if MINER_AGENT_RUNTIME == "pydanic-sdk":
         from .runtimes.pydantic.hooks import make_cli_hooks
         from .runtimes.pydantic.runtime import PydanticAIRuntime
 
@@ -134,11 +113,11 @@ def make_runtime(args: argparse.Namespace) -> AgentRuntime:
 
     return ClaudeCodeRuntime(
         ClaudeCodeConfig(
-            executable=args.claude_command,
-            model=args.claude_model,
-            effort=args.claude_effort,
-            default_timeout_seconds=args.claude_timeout_seconds,
-            max_stdout_bytes=args.claude_max_output_bytes,
+            executable=CLAUDE_CODE_COMMAND,
+            model=CLAUDE_CODE_MODEL,
+            effort=CLAUDE_CODE_EFFORT,
+            default_timeout_seconds=CLAUDE_CODE_TIMEOUT_SECONDS,
+            max_stdout_bytes=CLAUDE_CODE_MAX_OUTPUT_BYTES,
         ),
         runtime_log=runtime_log,
     )
@@ -151,9 +130,9 @@ async def main(args: argparse.Namespace) -> VASFull | list[VASFull] | None:
             return None
         results = Workspace.delete_vas_many(
             args.delete_vas_ids,
-            base_dir=args.workspace_dir,
-            output_root=args.output_dir,
-            rules_dir=args.rules_dir,
+            base_dir=VAS_WORKSPACE_DIR,
+            output_root=MINER_OUTPUT_DIR,
+            rules_dir=VAS_RULES_DIR,
         )
         deleted = [vas_id for vas_id, removed in results.items() if removed]
         missing = [vas_id for vas_id, removed in results.items() if not removed]
@@ -163,14 +142,14 @@ async def main(args: argparse.Namespace) -> VASFull | list[VASFull] | None:
             print(f"VAS rules not found: {', '.join(missing)}")
         return None
 
-    runtime = make_runtime(args)
+    runtime = make_runtime()
     miner = VAMiner(
         runtime,
         options=WorkflowOptions(
             use_cache=args.use_cache,
-            workspace_dir=args.workspace_dir,
-            output_dir=args.output_dir,
-            rules_dir=args.rules_dir,
+            workspace_dir=VAS_WORKSPACE_DIR,
+            output_dir=MINER_OUTPUT_DIR,
+            rules_dir=VAS_RULES_DIR,
         ),
     )
     try:
